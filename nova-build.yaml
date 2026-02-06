@@ -1,0 +1,18 @@
+# =============================================================================
+# Nova KMS - Build Configuration
+# =============================================================================
+
+name: "nova-kms"
+version: "1.0.0"
+description: "Distributed Key Management Service for Nova Platform"
+
+build:
+  context: "./enclave"
+  dockerfile: "Dockerfile"
+
+enclave:
+  config: "enclaver.yaml"
+
+chain:
+  network: "base-sepolia"
+  chain_id: 84532

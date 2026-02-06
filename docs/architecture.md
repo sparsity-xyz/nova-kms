@@ -2,7 +2,7 @@
 
 ## Overview
 
-Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. KMS node membership is tracked on-chain by a dedicated **KMSRegistry** contract, but node health is determined by clients via live probes and RA-TLS handshakes. Communication is secured via **RA-TLS** (Remote Attestation TLS).
+Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. KMS operator membership is tracked on-chain by a dedicated **KMSRegistry** contract that receives operator callbacks from NovaAppRegistry. **KMS nodes do NOT submit any on-chain transactions** — clients and KMS nodes discover peers by querying `KMSRegistry.getOperators()` then looking up instance details from `NovaAppRegistry.getInstanceByWallet()`. Node health is determined by clients via live probes and RA-TLS handshakes. Communication is secured via **RA-TLS** (Remote Attestation TLS).
 
 ```mermaid
 graph TB
@@ -31,12 +31,10 @@ graph TB
     KMS2 <-->|RA-TLS Sync| KMS3
     KMS1 <-->|RA-TLS Sync| KMS3
     
-    KMS1 -->|Register Node| KMSContract
-    KMS2 -->|Register Node| KMSContract
-    KMS3 -->|Register Node| KMSContract
-    
+    Registry -->|addOperator / removeOperator| KMSContract
+    KMS1 -->|Query Operators| KMSContract
     KMS1 -->|Verify Instance + App Status| Registry
-    KMSContract -->|Node List| KMS1
+    KMSContract -->|Operator List| KMS1
 ```
 
 ---
@@ -138,68 +136,68 @@ Operational note: NovaAppRegistry is **UUPS upgradeable**; always interact with 
 
 > Note: `appId` is a **uint256 assigned by NovaAppRegistry**, not a contract address. If an app uses an on-chain contract, it is referenced via the optional `dappContract` field.
 
-#### 1.2.2 KMSRegistry (KMS Node Registry)
+#### 1.2.2 KMSRegistry (Operator List)
 
-A standalone smart contract for managing KMS node registration.
+A standalone smart contract implementing **`INovaAppInterface`** that maintains a pure operator set managed by NovaAppRegistry callbacks. **No KMSNode struct, no node self-registration, no on-chain transactions from KMS nodes.**
+
+**INovaAppInterface Integration:**
+
+```solidity
+interface INovaAppInterface {
+    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
+    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
+    function setNovaAppRegistry(address registry) external;
+    function novaAppRegistry() external view returns (address);
+}
+```
+
+**Operator Lifecycle:**
+
+1. **`addOperator`** — Called by NovaAppRegistry when a TEE instance registers for the KMS app. Adds the wallet to the operator set. Validates `appId == kmsAppId`. Idempotent.
+2. **`removeOperator`** — Called by NovaAppRegistry when instance stops/fails. Removes from operator set using O(1) swap-and-pop. Idempotent.
+
+**Discovery Pattern (off-chain):**
+
+Clients and KMS nodes discover peers by:
+1. Querying `KMSRegistry.getOperators()` → list of operator addresses
+2. For each operator, querying `NovaAppRegistry.getInstanceByWallet(operator)` → `instanceUrl`, `teePubkey`, `teeWalletAddress`, `zkVerified`, `status`
 
 ```solidity
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.33;
 
-import {INovaAppRegistry} from "./interfaces/INovaAppRegistry.sol";
+import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
 
-/**
- * @title KMSRegistry
- * @notice Registry for KMS nodes in the Nova platform
- * @dev KMS nodes must be registered as NovaAppRegistry instances under the kmsAppId.
- */
-contract KMSRegistry {
-    struct KMSNode {
-        uint256 nodeId;
-        address teeWalletAddress;
-        bytes teePubkey;
-        string nodeUrl;
-        bool isActive;
-    }
-
-    INovaAppRegistry public novaAppRegistry;
+contract KMSRegistry is INovaAppInterface {
+    address private _novaAppRegistryAddr;
     uint256 public kmsAppId;
-    mapping(uint256 => KMSNode) public nodes;
-    mapping(address => uint256) public nodeIdByWallet;
-    uint256 public nextNodeId = 1;
+    address public admin;
 
-    event NodeRegistered(uint256 indexed nodeId, address indexed teeWallet, string nodeUrl);
-    event NodeDeactivated(uint256 indexed nodeId);
+    // Operator set (managed by addOperator/removeOperator callbacks)
+    mapping(address => bool) private _isOperator;
+    address[] private _operatorList;
+    mapping(address => uint256) private _operatorIndex;
 
-    constructor(address _novaAppRegistry, uint256 _kmsAppId) {
-        novaAppRegistry = INovaAppRegistry(_novaAppRegistry);
-        kmsAppId = _kmsAppId;
-    }
+    // INovaAppInterface
+    function setNovaAppRegistry(address registry) external onlyAdmin;
+    function novaAppRegistry() external view returns (address);
+    function addOperator(address, uint256, uint256, uint256) external onlyNovaAppRegistry;
+    function removeOperator(address, uint256, uint256, uint256) external onlyNovaAppRegistry;
 
-    function registerNode(string calldata nodeUrl) external returns (uint256 nodeId) {
-        // 1) Lookup instance by tee wallet (msg.sender)
-        // 2) Require instance.appId == kmsAppId
-        // 3) Require instance.status == ACTIVE and instance.zkVerified == true
-        // 4) Require app.status == ACTIVE and version.status in {ENROLLED, DEPRECATED}
-        // 5) Record node (teePubkey from instance, nodeUrl)
-    }
-
-    function deactivateNode(uint256 nodeId) external {
-        // Registry admin or node wallet can deactivate (emergency or clean shutdown).
-    }
-
-    function getNode(uint256 nodeId) external view returns (KMSNode memory);
-    function getNodeByWallet(address teeWalletAddress) external view returns (KMSNode memory);
-
-    function listNodes(uint256 cursor, uint256 limit) external view returns (KMSNode[] memory, uint256 nextCursor);
+    // Views
+    function isOperator(address) external view returns (bool);
+    function operatorCount() external view returns (uint256);
+    function operatorAt(uint256 index) external view returns (address);
+    function getOperators() external view returns (address[] memory);
 }
 ```
 
 Interaction summary:
-- KMSRegistry is read-only to NovaAppRegistry and uses `getInstanceByWallet`, `getApp`, and `getVersion` to validate KMS nodes.
-- A KMS node is considered healthy if it is `isActive` on-chain and passes client-side liveness probes.
-- Node enumeration is paginated to avoid unbounded loops. Off-chain clients can filter for health using probes.
-- Assumption: the `msg.sender` for KMSRegistry transactions is the KMS node TEE wallet registered in NovaAppRegistry. If KMS nodes cannot sign transactions directly, add a meta-tx relayer layer and verify signed intent in KMSRegistry.
+- **NovaAppRegistry → KMSRegistry**: `addOperator`/`removeOperator` callbacks manage the operator set. The `dappContract` field of the KMS app on NovaAppRegistry must point to the KMSRegistry address.
+- **KMSRegistry does NOT read from NovaAppRegistry** — it only stores addresses.
+- **Clients/KMS nodes** query `getOperators()` then look up instance details from NovaAppRegistry.
+- KMS nodes do NOT submit any on-chain transactions. All on-chain state is managed by NovaAppRegistry callbacks.
+- A KMS node is considered healthy if it is an operator on-chain and passes client-side liveness probes.
 
 ---
 
@@ -222,17 +220,23 @@ sequenceDiagram
 
     Note over AR: Verify ZK proof and register instance
     ZKP->>AR: registerInstance(appId=kmsAppId, versionId, instanceUrl, proof)
+    AR->>KC: addOperator(teeWallet, appId, versionId, instanceId)
+    Note over KC: Wallet added to operator set
     AR-->>KMS: instanceId (zkVerified = true)
     
-    KMS->>KC: registerNode(url)
-    Note over KC: Verify msg.sender via NovaAppRegistry (instance + version + app)
-    KC-->>KMS: nodeId
+    Note over KMS: Node is now discoverable (no on-chain tx needed)
+    KMS->>KC: getOperators() [read-only]
+    KC-->>KMS: operator addresses
+    KMS->>AR: getInstanceByWallet(operator) [for each peer]
+    AR-->>KMS: instanceUrl, teePubkey, status
     
-    Note over KMS: No on-chain heartbeat required
+    Note over AR: On instance stop/fail:
+    AR->>KC: removeOperator(teeWallet, ...)
+    Note over KC: Operator removed from set
 ```
 
 > [!IMPORTANT]
-> **Security Mechanism**: `registerNode` only succeeds if the node is a **zkVerified, ACTIVE instance** of the KMS app in NovaAppRegistry. This prevents unverified programs from registering as KMS nodes.
+> **Security Mechanism**: The `addOperator` callback validates `appId == kmsAppId`, ensuring only verified KMS instances are added to the operator set. KMS nodes **never submit on-chain transactions** — all state management flows through NovaAppRegistry callbacks. When NovaAppRegistry calls `removeOperator`, the operator is removed from the set.
 
 ### 2.2 App Request Flow (RA-TLS + App Registry)
 
@@ -247,8 +251,10 @@ sequenceDiagram
     App->>App: Generate Ephemeral Key Pair
     App->>App: Get RA Quote via Odyn (binding sub_pubkey)
     
-    App->>KC: listNodes(cursor, limit)
-    KC-->>App: KMSNode[]
+    App->>KC: getOperators()
+    KC-->>App: address[]
+    App->>AR: getInstanceByWallet(operator) [for each]
+    AR-->>App: instanceUrl, teePubkey, status
     App->>App: Probe nodes (/health or RA-TLS handshake)
     
     App->>KMS: RA-TLS Handshake (Certificate with Quote)
@@ -327,8 +333,8 @@ sequenceDiagram
     Note over KMS1: Data update occurs
     KMS1->>KMS1: Update local data with Vector Clock
     
-    KMS1->>KC: listNodes(cursor, limit)
-    KC-->>KMS1: [node2, node3]
+    KMS1->>KC: getOperators()
+    KC-->>KMS1: [operator2, operator3]
     
     par Async Sync
         KMS1->>KMS2: RA-TLS Handshake
@@ -352,7 +358,7 @@ sequenceDiagram
 | `/kms/sign_cert`| POST | **Sign certificate** (CA) | RA-TLS + NovaAppRegistry verification |
 | `/kms/data` | GET | Get/Put/Delete KV data | RA-TLS + NovaAppRegistry verification |
 | `/sync` | POST | Receive sync event from other KMS nodes | RA-TLS (KMS Node) |
-| `/nodes` | GET | Get list of nodes (paginated) | None |
+| `/nodes` | GET | Get list of KMS operators | None |
 
 ### 3.2 Status Endpoint Response
 
@@ -361,17 +367,15 @@ The `/status` endpoint returns a merged view of local health and on-chain cluste
 ```json
 {
     "node": {
-        "node_id": 7,
         "tee_wallet": "0x1234...",
         "node_url": "https://kms-7.nova",
-        "is_active": true,
-        "last_probe_ms": 1738855800
+        "is_operator": true,
+        "master_secret_initialized": true
     },
     "cluster": {
         "kms_app_id": 9001,
         "registry_address": "0xabc...",
-        "total_nodes": 12,
-        "healthy_nodes": 10
+        "total_operators": 12
     }
 }
 ```
@@ -419,7 +423,7 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 
 ### 4.1 Membership and Sync Strategy
 
-- **Membership source**: nodes query `KMSRegistry.listNodes(cursor, limit)` and filter for healthy peers using probes.
+- **Membership source**: nodes query `KMSRegistry.getOperators()` → then `NovaAppRegistry.getInstanceByWallet()` for each operator, and filter for healthy peers using probes.
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
 - **Security**: all sync messages use mutual RA-TLS and validate the sender is a healthy, registered KMS node.
@@ -509,13 +513,12 @@ class DataRecord:
 
 ```python
 async def verify_sync_request(request: SyncRequest, client_attestation: Attestation) -> bool:
-    """Verify that sync request comes from a valid KMS node."""
+    """Verify that sync request comes from a valid KMS operator."""
     # 1. Extract KMS Node wallet from RA-TLS Client Attestation
     tee_wallet = client_attestation.get_extension("TEE_WALLET")
     
-    # 2. Check if it's a registered node and passes a liveness probe
-    node = await kms_registry.getNodeByWallet(tee_wallet)
-    return node.isActive and await probe_node(node.nodeUrl)
+    # 2. Check if it's a registered operator
+    return kms_registry.is_operator(tee_wallet)
 ```
 
 ---
@@ -570,10 +573,11 @@ dkms/
    - Trigger GitHub Actions build
    - Deploy to Nitro Enclave
 
-4. **Verify node registration**
+4. **Verify operator registration**
    - ZKP service automatically generates proof
    - NovaAppRegistry verifies `registerInstance(...)` (zkVerified = true)
-   - KMS node calls `registerNode` to complete registration
+   - NovaAppRegistry calls `KMSRegistry.addOperator()` → node is discoverable
+   - KMS node does NOT need any on-chain transactions
 
 ---
 

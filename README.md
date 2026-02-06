@@ -1,1 +1,140 @@
-# nova-kms
+# Nova KMS
+
+Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclave and provides **key derivation**, **certificate signing**, and an **in-memory KV store** to other Nova applications — all secured by **RA-TLS** and on-chain **App Registry** verification.
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Key Derivation (KDF)** | HKDF-SHA256 from a shared cluster master secret, partitioned by app ID |
+| **Certificate Authority** | Sign CSRs with a deterministic CA rooted in the master secret |
+| **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction |
+| **Distributed Sync** | Delta + snapshot sync across KMS nodes (eventual consistency, LWW) |
+| **RA-TLS Auth** | Mutual attestation; app identity verified via NovaAppRegistry |
+| **On-Chain Membership** | KMSRegistry contract tracks nodes; client probes determine health |
+
+## Architecture
+
+```
+Nova Apps ──RA-TLS──▶ KMS Cluster ──sync──▶ KMS Cluster
+                         │                      │
+                    KMSRegistry ◀──── NovaAppRegistry
+                    (membership)       (app identity)
+```
+
+See [docs/architecture.md](docs/architecture.md) for the full design.
+
+## Quick Start
+
+### Local Development
+
+```bash
+# 1. Setup Python environment
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r enclave/requirements.txt
+
+# 2. Edit config
+#    → enclave/config.py (set contract addresses)
+
+# 3. Run
+cd enclave && python app.py
+# Server at http://localhost:8000
+
+# 4. Test
+curl http://localhost:8000/health
+curl http://localhost:8000/status
+```
+
+### Run Tests
+
+```bash
+# Python tests
+pip install pytest httpx
+pytest tests/ -v
+
+# Solidity tests
+cd contracts && forge test -vvv
+```
+
+### Deploy Contracts
+
+```bash
+cd contracts
+export NOVA_APP_REGISTRY_PROXY=0x...
+export KMS_APP_ID=...
+export PRIVATE_KEY=0x...
+
+forge script script/DeployKMSRegistry.s.sol \
+  --rpc-url https://sepolia.base.org --broadcast
+```
+
+## API Reference
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | None | Health check |
+| `/status` | GET | None | Node + cluster status |
+| `/nodes` | GET | None | Paginated KMS node list |
+| `/kms/derive` | POST | RA-TLS | Derive application key |
+| `/kms/sign_cert` | POST | RA-TLS | Sign CSR with KMS CA |
+| `/kms/data` | GET/PUT/DELETE | RA-TLS | App-scoped KV store |
+| `/sync` | POST | KMS Peer | Inter-node synchronization |
+
+### Example: Derive a Key
+
+```bash
+curl -X POST https://kms.example.com/kms/derive \
+  -H "Content-Type: application/json" \
+  -d '{"path": "disk_encryption", "context": "v1"}'
+```
+
+Response:
+```json
+{
+  "app_id": 42,
+  "path": "disk_encryption",
+  "key": "base64_encoded_32_byte_key",
+  "length": 32
+}
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | System design, contracts, auth flows, sync protocol |
+| [Development](docs/development.md) | Local setup, module overview, environment variables |
+| [Testing](docs/testing.md) | Test suites, running tests, CI integration |
+| [Deployment](docs/deployment.md) | Production deployment, multi-node, monitoring |
+
+## Project Structure
+
+```
+nova-kms/
+├── contracts/           # Solidity (KMSRegistry + tests)
+│   ├── src/
+│   ├── test/
+│   └── script/
+├── enclave/             # Python KMS application
+│   ├── app.py           # FastAPI entry point
+│   ├── auth.py          # RA-TLS + registry verification
+│   ├── chain.py         # Blockchain RPC helpers
+│   ├── config.py        # Configuration constants
+│   ├── data_store.py    # In-memory KV store
+│   ├── kdf.py           # HKDF + CA
+│   ├── kms_registry.py  # KMSRegistry wrapper
+│   ├── nova_registry.py # NovaAppRegistry wrapper
+│   ├── odyn.py          # TEE SDK (DO NOT MODIFY)
+│   ├── probe.py         # Liveness probing
+│   ├── routes.py        # API endpoints
+│   ├── sync_manager.py  # Peer synchronization
+│   └── Dockerfile
+├── tests/               # Python tests
+├── docs/                # Documentation
+├── enclaver.yaml        # Enclaver config
+└── nova-build.yaml      # Build config
+```
+
+## License
+
+Apache-2.0
