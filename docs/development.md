@@ -36,7 +36,7 @@ nova-kms/
 │   ├── chain.py                  # Blockchain / RPC helpers
 │   ├── nova_registry.py          # NovaAppRegistry read wrapper
 │   ├── kms_registry.py           # KMSRegistry read-only wrapper
-│   ├── auth.py                   # App authorization via RA-TLS + registry
+│   ├── auth.py                   # App authorization via Nitro attestation + registry
 │   ├── kdf.py                    # HKDF key derivation + CA
 │   ├── data_store.py             # In-memory KV store (vector clocks)
 │   ├── sync_manager.py           # Peer synchronization
@@ -130,7 +130,7 @@ curl http://localhost:8000/kms/data/test \
   -H "x-tee-wallet: 0x1234567890abcdef1234567890abcdef12345678"
 ```
 
-> **Note:** In development mode, auth headers (`x-tee-wallet`, `x-tee-measurement`) substitute for RA-TLS attestation. The authorizer will attempt to query the on-chain registry, so **set contract addresses** or mock them for full local testing — or use **Simulation Mode** (see below).
+> **Note:** In development mode, auth headers (`x-tee-wallet`, `x-tee-measurement`) substitute for production Nitro attestation. The authorizer will attempt to query the on-chain registry, so **set contract addresses** or mock them for full local testing — or use **Simulation Mode** (see below).
 
 ---
 
@@ -283,7 +283,7 @@ make deploy
 Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 - `eth_address()` — TEE wallet address
 - `sign_tx(tx)` — sign EIP-1559 transactions
-- `get_attestation()` — RA-TLS attestation document
+- `get_attestation()` — Nitro attestation document
 - `get_random_bytes()` — hardware RNG
 - `s3_put/get/delete` — persistent storage (not used by KMS)
 

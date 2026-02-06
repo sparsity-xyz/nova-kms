@@ -68,7 +68,15 @@ class KMSRegistryClient:
     # ------------------------------------------------------------------
 
     def _call(self, data: str) -> bytes:
-        return get_chain().eth_call(self.address, data)
+        """
+        Low-level helper for read-only registry calls.
+
+        Uses eth_call_finalized to reduce the risk of observing a transient
+        operator set during short-lived chain reorgs. Falls back to latest
+        if the RPC node cannot serve historical state.
+        """
+        chain = get_chain()
+        return chain.eth_call_finalized(self.address, data)
 
     # ------------------------------------------------------------------
     # Views

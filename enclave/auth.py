@@ -9,8 +9,8 @@ NovaAppRegistry on-chain data.
 
 Security modes:
   - **Production** (REQUIRE_RATLS=True): attestation MUST come from a
-    validated TLS channel (RA-TLS cert extensions).  Header-based fallback
-    is disabled.  Measurement verification is mandatory.
+    verified Nitro attestation document. Proxy-injected headers are not trusted.
+    Measurement verification is mandatory.
   - **Dev / Sim** (REQUIRE_RATLS=False): headers X-Tee-Wallet and
     X-Tee-Measurement are accepted for convenience.  A warning is logged.
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 import config
 from nova_registry import (
@@ -61,6 +61,64 @@ class ClientAttestation:
     measurement: Optional[bytes]     # PCR / code measurement (bytes32)
 
 
+class _NonceStore:
+    """
+    In-enclave nonce cache for challenge-response.
+
+    - KMS issues one-time nonces via a public endpoint.
+    - Clients must include the issued nonce inside the Nitro attestation
+      (payload['nonce']) when calling authenticated endpoints.
+    - Nonces are single-use and expire after a short TTL to prevent replay.
+    """
+
+    def __init__(self, ttl_seconds: int = 120):
+        self._ttl = ttl_seconds
+        self._nonces: Dict[bytes, float] = {}
+
+    def issue(self) -> bytes:
+        import os
+        import time
+
+        nonce = os.urandom(16)
+        now = time.time()
+        self._nonces[nonce] = now + self._ttl
+        return nonce
+
+    def validate_and_consume(self, nonce: Optional[bytes]) -> bool:
+        import time
+
+        if not nonce:
+            return False
+        now = time.time()
+        # Fast path
+        exp = self._nonces.pop(nonce, None)
+        if exp is None:
+            return False
+        if exp < now:
+            return False
+        # Opportunistic cleanup of expired entries
+        if len(self._nonces) > 1024:
+            self._purge(now=now)
+        return True
+
+    def _purge(self, now: Optional[float] = None) -> None:
+        import time
+
+        if now is None:
+            now = time.time()
+        self._nonces = {n: exp for n, exp in self._nonces.items() if exp >= now}
+
+
+_nonce_store = _NonceStore(ttl_seconds=getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120))
+
+
+def issue_attestation_challenge() -> bytes:
+    """
+    Issue a fresh one-time nonce for Nitro attestation challenge-response.
+    """
+    return _nonce_store.issue()
+
+
 def attestation_from_headers(headers: dict) -> ClientAttestation:
     """
     Build a ClientAttestation from HTTP headers (dev / test mode).
@@ -86,38 +144,49 @@ def attestation_from_headers(headers: dict) -> ClientAttestation:
 
 def attestation_from_tls(request) -> Optional[ClientAttestation]:
     """
-    Extract attestation from the mutual TLS client certificate.
+    Extract attestation identity in production mode.
 
-    In a Nitro Enclave with RA-TLS, the client certificate contains custom
-    X.509 extensions with the attestation document.  This function extracts
-    the TEE wallet address and code measurement from those extensions.
+    IMPORTANT: We do NOT trust any external TLS terminator / proxy.
+    Therefore we do not accept "verified" headers injected by intermediaries.
 
-    Parameters
-    ----------
-    request : fastapi.Request
-        The incoming HTTP request.  The TLS layer must have already validated
-        the client certificate and made it available.
+    Current implementation requires the caller to provide an AWS Nitro attestation
+    document via the HTTP header configured by config.ATTESTATION_HEADER_NAME.
 
-    Returns
-    -------
-    ClientAttestation or None if no client cert is available.
+    This keeps the trust boundary inside the enclave app:
+    - the attestation document is verified against the pinned AWS Nitro Root-G1;
+    - only signed user_data fields are used to extract tee_wallet and measurement.
+
+    Returns ClientAttestation or None if not present.
     """
-    # In production, the TLS terminator (e.g. Caddy with RA-TLS) validates
-    # the attestation document and forwards verified fields as headers:
-    #   X-Verified-Tee-Wallet, X-Verified-Tee-Measurement
-    # These headers are ONLY trusted when set by the TLS terminator, never
-    # by the external client.
-    verified_wallet = request.headers.get("x-verified-tee-wallet", "")
-    verified_measurement = request.headers.get("x-verified-tee-measurement", "")
-
-    if not verified_wallet:
+    header_name = getattr(config, "ATTESTATION_HEADER_NAME", "x-nitro-attestation")
+    raw = request.headers.get(header_name, "")
+    if not raw:
         return None
 
-    measurement = None
-    if verified_measurement:
-        measurement = bytes.fromhex(verified_measurement.replace("0x", ""))
+    try:
+        from attestation.nitro import decode_attestation_header_value, verify_and_extract_identity
 
-    return ClientAttestation(tee_wallet=verified_wallet, measurement=measurement)
+        # Load pinned root cert from local filesystem (bundled in the image)
+        root_path = getattr(config, "NITRO_ROOT_CERT_PATH", "attestation/root.pem")
+        with open(root_path, "rb") as f:
+            pinned_root_pem = f.read()
+
+        att_doc = decode_attestation_header_value(raw)
+        ident = verify_and_extract_identity(
+            attestation_doc=att_doc,
+            pinned_root_pem=pinned_root_pem,
+            max_age_seconds=getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120),
+        )
+        # Enforce challenge-response: attestation nonce must match an issued one.
+        if not _nonce_store.validate_and_consume(ident.nonce):
+            raise RuntimeError("Invalid or expired attestation nonce")
+        return ClientAttestation(
+            tee_wallet=ident.tee_wallet,
+            measurement=ident.code_measurement,
+        )
+    except Exception as exc:
+        logger.warning(f"Invalid Nitro attestation header: {exc}")
+        raise RuntimeError("Invalid or unverifiable attestation document")
 
 
 def get_attestation(request, headers: dict) -> ClientAttestation:

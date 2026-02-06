@@ -17,10 +17,10 @@ This guide covers deploying Nova KMS to production on the Nova Platform (AWS Nit
 │  │  └──────────┘  └────────────┘  └─────────┘ │         │
 │  └─────────────────────────────────────────────┘         │
 │                                                          │
-│  ┌─────────────┐    ┌──────────────────┐                 │
-│  │ Caddy/Proxy │    │ ZKP Verification │                 │
-│  │ TLS :443    │    │ Service          │                 │
-│  └─────────────┘    └──────────────────┘                 │
+│  ┌──────────────────┐                                    │
+│  │ ZKP Verification │                                    │
+│  │ Service          │                                    │
+│  └──────────────────┘                                    │
 └──────────────────────────────────────────────────────────┘
          │
     Base Sepolia
@@ -131,7 +131,7 @@ The Nova Platform handles:
 1. Pushing the Docker image to the enclave
 2. Running enclaver with the `enclaver.yaml` configuration
 3. Setting up the vsock proxy for network access
-4. Configuring TLS termination
+4. Exposing the enclave ingress port(s)
 
 ### 4.3 Automatic Startup Sequence
 
@@ -256,6 +256,6 @@ cast send <KMS_REGISTRY_ADDRESS> \
 - [ ] `NODE_URL` set to the correct public HTTPS endpoint
 - [ ] All nodes running the same code measurement (version)
 - [ ] ZK verification enabled for the KMS app in NovaAppRegistry
-- [ ] TLS termination configured (Caddy or load balancer)
+- [ ] No trusted proxies in front of the enclave app (attestation is verified in-app)
 - [ ] Firewall allows egress to Base Sepolia RPC
 - [ ] At least 2 nodes deployed for redundancy

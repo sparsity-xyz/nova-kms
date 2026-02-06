@@ -2,7 +2,7 @@
 
 ## Overview
 
-Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. KMS operator membership is tracked on-chain by a dedicated **KMSRegistry** contract that receives operator callbacks from NovaAppRegistry. **KMS nodes do NOT submit any on-chain transactions** — clients and KMS nodes discover peers by querying `KMSRegistry.getOperators()` then looking up instance details from `NovaAppRegistry.getInstanceByWallet()`. Node health is determined by clients via live probes and RA-TLS handshakes. Communication is secured via **RA-TLS** (Remote Attestation TLS).
+Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. KMS operator membership is tracked on-chain by a dedicated **KMSRegistry** contract that receives operator callbacks from NovaAppRegistry. **KMS nodes do NOT submit any on-chain transactions** — clients and KMS nodes discover peers by querying `KMSRegistry.getOperators()` then looking up instance details from `NovaAppRegistry.getInstanceByWallet()`. Node health is determined by clients via live probes. Authentication is based on **AWS Nitro attestation documents verified inside the enclave app** (no trusted proxies/terminators).
 
 ```mermaid
 graph TB
@@ -23,13 +23,13 @@ graph TB
         KMSContract[KMSRegistry<br/>KMS Node Registry]
     end
     
-    App1 -->|RA-TLS / Instance Wallet| KMS1
-    App2 -->|RA-TLS / Instance Wallet| KMS2
-    App3 -->|RA-TLS / Instance Wallet| KMS1
+    App1 -->|Nitro Attestation / Instance Wallet| KMS1
+    App2 -->|Nitro Attestation / Instance Wallet| KMS2
+    App3 -->|Nitro Attestation / Instance Wallet| KMS1
     
-    KMS1 <-->|RA-TLS Sync| KMS2
-    KMS2 <-->|RA-TLS Sync| KMS3
-    KMS1 <-->|RA-TLS Sync| KMS3
+    KMS1 <-->|Attested Sync| KMS2
+    KMS2 <-->|Attested Sync| KMS3
+    KMS1 <-->|Attested Sync| KMS3
     
     Registry -->|addOperator / removeOperator| KMSContract
     KMS1 -->|Query Operators| KMSContract
@@ -53,8 +53,8 @@ A Python/Flask application running inside AWS Nitro Enclave, packaged and deploy
 | **Key Derivation (KDF)** | Derive application-specific keys from cluster-wide master secret |
 | **CA / Cert Signing** | Issue TLS certificates for apps rooted in KMS trust anchor |
 | Request Verification | Verify App identity via NovaAppRegistry (App -> Version -> Instance) |
-| RA-TLS | Mutual Remote Attestation TLS for all client and node communication |
-| Health Probing | Client-side probes and RA-TLS handshakes determine liveness |
+| Attestation | AWS Nitro attestation verified inside the enclave app (no trusted proxies) |
+| Health Probing | Client-side probes determine liveness |
 | Status Monitoring | `/status` endpoint showing KMS cluster health |
 
 **Odyn API Usage:**
@@ -238,7 +238,7 @@ sequenceDiagram
 > [!IMPORTANT]
 > **Security Mechanism**: The `addOperator` callback validates `appId == kmsAppId`, ensuring only verified KMS instances are added to the operator set. KMS nodes **never submit on-chain transactions** — all state management flows through NovaAppRegistry callbacks. When NovaAppRegistry calls `removeOperator`, the operator is removed from the set.
 
-### 2.2 App Request Flow (RA-TLS + App Registry)
+### 2.2 App Request Flow (Nitro Attestation + App Registry)
 
 ```mermaid
 sequenceDiagram
@@ -255,15 +255,14 @@ sequenceDiagram
     KC-->>App: address[]
     App->>AR: getInstanceByWallet(operator) [for each]
     AR-->>App: instanceUrl, teePubkey, status
-    App->>App: Probe nodes (/health or RA-TLS handshake)
+    App->>App: Probe nodes (/health)
     
-    App->>KMS: RA-TLS Handshake (Certificate with Quote)
-    KMS->>KMS: Verify App Quote & Measurement
-    KMS->>App: Verify KMS Quote (Mutual Attestation)
+    App->>KMS: Send request with Nitro Attestation header
+    KMS->>KMS: Verify attestation (Root-G1) & extract identity
     
     Note over KMS: 2. Verify App Identity via App Registry
     App->>KMS: GET /kms/derive?path=app_secret
-    KMS->>KMS: Extract teeWallet + measurement from RA-TLS attestation
+    KMS->>KMS: Extract teeWallet + measurement from attestation user_data
     
     KMS->>AR: getInstanceByWallet(teeWallet)
     AR-->>KMS: RuntimeInstance {appId, versionId, zkVerified, status}
@@ -289,7 +288,7 @@ async def verify_app_request(request: KMSRequest, client_attestation: Attestatio
     Verify that request comes from a valid and authorized Nova application.
     
     Steps:
-    1. Extract Code Measurement (PCRs) and TEE wallet from RA-TLS Client Attestation.
+    1. Extract Code Measurement and TEE wallet from Nitro attestation (signed user_data).
     2. Query NovaAppRegistry to map wallet -> instance (appId, versionId).
     3. Verify instance is ACTIVE and zkVerified.
     4. Fetch App + Version to ensure:
@@ -320,9 +319,9 @@ async def verify_app_request(request: KMSRequest, client_attestation: Attestatio
     return True, None
 ```
 
-### 2.4 Data Synchronization Flow (RA-TLS Secured)
+### 2.4 Data Synchronization Flow (Attestation Secured)
 
-KMS nodes synchronize data over secure mutual RA-TLS channels.
+KMS nodes synchronize data using attested requests verified in-app.
 
 ```mermaid
 sequenceDiagram
@@ -337,9 +336,8 @@ sequenceDiagram
     KC-->>KMS1: [operator2, operator3]
     
     par Async Sync
-        KMS1->>KMS2: RA-TLS Handshake
         KMS1->>KMS2: POST /sync {event_data, vector_clock}
-        KMS2->>KMS2: Verify KMS Identity (RA-TLS + KMSRegistry)
+        KMS2->>KMS2: Verify KMS Identity (Nitro Attestation + KMSRegistry)
         KMS2->>KMS2: Merge data (LWW)
     end
 ```
@@ -354,10 +352,10 @@ sequenceDiagram
 |----------|--------|-------------|------|
 | `/health` | GET | Health check | None |
 | `/status` | GET | KMS node + cluster view | None |
-| `/kms/derive` | GET | **Derive application key** (KDF) | RA-TLS + NovaAppRegistry verification |
-| `/kms/sign_cert`| POST | **Sign certificate** (CA) | RA-TLS + NovaAppRegistry verification |
-| `/kms/data` | GET | Get/Put/Delete KV data | RA-TLS + NovaAppRegistry verification |
-| `/sync` | POST | Receive sync event from other KMS nodes | RA-TLS (KMS Node) |
+| `/kms/derive` | GET | **Derive application key** (KDF) | Nitro attestation (`x-nitro-attestation`) + NovaAppRegistry verification |
+| `/kms/sign_cert`| POST | **Sign certificate** (CA) | Nitro attestation (`x-nitro-attestation`) + NovaAppRegistry verification |
+| `/kms/data` | GET | Get/Put/Delete KV data | Nitro attestation (`x-nitro-attestation`) + NovaAppRegistry verification |
+| `/sync` | POST | Receive sync event from other KMS nodes | Nitro attestation (`x-nitro-attestation`) + KMSRegistry operator verification |
 | `/nodes` | GET | Get list of KMS operators | None |
 
 ### 3.2 Status Endpoint Response
@@ -380,10 +378,18 @@ The `/status` endpoint returns a merged view of local health and on-chain cluste
 }
 ```
 
-### 3.3 Request Format (RA-TLS Secured)
-Handshake and encryption are handled by RA-TLS. Payload format is simple JSON.
+### 3.3 Request Format (Attestation Secured)
+Payload format is simple JSON.
 
-> Note: The KMS **does not trust client-provided App IDs**. It derives `appId` from the attested TEE wallet via NovaAppRegistry. If a header is provided, it must match.
+> Note: The KMS **does not trust client-provided App IDs**. It derives `appId`
+> from the attested TEE wallet via NovaAppRegistry. If a header is provided,
+> it must match.
+>
+> **No trusted middleboxes**: the enclave application does not trust any proxy
+> or TLS terminator. In production, the caller must provide a verifiable AWS
+> Nitro attestation document (COSE_Sign1) to the enclave application, and the
+> enclave app verifies it against the pinned AWS Nitro Root-G1 certificate
+> before extracting `tee_wallet` and `code_measurement` from signed `user_data`.
 
 **GET /kms/derive**
 ```json
@@ -426,7 +432,7 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 - **Membership source**: nodes query `KMSRegistry.getOperators()` → then `NovaAppRegistry.getInstanceByWallet()` for each operator, and filter for healthy peers using probes.
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
-- **Security**: all sync messages use mutual RA-TLS and validate the sender is a healthy, registered KMS node.
+- **Security**: all sync messages include a Nitro attestation document and validate the sender is a healthy, registered KMS node.
 - **Backpressure**: rate-limit sync and snapshot requests to avoid amplification during spikes.
 
 ### 4.2 Vector Clock Based Sync
@@ -474,7 +480,7 @@ The KMS **does not persist data to disk**. All state lives in enclave memory and
 ```python
 class DataRecord:
     key: str
-    value: bytes              # optional: encrypted with per-app data key
+    value: bytes              # optionally encrypted with per-app data key
     version: VectorClock
     updated_at_ms: int
     tombstone: bool
@@ -485,7 +491,9 @@ class DataRecord:
 - **Non-persistent**: no filesystem writes; no local database.
 - **Rehydration**: on startup, node performs sync and/or snapshot to rebuild state.
 - **Limits**: per-app size quota + LRU eviction; TTL expiration for stale records.
-- **Security**: values may be encrypted with `KDF(master_secret, app_id, "data_key")` to reduce in-memory exposure.
+- **Security**: current implementation keeps values in plaintext within enclave
+  memory. A helper `derive_data_key(master_secret, app_id, "data_key")` exists
+  for future in-memory encryption, but is not yet wired into the data path.
 
 ---
 
@@ -495,11 +503,11 @@ class DataRecord:
 
 | Threat | Mitigation |
 |--------|------------|
-| Unauthorized data access | RA-TLS Client Attestation + NovaAppRegistry instance verification |
+| Unauthorized data access | Nitro attestation + NovaAppRegistry instance verification |
 | App Code Upgrade Leak | App/Version hierarchy allows owners to rotate approved measurements |
-| Man-in-the-middle | RA-TLS (Mutual Attestation) |
-| Replay attack | RA-TLS Session management + Nonces |
-| Node impersonation during sync | Mutual RA-TLS between KMS nodes |
+| Man-in-the-middle | TLS + in-app attestation verification (no trusted proxies) |
+| Replay attack | Attestation timestamp window (configurable) |
+| Node impersonation during sync | Nitro attestation + KMSRegistry operator verification |
 
 ### 5.2 Access Control Matrix (Instance Based)
 
@@ -514,7 +522,7 @@ class DataRecord:
 ```python
 async def verify_sync_request(request: SyncRequest, client_attestation: Attestation) -> bool:
     """Verify that sync request comes from a valid KMS operator."""
-    # 1. Extract KMS Node wallet from RA-TLS Client Attestation
+    # 1. Extract KMS Node wallet from Nitro attestation (signed user_data)
     tee_wallet = client_attestation.get_extension("TEE_WALLET")
     
     # 2. Check if it's a registered operator
@@ -531,9 +539,9 @@ dkms/
 │   ├── app.py                 # Main Flask application + /status endpoint
 │   ├── odyn.py                # Odyn API wrapper
 │   ├── data_store.py          # In-memory KV store with vector clock
-│   ├── sync_manager.py        # Data synchronization logic (RA-TLS)
+│   ├── sync_manager.py        # Data synchronization logic (attested sync)
 │   ├── probe.py               # Liveness probing helpers
-│   ├── auth.py                # RA-TLS Attestation verification
+│   ├── auth.py                # Nitro attestation verification (in-app)
 │   ├── kdf.py                 # Key Derivation Function utilities
 │   ├── nova_registry.py       # NovaAppRegistry contract interaction
 │   ├── kms_registry.py        # KMS Registry contract interaction
@@ -584,6 +592,6 @@ dkms/
 ## Next Steps
 
 1. Implement KMSRegistry smart contract
-2. Implement KMS enclave application core logic (RA-TLS + KDF)
-3. Implement data synchronization protocol over RA-TLS
+2. Implement KMS enclave application core logic (attestation + KDF)
+3. Implement data synchronization protocol with attested requests
 4. Deploy to test environment for verification

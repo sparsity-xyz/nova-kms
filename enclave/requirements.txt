@@ -1,4 +1,5 @@
 fastapi
+hypercorn
 uvicorn
 web3
 requests
@@ -6,3 +7,5 @@ apscheduler
 eth-hash[pycryptodome]
 cryptography>=41.0
 python-dotenv
+cbor2
+pycose

@@ -153,81 +153,16 @@ def encode_address(addr: str) -> str:
     return addr.lower().replace("0x", "").zfill(64)
 
 
-# =============================================================================
-# Transaction building & broadcasting
-# =============================================================================
+"""
+==============================================================================
+NOTE: Transaction helpers intentionally removed
+==============================================================================
 
-def build_tx(
-    *,
-    odyn: Any,
-    chain: Chain,
-    to: str,
-    data: str,
-    gas_limit: int = 300_000,
-) -> dict:
-    """Build an unsigned EIP-1559 tx dict ready for Odyn signing."""
-    tee_address = Web3.to_checksum_address(odyn.eth_address())
-    nonce = chain.get_nonce(tee_address)
-    priority_fee, max_fee = chain.estimate_fees()
+The KMS design guarantees that enclave nodes NEVER submit on-chain
+transactions — all state changes are driven by NovaAppRegistry callbacks.
 
-    return {
-        "kind": "structured",
-        "chain_id": hex(CHAIN_ID),
-        "nonce": hex(nonce),
-        "max_priority_fee_per_gas": hex(priority_fee),
-        "max_fee_per_gas": hex(max_fee),
-        "gas_limit": hex(gas_limit),
-        "to": Web3.to_checksum_address(to),
-        "value": "0x0",
-        "data": data,
-    }
-
-
-def sign_and_broadcast(
-    *,
-    odyn: Any,
-    chain: Chain,
-    to: str,
-    data: str,
-    broadcast: bool = True,
-    gas_limit: int = 300_000,
-) -> Dict[str, Any]:
-    """Build, sign and (optionally) broadcast a transaction."""
-    tx = build_tx(odyn=odyn, chain=chain, to=to, data=data, gas_limit=gas_limit)
-    signed = odyn.sign_tx(tx)
-
-    result: Dict[str, Any] = {
-        "raw_transaction": signed.get("raw_transaction"),
-        "transaction_hash": signed.get("transaction_hash"),
-        "address": signed.get("address"),
-        "broadcasted": False,
-    }
-
-    if not broadcast:
-        return result
-
-    tee_address = Web3.to_checksum_address(odyn.eth_address())
-    to_addr = Web3.to_checksum_address(to)
-
-    # Pre-flight simulation
-    try:
-        chain.w3.eth.call({"from": tee_address, "to": to_addr, "data": data, "value": 0}, "latest")
-    except ContractLogicError as cle:
-        result["broadcast_error"] = f"Contract reverted: {cle}"
-        logger.error(f"Pre-flight failed: {cle}")
-        return result
-    except Exception as e:
-        result["broadcast_error"] = f"Simulation error: {e}"
-        logger.error(f"Pre-flight failed: {e}")
-        return result
-
-    try:
-        tx_hash = chain.w3.eth.send_raw_transaction(signed["raw_transaction"])
-        result["broadcasted"] = True
-        result["rpc_tx_hash"] = tx_hash.hex()
-        logger.info(f"Transaction broadcasted: {tx_hash.hex()}")
-    except Exception as e:
-        result["broadcast_error"] = str(e)
-        logger.error(f"Broadcast failed: {e}")
-
-    return result
+Earlier versions of this module included generic transaction-building and
+broadcast helpers adapted from the Nova app-template.  They were unused in
+this project and posed a risk of accidental misuse, so they have been
+removed for clarity and to reinforce the "read-only chain access" invariant.
+"""

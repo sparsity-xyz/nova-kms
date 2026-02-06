@@ -68,6 +68,22 @@ REQUIRE_RATLS: bool = IN_ENCLAVE
 REQUIRE_MEASUREMENT: bool = IN_ENCLAVE
 
 # =============================================================================
+# Security — Nitro Attestation (no trusted proxy)
+# =============================================================================
+
+# Pinned AWS Nitro root certificate (PEM) used to verify attestation documents.
+# The repo includes the official Root-G1 at enclave/attestation/root.pem.
+NITRO_ROOT_CERT_PATH: str = os.getenv("NITRO_ROOT_CERT_PATH", "attestation/root.pem")
+
+# Max age (seconds) allowed for an attestation document timestamp.
+# Limits replay window when attestation is transported over HTTP headers.
+ATTESTATION_MAX_AGE_SECONDS: int = int(os.getenv("ATTESTATION_MAX_AGE_SECONDS", "120"))
+
+# HTTP header used to transport the attestation document to the enclave app.
+# The value should be base64 (recommended) or hex.
+ATTESTATION_HEADER_NAME: str = os.getenv("ATTESTATION_HEADER_NAME", "x-nitro-attestation")
+
+# =============================================================================
 # Security — Sync Integrity
 # =============================================================================
 

@@ -176,6 +176,25 @@ def health_check():
 
 
 # =============================================================================
+# /nonce  (Attestation challenge)
+# =============================================================================
+
+@router.get("/nonce")
+def get_nonce():
+    """
+    Issue a one-time nonce for Nitro attestation challenge-response.
+
+    The client must embed this nonce into the Nitro attestation document
+    (payload['nonce']) and present the attestation in the next authenticated
+    request. Nonces are single-use and expire after a short TTL.
+    """
+    from auth import issue_attestation_challenge
+
+    nonce = issue_attestation_challenge()
+    return {"nonce": base64.b64encode(nonce).decode()}
+
+
+# =============================================================================
 # /status
 # =============================================================================
 

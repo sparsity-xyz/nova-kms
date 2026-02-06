@@ -201,7 +201,16 @@ class NovaRegistry:
             raise ValueError("NOVA_APP_REGISTRY_ADDRESS not configured")
 
     def _call(self, data: str) -> bytes:
-        return get_chain().eth_call(self.address, data)
+        """
+        Low-level helper for read-only registry calls.
+
+        Uses eth_call_finalized to protect against short-lived reorgs spoofing
+        App / Version / Instance state. Falls back to latest if the RPC node
+        does not support historical calls.
+        """
+        chain = get_chain()
+        # Prefer finalized reads where available for stronger consistency.
+        return chain.eth_call_finalized(self.address, data)
 
     def get_app(self, app_id: int) -> App:
         data = _GET_APP + encode_uint256(app_id)

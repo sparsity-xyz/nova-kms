@@ -78,10 +78,10 @@ This workflow describes how a KMS node initializes itself after deployment.
 2. Query the Nova App Registry for instance details of each operator.
 3. If this is the first KMS node, perform initial setup (master secret, namespace bootstrap).
 4. If this is not the first node, synchronize from existing KMS nodes:
-    4.1 Establish a mutual RA-TLS connection with each peer node.
-    4.2 Extract the peer's wallet address from the attestation user data and verify it exists in the KMS registry.
+    4.1 Establish a connection and obtain the peer's Nitro attestation document.
+    4.2 Extract the peer's wallet address from the signed attestation `user_data` and verify it exists in the KMS registry.
     4.3 If verified, save the peer as a legitimate KMS node. Otherwise, treat the peer as invalid and remove it from the node list.
-    4.4 On the receiving side, the peer node also extracts the connecting node's wallet address from the attestation and verifies it against the KMS registry. If the wallet is not a registered operator, the peer rejects the sync request.
+    4.4 On the receiving side, the peer node also extracts the connecting node's wallet address from the attestation `user_data` and verifies it against the KMS registry. If the wallet is not a registered operator, the peer rejects the sync request.
     4.5 Synchronize data from the verified peer (master secret via sealed ECDH, then snapshot + deltas).
     4.6 Repeat steps 4.1–4.5 for all discovered nodes.
 5. Periodically repeat step 1 to refresh the operator list.
@@ -105,7 +105,7 @@ sequenceDiagram
         KMSNode->>KMSNode: Initialize master secret and state
     else Not first node
         loop For each peer node
-            KMSNode->>PeerNode: Establish mutual RA-TLS
+            KMSNode->>PeerNode: Connect and exchange Nitro attestation
             PeerNode-->>KMSNode: Attestation (wallet in user data)
             KMSNode->>KMSRegistry: Verify peer wallet is operator
             Note over PeerNode: Peer also verifies connecting<br/>node wallet against KMS registry
@@ -125,7 +125,7 @@ sequenceDiagram
 
 This workflow describes how a Nova app discovers and accesses the KMS service.
 
-> **Note on authentication:** When a Nova app accesses a KMS node, the KMS node verifies the app's wallet address against **Nova App Registry** (app identity). When a KMS node syncs with another KMS node, each side verifies the other's wallet address against **KMS Registry** (operator identity). Both use mutual RA-TLS for attestation extraction.
+> **Note on authentication:** When a Nova app accesses a KMS node, the KMS node verifies the app's wallet address against **Nova App Registry** (app identity). When a KMS node syncs with another KMS node, each side verifies the other's wallet address against **KMS Registry** (operator identity). Attestation is verified **inside the enclave app** (no trusted proxies).
 
 ### Workflow
 
@@ -133,13 +133,15 @@ This workflow describes how a Nova app discovers and accesses the KMS service.
 1. Query the KMS registry to get all operator wallets.
 2. Query the Nova App Registry for instance details of each operator.
 3. Select a reachable KMS node from the list.
-4. Establish mutual RA-TLS with the selected KMS node. The attestation user data includes the wallet address.
-5. The client validates that the wallet address in the KMS node attestation matches the operator wallet from the KMS registry. If it does not match, abort.
-6. The KMS node validates the app identity and metadata:
-    6.1 Extract wallet address and public key from the app attestation.
-    6.2 Query Nova App Registry for app metadata by wallet.
-    6.3 Authorize access based on registry data.
-7. The KMS node returns or stores data for the app.
+4. Call `GET /nonce` on the selected KMS node to obtain a one-time challenge nonce.
+5. Use the nonce when requesting a Nitro attestation from Odyn so that it is embedded into the attestation document (payload `nonce` field).
+6. Establish a connection with the selected KMS node and provide a Nitro attestation document (for example via the `x-nitro-attestation` header). The signed attestation `user_data` includes the wallet address.
+7. The client validates that the wallet address in the KMS node attestation matches the operator wallet from the KMS registry. If it does not match, abort.
+8. The KMS node validates the app identity and metadata:
+    8.1 Verifies the Nitro attestation against AWS Nitro Root-G1 and checks that the embedded nonce matches a recently issued, unused nonce.
+    8.2 Extracts wallet address and measurement from the attestation `user_data`.
+    8.3 Queries Nova App Registry for app metadata by wallet and validates status / measurement.
+9. The KMS node returns or stores data for the app.
 
 ### Mermaid Diagram
 
@@ -156,8 +158,12 @@ sequenceDiagram
     NovaApp->>NovaRegistry: getInstanceByWallet(wallets)
     NovaRegistry-->>NovaApp: instance details
     NovaApp->>NovaApp: Pick reachable KMS node
-    NovaApp->>KMSNode: Establish mutual RA-TLS session
+    NovaApp->>KMSNode: GET /nonce
+    KMSNode-->>NovaApp: nonce
+    NovaApp->>NovaApp: Request Nitro attestation with embedded nonce
+    NovaApp->>KMSNode: Connect and present Nitro attestation
     NovaApp->>NovaApp: Verify KMS node wallet in attestation
+    KMSNode->>KMSNode: Verify attestation + nonce (in-app)
     KMSNode->>NovaRegistry: Verify app metadata by wallet
     NovaRegistry-->>KMSNode: App data and permissions
     KMSNode->>KMSNode: Authorize request
