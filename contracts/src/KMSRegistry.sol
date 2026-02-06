@@ -45,13 +45,21 @@ contract KMSRegistry is INovaAppInterface {
     // ========== Modifiers ==========
 
     modifier onlyAdmin() {
-        if (msg.sender != admin) revert NotAdmin();
+        _onlyAdmin();
         _;
     }
 
     modifier onlyNovaAppRegistryMod() {
-        if (msg.sender != _novaAppRegistryAddr) revert OnlyNovaAppRegistry();
+        _onlyNovaAppRegistryMod();
         _;
+    }
+
+    function _onlyAdmin() internal view {
+        if (msg.sender != admin) revert NotAdmin();
+    }
+
+    function _onlyNovaAppRegistryMod() internal view {
+        if (msg.sender != _novaAppRegistryAddr) revert OnlyNovaAppRegistry();
     }
 
     // ========== Constructor ==========

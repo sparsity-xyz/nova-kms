@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.33;
 
-import "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
-import {INovaAppInterface} from "../src/interfaces/INovaAppInterface.sol";
 
 contract KMSRegistryTest is Test {
     KMSRegistry public registry;
