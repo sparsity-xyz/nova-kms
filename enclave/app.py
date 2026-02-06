@@ -193,19 +193,13 @@ def _startup_production() -> dict:
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
 
-    # 6. Master secret: try to get from peers first, else generate new
+    # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
     if kms_registry:
-        peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
-        healthy_peer = find_healthy_peer(
-            [{"node_url": p["node_url"], "tee_wallet_address": p["tee_wallet_address"]} for p in peers],
-            exclude_wallet=tee_wallet,
+        verified = sync_manager.verify_and_sync_peers(
+            kms_registry,
+            master_secret_mgr=master_secret_mgr,
         )
-        if healthy_peer:
-            logger.info(f"Requesting master secret from peer {healthy_peer['node_url']}")
-            secret = sync_manager.request_master_secret(healthy_peer["node_url"])
-            if secret:
-                master_secret_mgr.initialize_from_peer(secret)
-                sync_manager.request_snapshot(healthy_peer["node_url"])
+        logger.info(f"Peer verification complete: {verified} verified peers")
 
     if not master_secret_mgr.is_initialized:
         logger.info("Generating new master secret from hardware RNG")
@@ -281,6 +275,13 @@ async def lifespan(app: FastAPI):
         components["sync_manager"].push_deltas,
         "interval",
         seconds=config.SYNC_INTERVAL_SECONDS,
+    )
+    # Periodically refresh the operator list from the KMS registry
+    # (workflow step: "Periodically repeat step 1 to refresh the operator list")
+    scheduler.add_job(
+        components["sync_manager"].peer_cache.refresh,
+        "interval",
+        seconds=config.PEER_CACHE_TTL_SECONDS,
     )
     scheduler.start()
     logger.info(f"=== Nova KMS started successfully ({mode_label}) ===")

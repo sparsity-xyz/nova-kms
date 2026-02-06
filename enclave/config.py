@@ -30,13 +30,13 @@ CONFIRMATION_DEPTH: int = int(os.getenv("CONFIRMATION_DEPTH", "6"))
 # =============================================================================
 
 # NovaAppRegistry proxy address (UUPS upgradeable)
-NOVA_APP_REGISTRY_ADDRESS: str = ""
+NOVA_APP_REGISTRY_ADDRESS: str = os.getenv("NOVA_APP_REGISTRY_ADDRESS", "")
 
 # KMSRegistry contract address
-KMS_REGISTRY_ADDRESS: str = ""
+KMS_REGISTRY_ADDRESS: str = os.getenv("KMS_REGISTRY_ADDRESS", "")
 
 # KMS application ID assigned by NovaAppRegistry
-KMS_APP_ID: int = 0
+KMS_APP_ID: int = int(os.getenv("KMS_APP_ID", "0"))
 
 # =============================================================================
 # Simulation Mode

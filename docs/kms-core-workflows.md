@@ -11,7 +11,7 @@ This workflow describes how to deploy the KMS registry and wire it into Nova App
 1. Set the Nova App Registry address in the deploy script or environment.
 2. Deploy the KMS registry contract.
 3. Record the deployed KMS registry address.
-4. When creating the KMS app in Nova Platform, set the Nova App Registry contract address as a KMS app property.
+4. When creating the KMS service as a Nova app in Nova Platform, set the KMS registry contract address as the app contract address. This is recorded in Nova App Registry.
 
 ### Mermaid Diagram
 
@@ -20,14 +20,16 @@ sequenceDiagram
     autonumber
     actor Operator
     participant DeployScript as Deploy Script
-    participant NovaRegistry as Nova App Registry
     participant KMSRegistry as KMS Registry
+    participant NovaPlatform as Nova Platform
+    participant NovaRegistry as Nova App Registry
 
     Operator->>DeployScript: Set NOVA_APP_REGISTRY address
     Operator->>DeployScript: Deploy KMS registry
     DeployScript->>KMSRegistry: Create contract
     DeployScript-->>Operator: Output KMS registry address
-    Operator->>NovaRegistry: Set KMS app property: Nova App Registry address
+    Operator->>NovaPlatform: Create KMS app (app contract = KMS registry address)
+    NovaPlatform->>NovaRegistry: Store app contract address
     NovaRegistry-->>Operator: Confirmation
 ```
 
@@ -76,7 +78,13 @@ This workflow describes how a KMS node initializes itself after deployment.
 1. Query the KMS registry to get all operator wallets.
 2. Query the Nova App Registry for instance details of each operator.
 3. If this is the first KMS node, perform initial setup (master secret, namespace bootstrap).
-4. If this is not the first node, synchronize from an existing KMS node.
+4. If this is not the first node, synchronize from existing KMS nodes:
+    4.1 Establish a mutual RA-TLS connection with each peer node.
+    4.2 Extract the peer's wallet address from the attestation user data and verify it exists in the KMS registry.
+    4.3 If verified, save the peer as a legitimate KMS node. Otherwise, treat the peer as invalid and remove it from the node list.
+    4.4 On the receiving side, the peer node also extracts the connecting node's wallet address from the attestation and verifies it against the KMS registry. If the wallet is not a registered operator, the peer rejects the sync request.
+    4.5 Synchronize data from the verified peer (master secret via sealed ECDH, then snapshot + deltas).
+    4.6 Repeat steps 4.1–4.5 for all discovered nodes.
 5. Periodically repeat step 1 to refresh the operator list.
 
 ### Mermaid Diagram
@@ -97,8 +105,19 @@ sequenceDiagram
     alt First KMS node
         KMSNode->>KMSNode: Initialize master secret and state
     else Not first node
-        KMSNode->>PeerNode: Sync data
-        PeerNode-->>KMSNode: Snapshot + deltas
+        loop For each peer node
+            KMSNode->>PeerNode: Establish mutual RA-TLS
+            PeerNode-->>KMSNode: Attestation (wallet in user data)
+            KMSNode->>KMSRegistry: Verify peer wallet is operator
+            Note over PeerNode: Peer also verifies connecting<br/>node wallet against KMS registry
+            alt Wallet verified (both sides)
+                KMSNode->>KMSNode: Save peer as legitimate node
+                KMSNode->>PeerNode: Sync (sealed master secret + snapshot)
+                PeerNode-->>KMSNode: Data
+            else Wallet not verified
+                KMSNode->>KMSNode: Remove peer from node list
+            end
+        end
     end
     KMSNode->>KMSNode: Schedule periodic refresh
 ```
@@ -106,6 +125,8 @@ sequenceDiagram
 ## Nova App Access to KMS Workflow
 
 This workflow describes how a Nova app discovers and accesses the KMS service.
+
+> **Note on authentication:** When a Nova app accesses a KMS node, the KMS node verifies the app's wallet address against **Nova App Registry** (app identity). When a KMS node syncs with another KMS node, each side verifies the other's wallet address against **KMS Registry** (operator identity). Both use mutual RA-TLS for attestation extraction.
 
 ### Workflow
 

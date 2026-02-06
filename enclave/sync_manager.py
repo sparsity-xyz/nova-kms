@@ -92,6 +92,18 @@ class PeerCache:
             self._nova_registry = NovaRegistry()
         return self._nova_registry
 
+    def refresh(self) -> None:
+        """Force a refresh of the peer cache from on-chain data."""
+        with self._lock:
+            self._refresh()
+
+    def remove_peer(self, wallet: str) -> None:
+        """Remove a peer from the cache by wallet address (step 4.3)."""
+        lower = wallet.lower()
+        with self._lock:
+            self._peers = [p for p in self._peers if p["tee_wallet_address"].lower() != lower]
+            logger.info(f"Removed peer {wallet} from cache")
+
     def get_peers(self, exclude_wallet: Optional[str] = None) -> List[dict]:
         """Return list of peer dicts, refreshing from chain if stale."""
         with self._lock:
@@ -167,6 +179,93 @@ class SyncManager:
     def set_sync_key(self, sync_key: bytes) -> None:
         """Set the HMAC key used for signing sync messages."""
         self._sync_key = sync_key
+
+    def verify_and_sync_peers(
+        self,
+        kms_registry,
+        *,
+        master_secret_mgr=None,
+        probe_timeout: int = 5,
+    ) -> int:
+        """
+        Implements KMS Node Initialization Workflow steps 4.1–4.5:
+
+        For each discovered peer:
+          4.1 Probe the peer via /health (RA-TLS in production).
+          4.2 Verify the peer’s wallet address is in the KMS registry.
+          4.3 Save verified peers; remove unverified ones from the cache.
+          4.4 If master secret is not yet initialized and a verified peer
+              is available, request it via sealed ECDH + sync snapshot.
+          4.5 Repeat for all peers.
+
+        Returns the count of verified peers.
+        """
+        from probe import probe_node
+
+        peers = self.peer_cache.get_peers(exclude_wallet=self.node_wallet)
+        verified_count = 0
+
+        for peer in peers:
+            peer_url = peer["node_url"]
+            peer_wallet = peer["tee_wallet_address"]
+
+            # 4.1 Probe the peer (health check / RA-TLS handshake)
+            if not probe_node(peer_url, timeout=probe_timeout):
+                logger.debug(f"Peer {peer_wallet} at {peer_url} is unreachable")
+                continue
+
+            # 4.2 Verify the peer wallet is a registered KMS operator
+            try:
+                is_valid = kms_registry.is_operator(peer_wallet)
+            except Exception as exc:
+                logger.warning(f"Operator check failed for {peer_wallet}: {exc}")
+                is_valid = False
+
+            if not is_valid:
+                # 4.3 Remove invalid peer from cache
+                logger.warning(f"Peer {peer_wallet} is not a registered operator — removing")
+                self.peer_cache.remove_peer(peer_wallet)
+                continue
+
+            # 4.3 Peer is verified
+            verified_count += 1
+            logger.info(f"Peer {peer_wallet} verified as KMS operator")
+
+            # 4.4 Sync from verified peer if master secret still needed
+            if master_secret_mgr and not master_secret_mgr.is_initialized:
+                self._sync_master_secret_from_peer(peer_url, master_secret_mgr)
+
+        logger.info(f"Peer verification complete: {verified_count}/{len(peers)} verified")
+        return verified_count
+
+    def _sync_master_secret_from_peer(self, peer_url: str, master_secret_mgr) -> bool:
+        """
+        Request the master secret from a verified peer using sealed ECDH,
+        then pull a snapshot.  Returns True on success.
+        """
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
+        from cryptography.hazmat.primitives import serialization as _ser
+        from kdf import unseal_master_secret
+
+        ecdh_key = _ec.generate_private_key(_ec.SECP256R1())
+        ecdh_pubkey = ecdh_key.public_key().public_bytes(
+            _ser.Encoding.X962, _ser.PublicFormat.UncompressedPoint,
+        )
+        result = self.request_master_secret(peer_url, ecdh_pubkey=ecdh_pubkey)
+
+        if result and isinstance(result, dict):
+            secret, epoch = unseal_master_secret(result, ecdh_key)
+            master_secret_mgr.initialize_from_peer(secret, epoch=epoch)
+            self.request_snapshot(peer_url)
+            logger.info(f"Master secret received via sealed ECDH from {peer_url}")
+            return True
+        elif result and isinstance(result, bytes):
+            # Legacy plaintext fallback (dev/sim only)
+            master_secret_mgr.initialize_from_peer(result)
+            self.request_snapshot(peer_url)
+            return True
+
+        return False
 
     def _sign_payload(self, payload_json: str) -> Optional[str]:
         """Sign a JSON payload string; returns hex HMAC or None."""
