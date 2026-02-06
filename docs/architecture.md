@@ -2,7 +2,7 @@
 
 ## Overview
 
-Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. Communication is secured via **RA-TLS** (Remote Attestation TLS).
+Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain. KMS node membership is tracked on-chain by a dedicated **KMSRegistry** contract, but node health is determined by clients via live probes and RA-TLS handshakes. Communication is secured via **RA-TLS** (Remote Attestation TLS).
 
 ```mermaid
 graph TB
@@ -31,9 +31,9 @@ graph TB
     KMS2 <-->|RA-TLS Sync| KMS3
     KMS1 <-->|RA-TLS Sync| KMS3
     
-    KMS1 -->|Heartbeat| KMSContract
-    KMS2 -->|Heartbeat| KMSContract
-    KMS3 -->|Heartbeat| KMSContract
+    KMS1 -->|Register Node| KMSContract
+    KMS2 -->|Register Node| KMSContract
+    KMS3 -->|Register Node| KMSContract
     
     KMS1 -->|Verify Instance + App Status| Registry
     KMSContract -->|Node List| KMS1
@@ -56,7 +56,7 @@ A Python/Flask application running inside AWS Nitro Enclave, packaged and deploy
 | **CA / Cert Signing** | Issue TLS certificates for apps rooted in KMS trust anchor |
 | Request Verification | Verify App identity via NovaAppRegistry (App -> Version -> Instance) |
 | RA-TLS | Mutual Remote Attestation TLS for all client and node communication |
-| Heartbeat | Periodic heartbeat to smart contract (default 30 min) |
+| Health Probing | Client-side probes and RA-TLS handshakes determine liveness |
 | Status Monitoring | `/status` endpoint showing KMS cluster health |
 
 **Odyn API Usage:**
@@ -92,29 +92,45 @@ interface INovaAppRegistry {
     struct App {
         uint256 appId;
         address owner;
+        bytes32 teeArch;
         address dappContract;
+        string metadataUri;
+        uint256 latestVersionId;
+        uint256 createdAt;
         AppStatus status;
     }
 
     struct AppVersion {
         uint256 versionId;
+        string versionName;
         bytes32 codeMeasurement;
+        string imageUri;
+        string auditUrl;
+        string auditHash;
+        string githubRunId;
         VersionStatus status;
+        uint256 enrolledAt;
+        address enrolledBy;
     }
 
     struct RuntimeInstance {
         uint256 instanceId;
         uint256 appId;
         uint256 versionId;
-        address teeWalletAddress;
+        address operator;
+        string instanceUrl;
         bytes teePubkey;
+        address teeWalletAddress;
         bool zkVerified;
         InstanceStatus status;
+        uint256 registeredAt;
     }
 
     function getApp(uint256 appId) external view returns (App memory);
     function getVersion(uint256 appId, uint256 versionId) external view returns (AppVersion memory);
+    function getInstance(uint256 instanceId) external view returns (RuntimeInstance memory);
     function getInstanceByWallet(address teeWalletAddress) external view returns (RuntimeInstance memory);
+    function getInstancesForVersion(uint256 appId, uint256 versionId) external view returns (uint256[] memory);
 }
 ```
 
@@ -124,7 +140,7 @@ Operational note: NovaAppRegistry is **UUPS upgradeable**; always interact with 
 
 #### 1.2.2 KMSRegistry (KMS Node Registry)
 
-A standalone smart contract for managing KMS node registration and status.
+A standalone smart contract for managing KMS node registration.
 
 ```solidity
 // SPDX-License-Identifier: Apache-2.0
@@ -135,46 +151,55 @@ import {INovaAppRegistry} from "./interfaces/INovaAppRegistry.sol";
 /**
  * @title KMSRegistry
  * @notice Registry for KMS nodes in the Nova platform
- * @dev KMS nodes must be registered as NovaAppRegistry instances under the KMS appId.
+ * @dev KMS nodes must be registered as NovaAppRegistry instances under the kmsAppId.
  */
 contract KMSRegistry {
     struct KMSNode {
         uint256 nodeId;
         address teeWalletAddress;
         bytes teePubkey;
-        bytes32 codeMeasurement;
         string nodeUrl;
-        uint256 lastHeartbeat;
         bool isActive;
     }
 
     INovaAppRegistry public novaAppRegistry;
     uint256 public kmsAppId;
-    uint256 public heartbeatTimeout = 30 minutes;
-
     mapping(uint256 => KMSNode) public nodes;
     mapping(address => uint256) public nodeIdByWallet;
-    uint256[] public activeNodeIds;
     uint256 public nextNodeId = 1;
+
+    event NodeRegistered(uint256 indexed nodeId, address indexed teeWallet, string nodeUrl);
+    event NodeDeactivated(uint256 indexed nodeId);
 
     constructor(address _novaAppRegistry, uint256 _kmsAppId) {
         novaAppRegistry = INovaAppRegistry(_novaAppRegistry);
         kmsAppId = _kmsAppId;
     }
 
-    function registerNode(
-        bytes calldata teePubkey,
-        bytes32 codeMeasurement,
-        string calldata nodeUrl
-    ) external returns (uint256 nodeId) {
-        // Verify msg.sender is a registered, ACTIVE, zkVerified instance of kmsAppId
-        // and its measurement matches the enrolled version in NovaAppRegistry.
-        // (Uses getInstanceByWallet + getVersion + getApp)
-
-        // ... create node record and start heartbeat
+    function registerNode(string calldata nodeUrl) external returns (uint256 nodeId) {
+        // 1) Lookup instance by tee wallet (msg.sender)
+        // 2) Require instance.appId == kmsAppId
+        // 3) Require instance.status == ACTIVE and instance.zkVerified == true
+        // 4) Require app.status == ACTIVE and version.status in {ENROLLED, DEPRECATED}
+        // 5) Record node (teePubkey from instance, nodeUrl)
     }
+
+    function deactivateNode(uint256 nodeId) external {
+        // Registry admin or node wallet can deactivate (emergency or clean shutdown).
+    }
+
+    function getNode(uint256 nodeId) external view returns (KMSNode memory);
+    function getNodeByWallet(address teeWalletAddress) external view returns (KMSNode memory);
+
+    function listNodes(uint256 cursor, uint256 limit) external view returns (KMSNode[] memory, uint256 nextCursor);
 }
 ```
+
+Interaction summary:
+- KMSRegistry is read-only to NovaAppRegistry and uses `getInstanceByWallet`, `getApp`, and `getVersion` to validate KMS nodes.
+- A KMS node is considered healthy if it is `isActive` on-chain and passes client-side liveness probes.
+- Node enumeration is paginated to avoid unbounded loops. Off-chain clients can filter for health using probes.
+- Assumption: the `msg.sender` for KMSRegistry transactions is the KMS node TEE wallet registered in NovaAppRegistry. If KMS nodes cannot sign transactions directly, add a meta-tx relayer layer and verify signed intent in KMSRegistry.
 
 ---
 
@@ -199,14 +224,11 @@ sequenceDiagram
     ZKP->>AR: registerInstance(appId=kmsAppId, versionId, instanceUrl, proof)
     AR-->>KMS: instanceId (zkVerified = true)
     
-    KMS->>KC: registerNode(pubkey, pcr, url)
+    KMS->>KC: registerNode(url)
     Note over KC: Verify msg.sender via NovaAppRegistry (instance + version + app)
     KC-->>KMS: nodeId
     
-    Note over KMS: Start heartbeat loop
-    loop Every 30 minutes (configurable)
-        KMS->>KC: heartbeat()
-    end
+    Note over KMS: No on-chain heartbeat required
 ```
 
 > [!IMPORTANT]
@@ -225,8 +247,9 @@ sequenceDiagram
     App->>App: Generate Ephemeral Key Pair
     App->>App: Get RA Quote via Odyn (binding sub_pubkey)
     
-    App->>KC: getRandomActiveNode()
-    KC-->>App: KMSNode {nodeUrl, teePubkey}
+    App->>KC: listNodes(cursor, limit)
+    KC-->>App: KMSNode[]
+    App->>App: Probe nodes (/health or RA-TLS handshake)
     
     App->>KMS: RA-TLS Handshake (Certificate with Quote)
     KMS->>KMS: Verify App Quote & Measurement
@@ -272,6 +295,8 @@ async def verify_app_request(request: KMSRequest, client_attestation: Attestatio
     tee_wallet = client_attestation.get_extension("TEE_WALLET")
     
     instance = await nova_app_registry.get_instance_by_wallet(tee_wallet)
+    if instance.instance_id == 0:
+        return False, "Instance not found"
     if not instance.zk_verified or instance.status != "ACTIVE":
         return False, "Instance not verified or inactive"
     
@@ -302,7 +327,7 @@ sequenceDiagram
     Note over KMS1: Data update occurs
     KMS1->>KMS1: Update local data with Vector Clock
     
-    KMS1->>KC: getActiveNodes()
+    KMS1->>KC: listNodes(cursor, limit)
     KC-->>KMS1: [node2, node3]
     
     par Async Sync
@@ -322,15 +347,34 @@ sequenceDiagram
 | Endpoint | Method | Description | Auth |
 |----------|--------|-------------|------|
 | `/health` | GET | Health check | None |
-| `/status` | GET | KMS cluster overall status | None |
+| `/status` | GET | KMS node + cluster view | None |
 | `/kms/derive` | GET | **Derive application key** (KDF) | RA-TLS + NovaAppRegistry verification |
 | `/kms/sign_cert`| POST | **Sign certificate** (CA) | RA-TLS + NovaAppRegistry verification |
 | `/kms/data` | GET | Get/Put/Delete KV data | RA-TLS + NovaAppRegistry verification |
 | `/sync` | POST | Receive sync event from other KMS nodes | RA-TLS (KMS Node) |
-| `/nodes` | GET | Get list of active KMS nodes | None |
+| `/nodes` | GET | Get list of nodes (paginated) | None |
 
 ### 3.2 Status Endpoint Response
-(Shows node info, cluster health, and uptime. Similar to the previous version but secured via RA-TLS.)
+
+The `/status` endpoint returns a merged view of local health and on-chain cluster state. Cluster health is derived from client-side probes plus on-chain `isActive` flags.
+
+```json
+{
+    "node": {
+        "node_id": 7,
+        "tee_wallet": "0x1234...",
+        "node_url": "https://kms-7.nova",
+        "is_active": true,
+        "last_probe_ms": 1738855800
+    },
+    "cluster": {
+        "kms_app_id": 9001,
+        "registry_address": "0xabc...",
+        "total_nodes": 12,
+        "healthy_nodes": 10
+    }
+}
+```
 
 ### 3.3 Request Format (RA-TLS Secured)
 Handshake and encryption are handled by RA-TLS. Payload format is simple JSON.
@@ -375,7 +419,7 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 
 ### 4.1 Membership and Sync Strategy
 
-- **Membership source**: nodes query `KMSRegistry.getActiveNodes()` and cache the active peer set with a short TTL.
+- **Membership source**: nodes query `KMSRegistry.listNodes(cursor, limit)` and filter for healthy peers using probes.
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
 - **Security**: all sync messages use mutual RA-TLS and validate the sender is a healthy, registered KMS node.
@@ -469,9 +513,9 @@ async def verify_sync_request(request: SyncRequest, client_attestation: Attestat
     # 1. Extract KMS Node wallet from RA-TLS Client Attestation
     tee_wallet = client_attestation.get_extension("TEE_WALLET")
     
-    # 2. Check if it's a registered and healthy node
+    # 2. Check if it's a registered node and passes a liveness probe
     node = await kms_registry.getNodeByWallet(tee_wallet)
-    return node.isActive and node.isHealthy()
+    return node.isActive and await probe_node(node.nodeUrl)
 ```
 
 ---
@@ -485,7 +529,7 @@ dkms/
 │   ├── odyn.py                # Odyn API wrapper
 │   ├── data_store.py          # In-memory KV store with vector clock
 │   ├── sync_manager.py        # Data synchronization logic (RA-TLS)
-│   ├── heartbeat.py           # Heartbeat worker
+│   ├── probe.py               # Liveness probing helpers
 │   ├── auth.py                # RA-TLS Attestation verification
 │   ├── kdf.py                 # Key Derivation Function utilities
 │   ├── nova_registry.py       # NovaAppRegistry contract interaction
