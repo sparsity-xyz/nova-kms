@@ -347,9 +347,8 @@ class SyncManager:
     def _make_request(self, url: str, body: dict, timeout: int = None) -> Optional[requests.Response]:
         """
         Make an outbound sync request with URL validation, optional
-        HMAC signing, and Nitro attestation in production mode.
+        HMAC signing, and PoP mutual authentication.
         """
-        import config
         if timeout is None:
             timeout = self.http_timeout
 
@@ -362,9 +361,19 @@ class SyncManager:
 
         headers = {"Content-Type": "application/json"}
 
+        # Derive base URL (used for /nonce) from the endpoint URL.
+        # All callers pass URLs like "{peer_base}/sync".
+        base_url = url.rsplit("/", 1)[0].rstrip("/")
+
         # 1. Lightweight PoP Signature (Handshake)
-        # Fetch peer's wallet from cache if possible to bind signature to it
+        # Fetch peer's wallet from cache to bind signature to the intended recipient.
         peer_wallet = self.peer_cache.get_wallet_by_url(base_url)
+
+        # PoP requires an explicit recipient wallet binding.
+        # If we can't determine the peer wallet, refuse to send the request.
+        if not peer_wallet:
+            logger.warning(f"Refusing sync request to {url}: unknown peer wallet for {base_url}")
+            return None
         
         try:
             # A. Fetch nonce from peer
@@ -372,7 +381,7 @@ class SyncManager:
             nonce_resp.raise_for_status()
             nonce_b64 = nonce_resp.json().get("nonce")
             
-            if nonce_b64 and self.odyn:
+            if nonce_b64 and self.odyn and peer_wallet:
                 import time
                 timestamp = int(time.time())
                 # B. Sign message: NovaKMS:Auth:{nonce_b64}:{peer_wallet}:{timestamp}
@@ -386,6 +395,10 @@ class SyncManager:
                 headers["X-KMS-Nonce"] = nonce_b64
         except Exception as exc:
             logger.warning(f"Failed to perform PoP handshake with {url}: {exc}")
+
+        # Do not proceed without PoP headers.
+        if "X-KMS-Signature" not in headers:
+            return None
 
         # 2. HMAC signing (using sync key)
         payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
@@ -402,20 +415,19 @@ class SyncManager:
             )
             
             # 3. Verify Peer response signature for mutual auth
-            if config.REQUIRE_RATLS and peer_wallet:
-                resp_sig = resp.headers.get("X-KMS-Peer-Signature")
-                if not resp_sig:
-                    logger.warning(f"Rejecting sync response from {url}: missing peer signature")
-                    return None
-                
-                from auth import verify_wallet_signature
-                client_sig = headers.get("X-KMS-Signature")
-                resp_msg = f"NovaKMS:Response:{client_sig}:{self.node_wallet}"
-                if not verify_wallet_signature(peer_wallet, resp_msg, resp_sig):
-                    logger.warning(f"KMS Peer response signature verification failed for {peer_wallet}")
-                    return None
-                    
-                logger.debug(f"Mutual PoP verified for {peer_wallet}")
+            resp_sig = resp.headers.get("X-KMS-Peer-Signature")
+            if not resp_sig:
+                logger.warning(f"Rejecting sync response from {url}: missing peer signature")
+                return None
+
+            from auth import verify_wallet_signature
+            client_sig = headers.get("X-KMS-Signature")
+            resp_msg = f"NovaKMS:Response:{client_sig}:{peer_wallet}"
+            if not verify_wallet_signature(peer_wallet, resp_msg, resp_sig):
+                logger.warning(f"KMS Peer response signature verification failed for {peer_wallet}")
+                return None
+
+            logger.debug(f"Mutual PoP verified for {peer_wallet}")
 
             return resp
         except Exception as exc:
@@ -541,42 +553,62 @@ class SyncManager:
           - {"type": "snapshot_request", "sender_wallet": "0x..."}
           - {"type": "master_secret_request", "sender_wallet": "0x...", "ecdh_pubkey": "hex"}
         """
-        import config
-        from auth import verify_wallet_signature, _nonce_store
+        from auth import (
+            verify_wallet_signature,
+            recover_wallet_from_signature,
+            _nonce_store,
+            _require_fresh_timestamp,
+        )
 
         # 1. Verify Lightweight PoP Signature (KMS Peer Identity)
-        if config.REQUIRE_RATLS:
-            if not kms_pop:
-                return {"status": "error", "reason": "Missing PoP headers"}
-            
-            p_wallet = kms_pop.get("wallet")
-            p_sig = kms_pop.get("signature")
-            p_ts = kms_pop.get("timestamp")
-            p_nonce_b64 = kms_pop.get("nonce")
+        if not kms_pop:
+            return {"status": "error", "reason": "Missing PoP headers"}
 
-            if not all([p_wallet, p_sig, p_ts, p_nonce_b64]):
-                return {"status": "error", "reason": "Incomplete PoP headers"}
+        p_sig = kms_pop.get("signature")
+        p_ts = kms_pop.get("timestamp")
+        p_nonce_b64 = kms_pop.get("nonce")
 
-            # A. Validate and consume nonce
-            import base64
-            try:
-                nonce_bytes = base64.b64decode(p_nonce_b64)
-                if not _nonce_store.validate_and_consume(nonce_bytes):
-                    return {"status": "error", "reason": "Invalid or expired nonce"}
-            except Exception:
-                return {"status": "error", "reason": "Invalid nonce encoding"}
+        p_wallet = kms_pop.get("wallet")
 
-            # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
-            message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
-            if not verify_wallet_signature(p_wallet, message, p_sig):
-                logger.warning(f"KMS PoP signature verification failed for {p_wallet}")
-                return {"status": "error", "reason": "Invalid KMS signature"}
+        if not all([p_sig, p_ts, p_nonce_b64]):
+            return {"status": "error", "reason": "Incomplete PoP headers"}
 
-            # C. Verify wallet is a registered operator
-            if not self.kms_registry.is_operator(p_wallet):
+        # Timestamp freshness check (limits replay window)
+        try:
+            _require_fresh_timestamp(str(p_ts))
+        except Exception as exc:
+            return {"status": "error", "reason": str(exc)}
+
+        # A. Validate and consume nonce
+        import base64
+        try:
+            nonce_bytes = base64.b64decode(p_nonce_b64)
+            if not _nonce_store.validate_and_consume(nonce_bytes):
+                return {"status": "error", "reason": "Invalid or expired nonce"}
+        except Exception:
+            return {"status": "error", "reason": "Invalid nonce encoding"}
+
+        # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
+        message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
+        recovered = recover_wallet_from_signature(message, p_sig)
+        if not recovered:
+            return {"status": "error", "reason": "Invalid KMS signature"}
+
+        # Optional explicit wallet header must match recovered signer.
+        if p_wallet and recovered.lower() != p_wallet.lower():
+            return {"status": "error", "reason": "KMS wallet header does not match signature"}
+
+        p_wallet = recovered
+
+        # C. Verify wallet is a registered operator
+        try:
+            if not self.peer_cache.kms_registry.is_operator(p_wallet):
                 return {"status": "error", "reason": "Not a registered KMS operator"}
-            
-            logger.debug(f"KMS PoP verified for {p_wallet}")
+        except Exception as exc:
+            logger.warning(f"Operator lookup failed for {p_wallet}: {exc}")
+            return {"status": "error", "reason": "Not a registered KMS operator"}
+
+        logger.debug(f"KMS PoP verified for {p_wallet}")
 
         # 2. Verify HMAC signature if sync key is set
         if self._sync_key and signature:

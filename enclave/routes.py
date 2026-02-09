@@ -9,16 +9,16 @@ Endpoints (see architecture.md §3):
     /health          GET   – health check (no auth)
     /status          GET   – node + cluster status (no auth)
     /nodes           GET   – list KMS operators (no auth)
-    /kms/derive      POST  – derive application key (RA-TLS + App Registry)
-    /kms/sign_cert   POST  – sign CSR with KMS CA  (RA-TLS + App Registry)
-    /kms/data        GET   – read KV data           (RA-TLS + App Registry)
-    /kms/data        PUT   – write KV data          (RA-TLS + App Registry)
-    /kms/data        DELETE– delete KV data          (RA-TLS + App Registry)
-    /sync            POST  – inter-node sync        (RA-TLS KMS peer)
+    /kms/derive      POST  – derive application key (App PoP + App Registry)
+    /kms/sign_cert   POST  – sign CSR with KMS CA  (App PoP + App Registry)
+    /kms/data        GET   – read KV data           (App PoP + App Registry)
+    /kms/data        PUT   – write KV data          (App PoP + App Registry)
+    /kms/data        DELETE– delete KV data          (App PoP + App Registry)
+    /sync            POST  – inter-node sync        (KMS peer PoP)
 
 Security:
-    - In production: attestation is extracted from mutual TLS (RA-TLS).
-    - In dev/sim: falls back to X-Tee-Wallet / X-Tee-Measurement headers.
+    - In production: app calls authenticate via PoP signatures.
+    - In dev/sim: can fall back to x-tee-wallet / x-tee-measurement headers.
     - Rate limiting and request body size limits enforced by middleware.
 """
 
@@ -32,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from auth import AppAuthorizer, KMSNodeVerifier
+    from auth import AppAuthorizer
     from data_store import DataStore
     from kdf import CertificateAuthority, MasterSecretManager
     from kms_registry import KMSRegistryClient
@@ -50,7 +50,6 @@ _data_store: Optional["DataStore"] = None
 _master_secret_mgr: Optional["MasterSecretManager"] = None
 _ca: Optional["CertificateAuthority"] = None
 _authorizer: Optional["AppAuthorizer"] = None
-_node_verifier: Optional["KMSNodeVerifier"] = None
 _kms_registry: Optional["KMSRegistryClient"] = None
 _sync_manager: Optional["SyncManager"] = None
 _node_info: dict = {}
@@ -63,19 +62,17 @@ def init(
     master_secret_mgr,
     ca,
     authorizer,
-    node_verifier,
     kms_registry,
     sync_manager,
     node_info: dict,
 ):
     global _odyn, _data_store, _master_secret_mgr, _ca
-    global _authorizer, _node_verifier, _kms_registry, _sync_manager, _node_info
+    global _authorizer, _kms_registry, _sync_manager, _node_info
     _odyn = odyn
     _data_store = data_store
     _master_secret_mgr = master_secret_mgr
     _ca = ca
     _authorizer = authorizer
-    _node_verifier = node_verifier
     _kms_registry = kms_registry
     _sync_manager = sync_manager
     _node_info = node_info
@@ -128,7 +125,7 @@ class SyncRequest(BaseModel):
 
 def _authorize_app(request: Request) -> dict:
     """
-    Verify the calling app via RA-TLS attestation and return detailed auth info.
+    Verify the calling app via PoP / dev headers and return detailed auth info.
     Raises HTTPException(403) on failure.
     """
     from auth import get_attestation
@@ -147,24 +144,6 @@ def _authorize_app(request: Request) -> dict:
 
     return {
         "app_id": result.app_id,
-        "client_sig": attestation.signature
-    }
-
-
-def _verify_kms_peer(request: Request) -> dict:
-    """Verify the sync caller is a registered KMS peer. Returns auth info."""
-    from auth import get_attestation
-
-    try:
-        attestation = get_attestation(request, dict(request.headers))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-
-    ok, reason = _node_verifier.verify_peer(attestation.tee_wallet)
-    if not ok:
-        raise HTTPException(status_code=403, detail=reason or "Unauthorized peer")
-    return {
-        "wallet": attestation.tee_wallet,
         "client_sig": attestation.signature
     }
 
@@ -197,15 +176,13 @@ def health_check():
 @router.get("/nonce")
 def get_nonce():
     """
-    Issue a one-time nonce for Nitro attestation challenge-response.
+    Issue a one-time nonce for Proof-of-Possession (PoP) challenge-response.
 
-    The client must embed this nonce into the Nitro attestation document
-    (payload['nonce']) and present the attestation in the next authenticated
-    request. Nonces are single-use and expire after a short TTL.
+    Nonces are single-use and expire after a short TTL.
     """
-    from auth import issue_attestation_challenge
+    from auth import issue_nonce
 
-    nonce = issue_attestation_challenge()
+    nonce = issue_nonce()
     return {"nonce": base64.b64encode(nonce).decode()}
 
 
@@ -384,7 +361,8 @@ def delete_data(body: DataDeleteRequest, request: Request, response: Response):
 def sync_endpoint(body: SyncRequest, request: Request, response: Response):
     """
     Handle incoming sync from a KMS peer.
-    Verified via mutual RA-TLS or lightweight signature PoP.
+    Verified via lightweight Proof-of-Possession (PoP) signatures as described
+    in docs/kms-core-workflows.md.
     """
     if not _sync_manager:
         raise HTTPException(status_code=503, detail="Sync manager not available")

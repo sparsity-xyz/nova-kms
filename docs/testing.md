@@ -41,7 +41,7 @@ pip install pytest httpx
 |------|-------------------|----------|
 | `test_data_store.py` | `data_store.py` | VectorClock, DataRecord, DataStore CRUD, merge, snapshot |
 | `test_kdf.py` | `kdf.py` | HKDF derivation, MasterSecretManager, CertificateAuthority |
-| `test_auth.py` | `auth.py` | AppAuthorizer (all auth paths), KMSNodeVerifier |
+| `test_auth.py` | `auth.py` | AppAuthorizer (auth/authorization paths), dev header identity |
 | `test_sync.py` | `sync_manager.py` | SyncManager delta/snapshot handling, PeerCache |
 | `test_routes.py` | `routes.py` + `app.py` | Full API integration via FastAPI TestClient |
 

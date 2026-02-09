@@ -429,16 +429,16 @@ class TestMeasurementEnforcement:
 
 class TestAttestationModes:
     def test_headers_disabled_in_production(self):
-        """attestation_from_headers must raise when REQUIRE_RATLS=True."""
+        """attestation_from_headers must raise when IN_ENCLAVE=True."""
         from auth import attestation_from_headers
-        with patch("auth.config.REQUIRE_RATLS", True):
+        with patch("auth.config.IN_ENCLAVE", True), patch("auth.config.SIMULATION_MODE", False):
             with pytest.raises(RuntimeError, match="disabled in production"):
                 attestation_from_headers({"x-tee-wallet": "0xAA"})
 
     def test_headers_work_in_dev(self):
-        """attestation_from_headers works when REQUIRE_RATLS=False."""
+        """attestation_from_headers works when IN_ENCLAVE=False."""
         from auth import attestation_from_headers
-        with patch("auth.config.REQUIRE_RATLS", False):
+        with patch("auth.config.IN_ENCLAVE", False):
             att = attestation_from_headers({"x-tee-wallet": "0xBB"})
             assert att.tee_wallet == "0xBB"
 
@@ -467,14 +467,30 @@ class TestSyncHMAC:
     def test_handle_sync_rejects_bad_signature(self):
         from data_store import DataStore
         from sync_manager import PeerCache, SyncManager
+        from auth import issue_nonce
+
+        import base64
+        import time
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from unittest.mock import MagicMock
 
         ds = DataStore(node_id="node1")
-        mgr = SyncManager(ds, "0xNode1", PeerCache())
+        kms_reg = MagicMock()
+        kms_reg.is_operator.return_value = True
+        mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=kms_reg))
         mgr.set_sync_key(b"\xab" * 32)
+
+        nonce_b64 = base64.b64encode(issue_nonce()).decode()
+        ts = str(int(time.time()))
+        msg = f"NovaKMS:Auth:{nonce_b64}:{mgr.node_wallet}:{ts}"
+        sig = Account.from_key(bytes.fromhex("33" * 32)).sign_message(encode_defunct(text=msg)).signature.hex()
+        kms_pop = {"signature": sig, "timestamp": ts, "nonce": nonce_b64}
 
         result = mgr.handle_incoming_sync(
             {"type": "delta", "data": {}},
             signature="badsignature",
+            kms_pop=kms_pop,
         )
         assert result["status"] == "error"
         assert "signature" in result["reason"].lower()

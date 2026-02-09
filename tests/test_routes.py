@@ -4,12 +4,32 @@ Tests for routes.py — API endpoint integration tests using FastAPI TestClient.
 
 import base64
 import json
+import time
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import app
+
+
+def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_hex: str) -> dict:
+    """Build PoP headers for /sync requests."""
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    nonce_resp = client.get("/nonce")
+    assert nonce_resp.status_code == 200
+    nonce_b64 = nonce_resp.json()["nonce"]
+    ts = str(int(time.time()))
+    msg = f"NovaKMS:Auth:{nonce_b64}:{recipient_wallet}:{ts}"
+    pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
+    sig = Account.from_key(bytes.fromhex(pk)).sign_message(encode_defunct(text=msg)).signature.hex()
+    return {
+        "x-kms-signature": sig,
+        "x-kms-timestamp": ts,
+        "x-kms-nonce": nonce_b64,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +39,7 @@ def _setup_routes():
     without real chain / Odyn.
     """
     import routes
-    from auth import AppAuthorizer, AuthResult, ClientAttestation, KMSNodeVerifier
+    from auth import AppAuthorizer, AuthResult, ClientAttestation
     from data_store import DataStore
     from kdf import CertificateAuthority, MasterSecretManager
     from sync_manager import SyncManager, PeerCache
@@ -38,19 +58,16 @@ def _setup_routes():
     authorizer = MagicMock(spec=AppAuthorizer)
     authorizer.verify.return_value = AuthResult(authorized=True, app_id=42, version_id=1)
 
-    # Mock node verifier that always succeeds
-    node_verifier = MagicMock(spec=KMSNodeVerifier)
-    node_verifier.verify_peer.return_value = (True, None)
-
     # Mock KMS registry
     kms_reg = MagicMock()
     kms_reg.operator_count.return_value = 3
+    kms_reg.is_operator.return_value = True
     kms_reg.get_operators.return_value = [
         "0x" + "AA" * 20,
         "0x" + "BB" * 20,
     ]
 
-    sync_mgr = SyncManager(ds, "0xTestNode", PeerCache())
+    sync_mgr = SyncManager(ds, "0xTestNode", PeerCache(kms_registry_client=kms_reg))
 
     routes.init(
         odyn=odyn,
@@ -58,7 +75,6 @@ def _setup_routes():
         master_secret_mgr=mgr,
         ca=ca,
         authorizer=authorizer,
-        node_verifier=node_verifier,
         kms_registry=kms_reg,
         sync_manager=sync_mgr,
         node_info={
@@ -196,7 +212,7 @@ class TestData:
 
 class TestSync:
     def test_sync_delta(self, client):
-        import time
+        headers = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32)
         resp = client.post(
             "/sync",
             json={
@@ -215,16 +231,17 @@ class TestSync:
                     ]
                 },
             },
-            headers={"x-tee-wallet": "0xPeerWallet"},
+            headers=headers,
         )
         assert resp.status_code == 200
         assert resp.json()["merged"] == 1
 
     def test_sync_snapshot_request(self, client):
+        headers = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32)
         resp = client.post(
             "/sync",
             json={"type": "snapshot_request", "sender_wallet": "0xPeer"},
-            headers={"x-tee-wallet": "0xPeerWallet"},
+            headers=headers,
         )
         assert resp.status_code == 200
         assert "data" in resp.json()

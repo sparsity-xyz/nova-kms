@@ -22,7 +22,7 @@ The `KMSRegistry` contract is the trust anchor for the KMS cluster. It must be d
     - The platform submits a transaction to `NovaAppRegistry` using the `dappContract` address provided in Step 2.
     - Once confirmed, the platform provides the on-chain **Application ID** (`KMS_APP_ID`).
 4.  **KMS ID Configuration**:
-    - Set the assigned `KMS_APP_ID` on the `KMSRegistry` contract (e.g., via `make set-app-id`). 
+    - Set the assigned `KMS_APP_ID` on the `KMSRegistry` contract (e.g., via `make set-app-id` / `setKmsAppId`). 
     - This allows the registry to verify that callbacks (like `addOperator`) are coming from the legitimate platform registry for the correct app.
 
 ### Mermaid Diagram
@@ -45,7 +45,7 @@ sequenceDiagram
     AppReg-->>Platform: Result: KMS_APP_ID assigned
     Platform-->>Operator: On-chain KMS_APP_ID
     
-    Operator->>KMSReg: 3. Set KMS_APP_ID (setAppId)
+    Operator->>KMSReg: 3. Set KMS_APP_ID (setKmsAppId)
     KMSReg-->>Operator: Configuration Complete
 ```
 
@@ -76,7 +76,7 @@ sequenceDiagram
     Platform->>Node: Deploy instance
     Node->>Platform: Submit Attestation/ZK Proof
     Platform->>AppReg: Verify & Register Instance
-    AppReg->>KMSReg: addOperator(teeWallet, appId, versionId)
+    AppReg->>KMSReg: addOperator(teeWallet, appId, versionId, instanceId)
     KMSReg-->>AppReg: Operator Added
 ```
 
@@ -144,6 +144,16 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
     returned in header `X-KMS-Peer-Signature`.
 6.  **Verification A**: Node A verifies Node B's signature against the operator list from **KMSRegistry**.
 
+### HTTP Headers (Implementation)
+- `GET /nonce` returns JSON: `{ "nonce": "<base64>" }`.
+- Node A → Node B `POST /sync`:
+    - `X-KMS-Signature`: $Sig_A$
+    - `X-KMS-Nonce`: the base64 nonce string returned by `/nonce`
+    - `X-KMS-Timestamp`: unix epoch seconds (integer)
+    - `X-KMS-Wallet`: optional hint (server recovers wallet from signature)
+- Node B → Node A response:
+    - `X-KMS-Peer-Signature`: $Sig_B$ where $Sig_B$ signs `NovaKMS:Response:<Sig_A>:<Wallet_B>`
+
 ### Diagram: Inter-Node Mutual PoP
 ```mermaid
 sequenceDiagram
@@ -196,6 +206,15 @@ KMS supports **Lightweight PoP** for high-performance app API calls.
     `NovaKMS:Response:<Sig_A>:<KMS_Wallet>`
     returned in response header `X-KMS-Response-Signature`.
 7.  **Verification A**: App verifies KMS node's identity against the $KMS\_Wallet$ recorded in **KMSRegistry**.
+
+### HTTP Headers (Implementation)
+- App → KMS request headers:
+    - `X-App-Signature`: $Sig_A$
+    - `X-App-Nonce`: the base64 nonce string returned by `/nonce`
+    - `X-App-Timestamp`: unix epoch seconds (integer)
+    - `X-App-Wallet`: optional hint (server recovers wallet from signature)
+- KMS → App response headers:
+    - `X-KMS-Response-Signature`: $Sig_{KMS}$ where $Sig_{KMS}$ signs `NovaKMS:Response:<Sig_A>:<KMS_Wallet>`
 
 ### Diagram: App-to-KMS Mutual PoP
 ```mermaid

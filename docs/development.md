@@ -36,7 +36,7 @@ nova-kms/
 │   ├── chain.py                  # Blockchain / RPC helpers
 │   ├── nova_registry.py          # NovaAppRegistry read wrapper
 │   ├── kms_registry.py           # KMSRegistry read-only wrapper
-│   ├── auth.py                   # App authorization via Nitro attestation + registry
+│   ├── auth.py                   # App authorization via PoP + registry
 │   ├── kdf.py                    # HKDF key derivation + CA
 │   ├── data_store.py             # In-memory KV store (vector clocks)
 │   ├── sync_manager.py           # Peer synchronization
@@ -132,13 +132,13 @@ curl http://localhost:8000/kms/data/test \
   -H "x-tee-wallet: 0x1234567890abcdef1234567890abcdef12345678"
 ```
 
-> **Note:** In development mode, auth headers (`x-tee-wallet`, `x-tee-measurement`) substitute for production Nitro attestation. The authorizer will attempt to query the on-chain registry, so **set contract addresses** or mock them for full local testing — or use **Simulation Mode** (see below).
+> **Note:** In development mode, auth headers (`x-tee-wallet`, `x-tee-measurement`) are accepted as a convenience identity shim. In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`).
 
 ---
 
 ## Simulation Mode
 
-Simulation mode lets you run one or more KMS nodes locally **without any blockchain connection** (no Helios, no Odyn, no on-chain contracts). It replaces on-chain registries with in-memory fakes while keeping the exact same auth, sync, and key-derivation logic.
+Simulation mode lets you run one or more KMS nodes locally **without any blockchain connection** (no Helios, no on-chain contracts). It replaces on-chain registries with in-memory fakes while keeping the exact same auth, sync, and key-derivation logic. A local in-process signer is used to support PoP flows.
 
 ### Quick Start — Single Node
 
@@ -147,7 +147,7 @@ make simulation
 ```
 
 The server starts on `http://localhost:8000` with:
-- 3 default simulated peers (wallets `0xAAA…`, `0xBBB…`, `0xCCC…`)
+- 3 default simulated peers (deterministic wallets derived from seeds)
 - Deterministic master secret (`SHA256("nova-kms-simulation-master-secret")`)
 - Open auth mode: any `x-tee-wallet` header is accepted
 
@@ -176,7 +176,7 @@ SIMULATION_MODE=1 SIM_NODE_INDEX=2 SIM_PORT=8002 python app.py &  # port 8002
 | `NovaRegistry` (on-chain) | `SimNovaRegistry` (in-memory, open auth) |
 | Hardware RNG master secret | `SHA256("nova-kms-simulation-master-secret")` |
 | Helios light-client ➜ RPC | Skipped entirely |
-| `AppAuthorizer` + `KMSNodeVerifier` | **Same classes**, backed by sim registries |
+| `AppAuthorizer` | **Same class**, backed by sim registries |
 
 The toggle is controlled by `SIMULATION_MODE` environment variable (takes precedence) or `config.SIMULATION_MODE` constant.
 
@@ -282,7 +282,7 @@ make deploy
 Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 - `eth_address()` — TEE wallet address
 - `sign_tx(tx)` — sign EIP-1559 transactions
-- `get_attestation()` — Nitro attestation document
+- `get_attestation()` — attestation document (available in SDK; not used by this KMS)
 - `get_random_bytes()` — hardware RNG
 - `s3_put/get/delete` — persistent storage (not used by KMS)
 
@@ -293,7 +293,7 @@ Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 - `sign_and_broadcast()` — build, sign via Odyn, broadcast
 
 ### `auth.py` — Authorization
-`AppAuthorizer` verifies client attestation against NovaAppRegistry:
+`AppAuthorizer` verifies the caller identity (from PoP signer wallet) against NovaAppRegistry:
 1. `getInstanceByWallet(teeWallet)` → instance
 2. Check `ACTIVE` + `zkVerified`
 3. `getApp(appId)` → `ACTIVE`

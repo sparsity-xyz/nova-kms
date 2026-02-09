@@ -1,27 +1,25 @@
-"""
-=============================================================================
-App Authorization (auth.py)
-=============================================================================
+"""enclave/auth.py
 
-Verifies that an incoming request originates from a legitimate Nova Platform
-application by cross-referencing the RA-TLS client attestation with
-NovaAppRegistry on-chain data.
+Authentication + authorization helpers.
+
+This repository no longer uses RA-TLS / Nitro attestation documents for HTTP
+request authentication.
 
 Security modes:
-  - **Production** (REQUIRE_RATLS=True): attestation MUST come from a
-    verified Nitro attestation document. Proxy-injected headers are not trusted.
-    Measurement verification is mandatory.
-  - **Dev / Sim** (REQUIRE_RATLS=False): headers X-Tee-Wallet and
-    X-Tee-Measurement are accepted for convenience.  A warning is logged.
+    - Production (IN_ENCLAVE=True, SIMULATION_MODE=False): require lightweight
+        Proof-of-Possession (PoP) signatures (EIP-191) for app requests.
+    - Dev / Sim (IN_ENCLAVE=False or SIMULATION_MODE=True): allow convenience
+        headers (x-tee-wallet / x-tee-measurement) to stand in for identity.
 
-See architecture.md §2.3 for the full verification flow.
+Authorization is always enforced via NovaAppRegistry lookups in AppAuthorizer.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, Dict
+from typing import Optional, Dict
 
 import config
 from nova_registry import (
@@ -40,14 +38,11 @@ def set_node_wallet(wallet: str):
     global _node_wallet
     _node_wallet = wallet.lower()
 
-
-# =============================================================================
-# Production mode detection
-# =============================================================================
-
 def is_production_mode() -> bool:
-    """Return True when running in production (RA-TLS required)."""
-    return config.REQUIRE_RATLS
+    """Return True when running in an enclave (non-simulation)."""
+    return bool(getattr(config, "IN_ENCLAVE", False)) and not bool(
+        getattr(config, "SIMULATION_MODE", False)
+    )
 
 
 # =============================================================================
@@ -120,27 +115,29 @@ class _NonceStore:
 _nonce_store = _NonceStore(ttl_seconds=getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120))
 
 
-def issue_attestation_challenge() -> bytes:
-    """
-    Issue a fresh one-time nonce for Nitro attestation challenge-response.
-    """
+def issue_nonce() -> bytes:
+    """Issue a fresh one-time nonce for PoP challenge-response."""
     return _nonce_store.issue()
+
+
+def issue_attestation_challenge() -> bytes:
+    """Backward-compatible alias for issue_nonce()."""
+    return issue_nonce()
 
 
 def attestation_from_headers(headers: dict) -> ClientAttestation:
     """
     Build a ClientAttestation from HTTP headers (dev / test mode).
 
-    Production RA-TLS extracts these from the mutual TLS handshake;
-    this helper provides a debugging shim.
+    This helper provides a debugging shim for local development.
 
-    In production mode (REQUIRE_RATLS=True) this function will raise
-    an error to prevent header-based spoofing.
+    In production mode (IN_ENCLAVE=True) this function raises an error to
+    prevent header-based spoofing.
     """
     if is_production_mode():
         raise RuntimeError(
             "Header-based attestation is disabled in production. "
-            "Use RA-TLS mutual authentication."
+            "Use PoP (X-App-Signature / X-App-Nonce / X-App-Timestamp)."
         )
     tee_wallet = headers.get("x-tee-wallet", "")
     measurement_hex = headers.get("x-tee-measurement", "")
@@ -150,64 +147,21 @@ def attestation_from_headers(headers: dict) -> ClientAttestation:
     return ClientAttestation(tee_wallet=tee_wallet, measurement=measurement)
 
 
-def attestation_from_tls(request) -> Optional[ClientAttestation]:
-    """
-    Extract attestation identity in production mode.
-
-    IMPORTANT: We do NOT trust any external TLS terminator / proxy.
-    Therefore we do not accept "verified" headers injected by intermediaries.
-
-    Current implementation requires the caller to provide an AWS Nitro attestation
-    document via the HTTP header configured by config.ATTESTATION_HEADER_NAME.
-
-    This keeps the trust boundary inside the enclave app:
-    - the attestation document is verified against the pinned AWS Nitro Root-G1;
-    - only signed user_data fields are used to extract tee_wallet and measurement.
-
-    Returns ClientAttestation or None if not present.
-    """
-    header_name = getattr(config, "ATTESTATION_HEADER_NAME", "x-nitro-attestation")
-    raw = request.headers.get(header_name, "")
-    if not raw:
-        return None
-
-    try:
-        from attestation.nitro import decode_attestation_header_value, verify_and_extract_identity
-
-        # Load pinned root cert from local filesystem (bundled in the image)
-        root_path = getattr(config, "NITRO_ROOT_CERT_PATH", "attestation/root.pem")
-        with open(root_path, "rb") as f:
-            pinned_root_pem = f.read()
-
-        att_doc = decode_attestation_header_value(raw)
-        ident = verify_and_extract_identity(
-            attestation_doc=att_doc,
-            pinned_root_pem=pinned_root_pem,
-            max_age_seconds=getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120),
-        )
-        # Enforce challenge-response: attestation nonce must match an issued one.
-        if not _nonce_store.validate_and_consume(ident.nonce):
-            raise RuntimeError("Invalid or expired attestation nonce")
-        return ClientAttestation(
-            tee_wallet=ident.tee_wallet,
-            measurement=ident.code_measurement,
-        )
-    except Exception as exc:
-        logger.warning(f"Invalid Nitro attestation header: {exc}")
-        raise RuntimeError("Invalid or unverifiable attestation document")
-
-
 def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
     """
     Extract app identity from PoP signature headers.
-    Headers: X-App-Wallet, X-App-Signature, X-App-Timestamp, X-App-Nonce
+    Headers: X-App-Signature, X-App-Timestamp, X-App-Nonce
+
+    For backward compatibility, X-App-Wallet may be provided, but it is not
+    required. When omitted, the wallet is recovered from the signature.
     """
-    wallet = request.headers.get("x-app-wallet")
     sig = request.headers.get("x-app-signature")
     ts = request.headers.get("x-app-timestamp")
     nonce_b64 = request.headers.get("x-app-nonce")
 
-    if not all([wallet, sig, ts, nonce_b64]):
+    wallet = request.headers.get("x-app-wallet")
+
+    if not all([sig, ts, nonce_b64]):
         return None
 
     try:
@@ -216,15 +170,24 @@ def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
         if not _nonce_store.validate_and_consume(nonce_bytes):
             raise RuntimeError("Invalid or expired nonce")
 
+        # Enforce timestamp freshness to limit replay window.
+        _require_fresh_timestamp(ts)
+
         # Message: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
         message = f"NovaKMS:AppAuth:{nonce_b64}:{_node_wallet}:{ts}"
-        if not verify_wallet_signature(wallet, message, sig):
+
+        recovered = recover_wallet_from_signature(message, sig)
+        if not recovered:
             raise RuntimeError("Invalid app signature")
+
+        # Optional explicit wallet header must match recovered signer.
+        if wallet and recovered.lower() != wallet.lower():
+            raise RuntimeError("App wallet header does not match signature")
 
         # Return attestation with None measurement; AppAuthorizer will trust
         # the on-chain measurement for this verified TEE wallet.
         return ClientAttestation(
-            tee_wallet=wallet.lower(),
+            tee_wallet=recovered.lower(),
             measurement=None,
             signature=sig
         )
@@ -237,24 +200,18 @@ def get_attestation(request, headers: dict) -> ClientAttestation:
     """
     Unified attestation extraction.
 
-    - In production mode: try RA-TLS attestation OR PoP signature.
-    - In dev/sim mode: fall back to header-based attestation.
+    - In production mode: require PoP signature.
+    - In dev/sim mode: allow header-based identity for convenience.
     """
     if is_production_mode():
-        # 1. Try lightweight PoP signature first
+        # Require lightweight PoP signature
         att = app_attestation_from_signature(request)
         if att is not None:
             return att
 
-        # 2. Fallback to full RA-TLS attestation
-        att = attestation_from_tls(request)
-        if att is not None:
-            return att
-
-        # In production, if no valid attestation is found, reject
         raise RuntimeError(
-            "No valid attestation or PoP signature found. "
-            "Ensure you provide either RA-TLS or X-App-Signature headers."
+            "Missing PoP authentication. "
+            "Provide X-App-Signature / X-App-Nonce / X-App-Timestamp headers."
         )
     # Dev/sim mode: headers are acceptable
     return attestation_from_headers(headers)
@@ -340,51 +297,18 @@ class AppAuthorizer:
             if version.code_measurement != attestation.measurement:
                 return AuthResult(authorized=False, reason="Measurement mismatch")
         elif config.REQUIRE_MEASUREMENT:
-            # If measurement is missing (PoP case), we trust the identity mapping
-            # because the TEE wallet was already verified against this measurement on-chain.
-            # In a strict future, we could re-verify this mapping if needed.
-            pass
+            # In production, measurement is required for full attestation paths.
+            # For lightweight PoP, the wallet was already bound to a measured
+            # version on-chain at enrollment time, so we allow missing measurement
+            # ONLY when a PoP signature was presented.
+            if not attestation.signature:
+                return AuthResult(authorized=False, reason="Measurement required")
 
         return AuthResult(
             authorized=True,
             app_id=instance.app_id,
             version_id=instance.version_id,
         )
-
-
-# =============================================================================
-# KMS node peer verification (for sync)
-# =============================================================================
-
-class KMSNodeVerifier:
-    """
-    Verify that a sync peer is a registered KMS operator.
-    Used in /sync endpoint to gate incoming data from other KMS nodes.
-    """
-
-    def __init__(self, kms_registry_client=None):
-        self._kms_registry = kms_registry_client
-
-    @property
-    def kms_registry(self):
-        if self._kms_registry is None:
-            from kms_registry import KMSRegistryClient
-            self._kms_registry = KMSRegistryClient()
-        return self._kms_registry
-
-    def verify_peer(self, tee_wallet: str) -> Tuple[bool, Optional[str]]:
-        """Return (is_valid, reason_if_invalid)."""
-        if not tee_wallet:
-            return False, "Missing TEE wallet"
-        try:
-            if not self.kms_registry.is_operator(tee_wallet):
-                return False, "Not a registered KMS operator"
-        except Exception as exc:
-            logger.warning(f"KMS peer lookup failed for {tee_wallet}: {exc}")
-            return False, "Operator lookup failed"
-
-        return True, None
-
 
 def verify_wallet_signature(wallet: str, message: str, signature: str) -> bool:
     """
@@ -403,3 +327,34 @@ def verify_wallet_signature(wallet: str, message: str, signature: str) -> bool:
     except Exception as exc:
         logger.warning(f"Signature verification failed: {exc}")
         return False
+
+
+def recover_wallet_from_signature(message: str, signature: str) -> Optional[str]:
+    """Recover the Ethereum wallet address from an EIP-191 signature."""
+    if not signature or not message:
+        return None
+    try:
+        from eth_account.messages import encode_defunct
+        from eth_account import Account
+
+        msghash = encode_defunct(text=message)
+        recovered = Account.recover_message(msghash, signature=signature)
+        return recovered
+    except Exception as exc:
+        logger.warning(f"Signature recovery failed: {exc}")
+        return None
+
+
+def _require_fresh_timestamp(ts: str) -> None:
+    """Raise RuntimeError if timestamp is missing/invalid/stale."""
+    if not ts:
+        raise RuntimeError("Missing timestamp")
+    try:
+        ts_int = int(ts)
+    except Exception:
+        raise RuntimeError("Invalid timestamp")
+
+    max_age = getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120)
+    now = int(time.time())
+    if abs(now - ts_int) > max_age:
+        raise RuntimeError("Stale timestamp")

@@ -56,32 +56,16 @@ SIM_PEERS: list = []
 SIM_MASTER_SECRET_HEX: str = ""
 
 # =============================================================================
-# Security — Attestation & TLS
+# Security — Authentication
 # =============================================================================
 
-# In production (IN_ENCLAVE=True), require RA-TLS attestation from clients.
-# When False (dev/sim), allow fallback to HTTP header-based attestation.
-REQUIRE_RATLS: bool = IN_ENCLAVE
-
-# In production, measurement verification is mandatory.
-# When False, clients can omit the measurement field (dev convenience).
+# In production (IN_ENCLAVE=True), AppAuthorizer can require code measurement
+# for non-PoP identity paths. For PoP, wallet→measurement binding is enforced
+# at enrollment time on-chain.
 REQUIRE_MEASUREMENT: bool = IN_ENCLAVE
 
-# =============================================================================
-# Security — Nitro Attestation (no trusted proxy)
-# =============================================================================
-
-# Pinned AWS Nitro root certificate (PEM) used to verify attestation documents.
-# The repo includes the official Root-G1 at enclave/attestation/root.pem.
-NITRO_ROOT_CERT_PATH: str = os.getenv("NITRO_ROOT_CERT_PATH", "attestation/root.pem")
-
-# Max age (seconds) allowed for an attestation document timestamp.
-# Limits replay window when attestation is transported over HTTP headers.
+# Max age (seconds) for PoP timestamps and the nonce TTL.
 ATTESTATION_MAX_AGE_SECONDS: int = int(os.getenv("ATTESTATION_MAX_AGE_SECONDS", "120"))
-
-# HTTP header used to transport the attestation document to the enclave app.
-# The value should be base64 (recommended) or hex.
-ATTESTATION_HEADER_NAME: str = os.getenv("ATTESTATION_HEADER_NAME", "x-nitro-attestation")
 
 # =============================================================================
 # Security — Sync Integrity

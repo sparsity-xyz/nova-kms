@@ -9,8 +9,8 @@ development and testing.  When ``SIMULATION_MODE`` is enabled:
 - No blockchain RPC connection is needed (no Helios, no Chain).
 - No Odyn SDK is needed.
 - Peer nodes are configured statically in ``config.py`` or env vars.
-- ``AppAuthorizer`` / ``KMSNodeVerifier`` use the same real classes but
-  backed by the simulation registries, so the auth logic still executes.
+- ``AppAuthorizer`` uses the same real class but backed by the simulation
+    registries, so the auth logic still executes.
 
 Usage
 -----
@@ -36,6 +36,59 @@ from typing import Dict, List, Optional
 logger = logging.getLogger("nova-kms.simulation")
 
 
+_SIM_PRIV_BY_WALLET: Dict[str, str] = {}
+
+
+def _derive_sim_private_key_hex(seed: bytes) -> str:
+    # 32-byte hex private key
+    return hashlib.sha256(b"nova-kms-sim-peer|" + seed).hexdigest()
+
+
+def _derive_wallet_from_private_key_hex(private_key_hex: str) -> str:
+    from eth_account import Account
+
+    pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
+    return Account.from_key(bytes.fromhex(pk)).address
+
+
+def get_sim_private_key_hex(wallet: str) -> Optional[str]:
+    """Return the deterministic simulation private key for a given sim wallet."""
+    if not wallet:
+        return None
+    return _SIM_PRIV_BY_WALLET.get(wallet.lower())
+
+
+def get_sim_odyn_for_wallet(wallet: str) -> Optional["SimOdyn"]:
+    """Return a SimOdyn signer whose address is `wallet` (simulation only)."""
+    pk = get_sim_private_key_hex(wallet)
+    if not pk:
+        return None
+    return SimOdyn(pk)
+
+
+class SimOdyn:
+    """Local-only signer used in simulation mode.
+
+    This avoids relying on an external Odyn service while still supporting
+    PoP-based auth flows.
+    """
+
+    def __init__(self, private_key_hex: str):
+        from eth_account import Account
+
+        pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
+        self._account = Account.from_key(bytes.fromhex(pk))
+
+    def eth_address(self) -> str:
+        return self._account.address
+
+    def sign_message(self, message: str, include_attestation: bool = False) -> dict:
+        from eth_account.messages import encode_defunct
+
+        signed = self._account.sign_message(encode_defunct(text=message))
+        return {"signature": signed.signature.hex()}
+
+
 # =============================================================================
 # Simulated peer definition
 # =============================================================================
@@ -57,20 +110,17 @@ class SimPeer:
 # Default simulation topology
 # =============================================================================
 
-DEFAULT_SIM_PEERS: List[SimPeer] = [
-    SimPeer(
-        tee_wallet="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        node_url="http://localhost:8000",
-    ),
-    SimPeer(
-        tee_wallet="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-        node_url="http://localhost:8001",
-    ),
-    SimPeer(
-        tee_wallet="0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
-        node_url="http://localhost:8002",
-    ),
-]
+def _make_default_sim_peers() -> List[SimPeer]:
+    peers: List[SimPeer] = []
+    for idx, url in enumerate(("http://localhost:8000", "http://localhost:8001", "http://localhost:8002")):
+        priv_hex = _derive_sim_private_key_hex(f"peer-{idx}".encode("utf-8"))
+        wallet = _derive_wallet_from_private_key_hex(priv_hex)
+        _SIM_PRIV_BY_WALLET[wallet.lower()] = priv_hex
+        peers.append(SimPeer(tee_wallet=wallet, node_url=url))
+    return peers
+
+
+DEFAULT_SIM_PEERS: List[SimPeer] = _make_default_sim_peers()
 
 DEFAULT_SIM_APP_ID = 9999
 DEFAULT_SIM_VERSION_ID = 1
@@ -304,10 +354,10 @@ def build_sim_components(
 
     Returns a dict with keys:
         tee_wallet, node_url, kms_registry, nova_registry,
-        authorizer, node_verifier, master_secret
+        authorizer, odyn, master_secret
     """
     import config as _cfg
-    from auth import AppAuthorizer, KMSNodeVerifier
+    from auth import AppAuthorizer
 
     if peers is None:
         peers = get_sim_peers()
@@ -323,8 +373,13 @@ def build_sim_components(
     nova_registry = SimNovaRegistry(peers, kms_app_id=app_id)
 
     authorizer = AppAuthorizer(registry=nova_registry)
-    node_verifier = KMSNodeVerifier(kms_registry_client=kms_registry)
     master_secret = get_sim_master_secret()
+
+    # Deterministic per-node signer for PoP in simulation.
+    priv_hex = get_sim_private_key_hex(this_node.tee_wallet) or _derive_sim_private_key_hex(
+        f"peer-fallback|{node_idx}".encode("utf-8")
+    )
+    odyn = SimOdyn(priv_hex)
 
     port = get_sim_port()
     node_url = f"http://localhost:{port}"
@@ -340,6 +395,6 @@ def build_sim_components(
         "kms_registry": kms_registry,
         "nova_registry": nova_registry,
         "authorizer": authorizer,
-        "node_verifier": node_verifier,
+        "odyn": odyn,
         "master_secret": master_secret,
     }

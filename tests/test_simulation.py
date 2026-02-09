@@ -270,7 +270,7 @@ class TestBuildSimComponents:
         assert "kms_registry" in comp
         assert "nova_registry" in comp
         assert "authorizer" in comp
-        assert "node_verifier" in comp
+        assert "odyn" in comp
         assert "master_secret" in comp
         assert isinstance(comp["kms_registry"], SimKMSRegistryClient)
         assert isinstance(comp["nova_registry"], SimNovaRegistry)
@@ -304,12 +304,10 @@ class TestBuildSimComponents:
         result = comp["authorizer"].verify(att)
         assert result.authorized is True
 
-    def test_node_verifier_succeeds(self):
-        """KMSNodeVerifier backed by SimKMSRegistryClient should accept peers."""
+    def test_odyn_signer_available(self):
         comp = build_sim_components()
-        ok, err = comp["node_verifier"].verify_peer(DEFAULT_SIM_PEERS[0].tee_wallet)
-        assert ok is True
-        assert err is None
+        sig = comp["odyn"].sign_message("hello")
+        assert "signature" in sig
 
 
 # =============================================================================
@@ -426,13 +424,31 @@ class TestSimulationApp:
 
     def test_sync_endpoint(self, sim_client):
         """Sync endpoint should accept incoming sync messages."""
+        import time
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        from simulation import get_sim_private_key_hex
+
+        nonce = sim_client.get("/nonce").json()["nonce"]
+        ts = str(int(time.time()))
+        recipient_wallet = DEFAULT_SIM_PEERS[0].tee_wallet
+        sender_wallet = DEFAULT_SIM_PEERS[1].tee_wallet
+        pk_hex = get_sim_private_key_hex(sender_wallet)
+        assert pk_hex is not None
+        msg = f"NovaKMS:Auth:{nonce}:{recipient_wallet}:{ts}"
+        sig = Account.from_key(bytes.fromhex(pk_hex)).sign_message(encode_defunct(text=msg)).signature.hex()
+
         r = sim_client.post(
             "/sync",
             json={
                 "type": "delta",
-                "sender_wallet": DEFAULT_SIM_PEERS[1].tee_wallet,
+                "sender_wallet": sender_wallet,
                 "data": {},
             },
-            headers={"x-tee-wallet": DEFAULT_SIM_PEERS[1].tee_wallet},
+            headers={
+                "x-kms-signature": sig,
+                "x-kms-timestamp": ts,
+                "x-kms-nonce": nonce,
+            },
         )
         assert r.status_code == 200

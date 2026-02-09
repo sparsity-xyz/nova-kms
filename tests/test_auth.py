@@ -1,13 +1,12 @@
-"""
-Tests for auth.py — AppAuthorizer and KMSNodeVerifier.
+"""Tests for auth.py — AppAuthorizer and dev header identity.
 
-Uses mocked NovaRegistry / KMSRegistryClient to avoid on-chain calls.
+Uses mocked NovaRegistry to avoid on-chain calls.
 """
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from auth import AppAuthorizer, ClientAttestation, KMSNodeVerifier, attestation_from_headers
+from auth import AppAuthorizer, ClientAttestation, attestation_from_headers
 from nova_registry import (
     App,
     AppStatus,
@@ -209,30 +208,3 @@ class TestAppAuthorizer:
         result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
         assert result.authorized
 
-
-# =============================================================================
-# KMSNodeVerifier
-# =============================================================================
-
-
-class TestKMSNodeVerifier:
-    def test_valid_peer(self):
-        mock_client = MagicMock()
-        mock_client.is_operator.return_value = True
-        verifier = KMSNodeVerifier(kms_registry_client=mock_client)
-        ok, reason = verifier.verify_peer("0xBBBB")
-        assert ok
-        assert reason is None
-
-    def test_non_operator_peer(self):
-        mock_client = MagicMock()
-        mock_client.is_operator.return_value = False
-        verifier = KMSNodeVerifier(kms_registry_client=mock_client)
-        ok, reason = verifier.verify_peer("0xCCCC")
-        assert not ok
-        assert "not a registered" in reason.lower()
-
-    def test_missing_wallet(self):
-        verifier = KMSNodeVerifier(kms_registry_client=MagicMock())
-        ok, reason = verifier.verify_peer("")
-        assert not ok

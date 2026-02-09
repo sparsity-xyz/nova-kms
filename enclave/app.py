@@ -39,7 +39,7 @@ from web3 import Web3
 
 import config
 import routes
-from auth import AppAuthorizer, KMSNodeVerifier
+from auth import AppAuthorizer
 from data_store import DataStore
 from kdf import CertificateAuthority, MasterSecretManager
 from probe import find_healthy_peer
@@ -84,7 +84,7 @@ def _startup_simulation() -> dict:
     kms_registry = sim["kms_registry"]
     nova_registry = sim["nova_registry"]
     authorizer = sim["authorizer"]
-    node_verifier = sim["node_verifier"]
+    odyn = sim["odyn"]
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
 
@@ -99,7 +99,7 @@ def _startup_simulation() -> dict:
 
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=None)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
 
     # Master secret: try peers first, fall back to deterministic sim secret
     peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
@@ -122,10 +122,10 @@ def _startup_simulation() -> dict:
     ca = CertificateAuthority(master_secret_mgr)
 
     return {
+        "odyn": odyn,
         "data_store": data_store,
         "ca": ca,
         "authorizer": authorizer,
-        "node_verifier": node_verifier,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,
         "node_info": node_info,
@@ -213,14 +213,11 @@ def _startup_production() -> dict:
     authorizer = AppAuthorizer(registry=nova_registry)
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
-    node_verifier = KMSNodeVerifier(kms_registry_client=kms_registry)
-
     return {
         "odyn": odyn,
         "data_store": data_store,
         "ca": ca,
         "authorizer": authorizer,
-        "node_verifier": node_verifier,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,
         "node_info": node_info,
@@ -263,7 +260,6 @@ async def lifespan(app: FastAPI):
         master_secret_mgr=master_secret_mgr,
         ca=components["ca"],
         authorizer=components["authorizer"],
-        node_verifier=components["node_verifier"],
         kms_registry=components["kms_registry"],
         sync_manager=components["sync_manager"],
         node_info=components["node_info"],
