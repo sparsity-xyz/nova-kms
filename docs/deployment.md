@@ -56,7 +56,7 @@ export PRIVATE_KEY=0x...                # Deployer private key (admin)
 make deploy
 ```
 
-Save the deployed **Proxy** contract address.
+Save the deployed **Proxy** contract address (the stable entry point) and the **Implementation** address (which contains the logic). You will primarily use the Proxy address for integration.
 
 ### 1.3 Configure KMS App ID
 

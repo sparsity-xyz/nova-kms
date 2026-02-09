@@ -62,7 +62,7 @@ make deploy
 The script will:
 1. Deploy `KMSRegistry` implementation and proxy.
 2. Initialize with the configured `NOVA_APP_REGISTRY_PROXY`.
-3. Output the deployed contract address.
+3. Output the deployed **Implementation** address and the **Proxy** address (the proxy is the one you will use for all future configuration and platform integration).
 
 ### Setup KMS App ID
 

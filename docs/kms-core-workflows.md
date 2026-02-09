@@ -11,6 +11,7 @@ The `KMSRegistry` contract is the trust anchor for the KMS cluster. It must be d
 ### Workflow
 1.  **Contract Deployment**:
     - Deploy `KMSRegistry` implementation and proxy contracts.
+    - **Note**: This process yields both a **Proxy Address** (stable entry point) and an **Implementation Address** (logic backend).
     - Initialize the proxy with the platform's `NovaAppRegistry` address.
 2.  **Platform App Creation**:
     - Create a new application on the **Nova Platform** (e.g., via `POST /apps`).
@@ -33,13 +34,14 @@ sequenceDiagram
     participant Platform as Nova Platform
     participant AppReg as Nova App Registry
 
-    Operator->>KMSReg: Deploy Proxy & Implementation
+    Operator->>KMSReg: Deploy Implementation & Proxy
+    Note over Operator: Save Proxy & Implementation Addrs
     
-    Operator->>Platform: 1. Create App (Set dappContract = KMSReg)
+    Operator->>Platform: 1. Create App (Set dappContract = Proxy)
     Platform-->>Operator: App Created (assigned internal ID)
     
     Operator->>Platform: 2. Register App On-Chain
-    Platform->>AppReg: registerApp(KMSReg Address, ...)
+    Platform->>AppReg: registerApp(Proxy Address, ...)
     AppReg-->>Platform: Result: KMS_APP_ID assigned
     Platform-->>Operator: On-chain KMS_APP_ID
     

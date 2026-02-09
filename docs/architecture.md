@@ -572,6 +572,8 @@ nova-kms/
    cd contracts
    forge script script/DeployKMSRegistry.s.sol --broadcast
    ```
+   - **Note**: This script will output both an **Implementation Address** and a **Proxy Address**. 
+   - **Important**: Save the **Proxy Address**. This is the address you will provide to the Nova Platform and use for all configuration.
 
 2. **Create KMS application**
    - Create new app in Nova Platform
