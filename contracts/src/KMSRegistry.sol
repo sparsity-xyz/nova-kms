@@ -44,13 +44,13 @@ contract KMSRegistry is
     event NovaAppRegistrySet(address indexed registry);
     event OperatorAdded(
         address indexed operator,
-        uint256 appId,
+        uint256 indexed appId,
         uint256 versionId,
         uint256 instanceId
     );
     event OperatorRemoved(
         address indexed operator,
-        uint256 appId,
+        uint256 indexed appId,
         uint256 versionId,
         uint256 instanceId
     );
@@ -124,6 +124,7 @@ contract KMSRegistry is
         uint256 versionId,
         uint256 instanceId
     ) external onlyNovaAppRegistryMod {
+        if (appId != kmsAppId) revert AppIdMismatch();
         _removeOperatorInternal(teeWalletAddress);
         emit OperatorRemoved(teeWalletAddress, appId, versionId, instanceId);
     }
@@ -176,5 +177,5 @@ contract KMSRegistry is
     /**
      * @dev Reserved storage space to allow for layout changes in the future.
      */
-    uint256[46] private _gap;
+    uint256[45] private _gap;
 }

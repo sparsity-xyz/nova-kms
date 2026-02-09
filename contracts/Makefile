@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: install build clean test deploy verify-blockscout verify-basescan
+.PHONY: install build clean test fmt deploy verify-blockscout verify-basescan
 
 # Install dependencies
 install:
