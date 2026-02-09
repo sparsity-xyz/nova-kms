@@ -85,6 +85,8 @@ def _startup_simulation() -> dict:
     nova_registry = sim["nova_registry"]
     authorizer = sim["authorizer"]
     node_verifier = sim["node_verifier"]
+    from auth import set_node_wallet
+    set_node_wallet(tee_wallet)
 
     node_info = {
         "tee_wallet": tee_wallet,
@@ -97,7 +99,7 @@ def _startup_simulation() -> dict:
 
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=None)
 
     # Master secret: try peers first, fall back to deterministic sim secret
     peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
@@ -197,19 +199,20 @@ def _startup_production() -> dict:
     # 5. Initialize data store & sync
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
 
     # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
-    # Uses strict initialization logic to prevent split-brain.
+    # Uses strict initialization logic with mutual attestation to prevent split-brain.
     sync_manager.wait_for_master_secret(
         kms_registry=kms_registry if kms_registry else None,
         master_secret_mgr=master_secret_mgr,
-        odyn=odyn,
     )
 
     # 7. CA & auth
     ca = CertificateAuthority(master_secret_mgr)
     authorizer = AppAuthorizer(registry=nova_registry)
+    from auth import set_node_wallet
+    set_node_wallet(tee_wallet)
     node_verifier = KMSNodeVerifier(kms_registry_client=kms_registry)
 
     return {

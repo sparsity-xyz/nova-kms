@@ -116,6 +116,15 @@ class PeerCache:
             peers = [p for p in peers if p["tee_wallet_address"].lower() != exclude]
         return peers
 
+    def get_wallet_by_url(self, url: str) -> Optional[str]:
+        """Look up a peer's wallet address by their base URL."""
+        base = url.rstrip("/")
+        with self._lock:
+            for p in self._peers:
+                if p["node_url"].rstrip("/") == base:
+                    return p["tee_wallet_address"]
+        return None
+
     def _refresh(self):
         """Refresh peer list from KMSRegistry operators + NovaAppRegistry."""
         try:
@@ -168,11 +177,13 @@ class SyncManager:
         node_wallet: str,
         peer_cache: PeerCache,
         *,
+        odyn=None,
         http_timeout: int = 15,
     ):
         self.data_store = data_store
         self.node_wallet = node_wallet
         self.peer_cache = peer_cache
+        self.odyn = odyn
         self.http_timeout = http_timeout
         self._last_push_ms: int = 0
         self._sync_key: Optional[bytes] = None
@@ -243,7 +254,6 @@ class SyncManager:
         self,
         kms_registry,
         master_secret_mgr,
-        odyn,
         *,
         retry_interval: int = 10,
     ) -> None:
@@ -267,7 +277,7 @@ class SyncManager:
                 if not others:
                     # 2. Only self in the registry
                     logger.info("No other operators found in registry. Initializing as seed node.")
-                    master_secret_mgr.initialize_from_random(odyn)
+                    master_secret_mgr.initialize_from_random(self.odyn)
                     break
 
                 # 3. Check status of other operators
@@ -276,7 +286,7 @@ class SyncManager:
                 if not active_others:
                     # 4. All others are non-active
                     logger.info("Found other operators, but none are ACTIVE. Initializing as seed node.")
-                    master_secret_mgr.initialize_from_random(odyn)
+                    master_secret_mgr.initialize_from_random(self.odyn)
                     break
 
                 # 5. Active others exist, attempt to sync
@@ -336,9 +346,10 @@ class SyncManager:
 
     def _make_request(self, url: str, body: dict, timeout: int = None) -> Optional[requests.Response]:
         """
-        Make an outbound sync request with URL validation and optional
-        HMAC signing.
+        Make an outbound sync request with URL validation, optional
+        HMAC signing, and Nitro attestation in production mode.
         """
+        import config
         if timeout is None:
             timeout = self.http_timeout
 
@@ -349,10 +360,36 @@ class SyncManager:
             logger.warning(f"Refusing outbound request to {url}: {exc}")
             return None
 
-        # Add HMAC signature if sync key is available
+        headers = {"Content-Type": "application/json"}
+
+        # 1. Lightweight PoP Signature (Handshake)
+        # Fetch peer's wallet from cache if possible to bind signature to it
+        peer_wallet = self.peer_cache.get_wallet_by_url(base_url)
+        
+        try:
+            # A. Fetch nonce from peer
+            nonce_resp = requests.get(f"{base_url}/nonce", timeout=5)
+            nonce_resp.raise_for_status()
+            nonce_b64 = nonce_resp.json().get("nonce")
+            
+            if nonce_b64 and self.odyn:
+                import time
+                timestamp = int(time.time())
+                # B. Sign message: NovaKMS:Auth:{nonce_b64}:{peer_wallet}:{timestamp}
+                # Using Wallet_B (peer's wallet) protects against signature re-use for other nodes
+                message = f"NovaKMS:Auth:{nonce_b64}:{peer_wallet}:{timestamp}"
+                sig_res = self.odyn.sign_message(message)
+                
+                headers["X-KMS-Signature"] = sig_res["signature"]
+                headers["X-KMS-Wallet"] = self.node_wallet
+                headers["X-KMS-Timestamp"] = str(timestamp)
+                headers["X-KMS-Nonce"] = nonce_b64
+        except Exception as exc:
+            logger.warning(f"Failed to perform PoP handshake with {url}: {exc}")
+
+        # 2. HMAC signing (using sync key)
         payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
         sig = self._sign_payload(payload_json)
-        headers = {"Content-Type": "application/json"}
         if sig:
             headers["X-Sync-Signature"] = sig
 
@@ -363,6 +400,23 @@ class SyncManager:
                 headers=headers,
                 timeout=timeout,
             )
+            
+            # 3. Verify Peer response signature for mutual auth
+            if config.REQUIRE_RATLS and peer_wallet:
+                resp_sig = resp.headers.get("X-KMS-Peer-Signature")
+                if not resp_sig:
+                    logger.warning(f"Rejecting sync response from {url}: missing peer signature")
+                    return None
+                
+                from auth import verify_wallet_signature
+                client_sig = headers.get("X-KMS-Signature")
+                resp_msg = f"NovaKMS:Response:{client_sig}:{self.node_wallet}"
+                if not verify_wallet_signature(peer_wallet, resp_msg, resp_sig):
+                    logger.warning(f"KMS Peer response signature verification failed for {peer_wallet}")
+                    return None
+                    
+                logger.debug(f"Mutual PoP verified for {peer_wallet}")
+
             return resp
         except Exception as exc:
             logger.debug(f"Request to {url} failed: {exc}")
@@ -470,7 +524,13 @@ class SyncManager:
     # Incoming sync handler (called by routes.py /sync endpoint)
     # ------------------------------------------------------------------
 
-    def handle_incoming_sync(self, body: dict, *, signature: Optional[str] = None) -> dict:
+    def handle_incoming_sync(
+        self,
+        body: dict,
+        *,
+        signature: Optional[str] = None,
+        kms_pop: Optional[dict] = None,
+    ) -> dict:
         """
         Process an incoming sync request from a peer.
 
@@ -481,27 +541,72 @@ class SyncManager:
           - {"type": "snapshot_request", "sender_wallet": "0x..."}
           - {"type": "master_secret_request", "sender_wallet": "0x...", "ecdh_pubkey": "hex"}
         """
-        # Verify HMAC signature if sync key is set
+        import config
+        from auth import verify_wallet_signature, _nonce_store
+
+        # 1. Verify Lightweight PoP Signature (KMS Peer Identity)
+        if config.REQUIRE_RATLS:
+            if not kms_pop:
+                return {"status": "error", "reason": "Missing PoP headers"}
+            
+            p_wallet = kms_pop.get("wallet")
+            p_sig = kms_pop.get("signature")
+            p_ts = kms_pop.get("timestamp")
+            p_nonce_b64 = kms_pop.get("nonce")
+
+            if not all([p_wallet, p_sig, p_ts, p_nonce_b64]):
+                return {"status": "error", "reason": "Incomplete PoP headers"}
+
+            # A. Validate and consume nonce
+            import base64
+            try:
+                nonce_bytes = base64.b64decode(p_nonce_b64)
+                if not _nonce_store.validate_and_consume(nonce_bytes):
+                    return {"status": "error", "reason": "Invalid or expired nonce"}
+            except Exception:
+                return {"status": "error", "reason": "Invalid nonce encoding"}
+
+            # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
+            message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
+            if not verify_wallet_signature(p_wallet, message, p_sig):
+                logger.warning(f"KMS PoP signature verification failed for {p_wallet}")
+                return {"status": "error", "reason": "Invalid KMS signature"}
+
+            # C. Verify wallet is a registered operator
+            if not self.kms_registry.is_operator(p_wallet):
+                return {"status": "error", "reason": "Not a registered KMS operator"}
+            
+            logger.debug(f"KMS PoP verified for {p_wallet}")
+
+        # 2. Verify HMAC signature if sync key is set
         if self._sync_key and signature:
             payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
             if not _verify_hmac(self._sync_key, payload_json.encode("utf-8"), signature):
                 logger.warning("Sync message HMAC verification failed")
-                return {"status": "error", "reason": "Invalid signature"}
+                return {"status": "error", "reason": "Invalid HMAC signature"}
 
         sync_type = body.get("type", "")
+        result: dict = {"status": "ok"}
 
         if sync_type == "delta":
-            merged = self._apply_deltas(body.get("data", {}))
-            return {"status": "ok", "merged": merged}
+            result["merged"] = self._apply_deltas(body.get("data", {}))
+        elif sync_type == "snapshot_request":
+            result["data"] = self._serialize_snapshot()
+        elif sync_type == "master_secret_request":
+            result = self._handle_master_secret_request(body)
+        else:
+            return {"status": "error", "reason": f"Unknown sync type: {sync_type}"}
 
-        if sync_type == "snapshot_request":
-            snapshot = self._serialize_snapshot()
-            return {"status": "ok", "data": snapshot}
+        # 3. Add own signature to response if requested / for mutual auth
+        if self.odyn and kms_pop:
+            p_wallet = kms_pop.get("wallet")
+            p_sig = kms_pop.get("signature")
+            # Sign the client's signature to prove we processed this specific request
+            resp_msg = f"NovaKMS:Response:{p_sig}:{self.node_wallet}"
+            sig_res = self.odyn.sign_message(resp_msg)
+            result["_kms_response_sig"] = sig_res["signature"]
 
-        if sync_type == "master_secret_request":
-            return self._handle_master_secret_request(body)
-
-        return {"status": "error", "reason": f"Unknown sync type: {sync_type}"}
+        return result
 
     def _handle_master_secret_request(self, body: dict) -> dict:
         """Handle a master secret request, using sealed ECDH if peer provides a pubkey."""

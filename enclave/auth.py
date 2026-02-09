@@ -32,6 +32,13 @@ from nova_registry import (
 )
 
 logger = logging.getLogger("nova-kms.auth")
+ 
+_node_wallet: Optional[str] = None
+
+def set_node_wallet(wallet: str):
+    """Set the local node wallet for PoP recipient binding."""
+    global _node_wallet
+    _node_wallet = wallet.lower()
 
 
 # =============================================================================
@@ -59,6 +66,7 @@ class ClientAttestation:
 
     tee_wallet: str                  # Ethereum address of the instance
     measurement: Optional[bytes]     # PCR / code measurement (bytes32)
+    signature: Optional[str] = None  # Original PoP signature (if applicable)
 
 
 class _NonceStore:
@@ -189,21 +197,64 @@ def attestation_from_tls(request) -> Optional[ClientAttestation]:
         raise RuntimeError("Invalid or unverifiable attestation document")
 
 
+def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
+    """
+    Extract app identity from PoP signature headers.
+    Headers: X-App-Wallet, X-App-Signature, X-App-Timestamp, X-App-Nonce
+    """
+    wallet = request.headers.get("x-app-wallet")
+    sig = request.headers.get("x-app-signature")
+    ts = request.headers.get("x-app-timestamp")
+    nonce_b64 = request.headers.get("x-app-nonce")
+
+    if not all([wallet, sig, ts, nonce_b64]):
+        return None
+
+    try:
+        import base64
+        nonce_bytes = base64.b64decode(nonce_b64)
+        if not _nonce_store.validate_and_consume(nonce_bytes):
+            raise RuntimeError("Invalid or expired nonce")
+
+        # Message: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
+        message = f"NovaKMS:AppAuth:{nonce_b64}:{_node_wallet}:{ts}"
+        if not verify_wallet_signature(wallet, message, sig):
+            raise RuntimeError("Invalid app signature")
+
+        # Return attestation with None measurement; AppAuthorizer will trust
+        # the on-chain measurement for this verified TEE wallet.
+        return ClientAttestation(
+            tee_wallet=wallet.lower(),
+            measurement=None,
+            signature=sig
+        )
+    except Exception as exc:
+        logger.warning(f"App PoP verification failed: {exc}")
+        raise RuntimeError(f"App PoP authentication failed: {exc}")
+
+
 def get_attestation(request, headers: dict) -> ClientAttestation:
     """
     Unified attestation extraction.
 
-    - In production mode: try TLS-verified attestation first.
+    - In production mode: try RA-TLS attestation OR PoP signature.
     - In dev/sim mode: fall back to header-based attestation.
     """
     if is_production_mode():
+        # 1. Try lightweight PoP signature first
+        att = app_attestation_from_signature(request)
+        if att is not None:
+            return att
+
+        # 2. Fallback to full RA-TLS attestation
         att = attestation_from_tls(request)
         if att is not None:
             return att
-        # In production, if TLS attestation is not available, reject
+
+        # In production, if no valid attestation is found, reject
         raise RuntimeError(
-            "No RA-TLS attestation found in request. "
-            "Ensure the client presents a valid RA-TLS certificate."
+            "No valid attestation or PoP signature found. "
+            "Ensure you provide either RA-TLS or X-App-Signature headers."
         )
     # Dev/sim mode: headers are acceptable
     return attestation_from_headers(headers)
@@ -289,8 +340,10 @@ class AppAuthorizer:
             if version.code_measurement != attestation.measurement:
                 return AuthResult(authorized=False, reason="Measurement mismatch")
         elif config.REQUIRE_MEASUREMENT:
-            # In production, measurement is mandatory
-            return AuthResult(authorized=False, reason="Measurement required but not provided")
+            # If measurement is missing (PoP case), we trust the identity mapping
+            # because the TEE wallet was already verified against this measurement on-chain.
+            # In a strict future, we could re-verify this mapping if needed.
+            pass
 
         return AuthResult(
             authorized=True,
@@ -331,3 +384,22 @@ class KMSNodeVerifier:
             return False, "Operator lookup failed"
 
         return True, None
+
+
+def verify_wallet_signature(wallet: str, message: str, signature: str) -> bool:
+    """
+    Verify an Ethereum EIP-191 signature (ecrecover) for the given wallet and message.
+    Used for lightweight PoP (Proof of Possession) between KMS nodes.
+    """
+    if not wallet or not signature or not message:
+        return False
+    try:
+        from eth_account.messages import encode_defunct
+        from eth_account import Account
+
+        msghash = encode_defunct(text=message)
+        recovered = Account.recover_message(msghash, signature=signature)
+        return recovered.lower() == wallet.lower()
+    except Exception as exc:
+        logger.warning(f"Signature verification failed: {exc}")
+        return False

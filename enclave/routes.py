@@ -28,7 +28,7 @@ import base64
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -126,13 +126,10 @@ class SyncRequest(BaseModel):
 # Auth helper
 # =============================================================================
 
-def _authorize_app(request: Request) -> int:
+def _authorize_app(request: Request) -> dict:
     """
-    Verify the calling app via RA-TLS attestation and return app_id.
+    Verify the calling app via RA-TLS attestation and return detailed auth info.
     Raises HTTPException(403) on failure.
-
-    In production: attestation is extracted from the mutual TLS handshake.
-    In development: falls back to X-Tee-Wallet / X-Tee-Measurement headers.
     """
     from auth import get_attestation
 
@@ -148,11 +145,14 @@ def _authorize_app(request: Request) -> int:
     if not result.authorized:
         raise HTTPException(status_code=403, detail=result.reason or "Unauthorized")
 
-    return result.app_id
+    return {
+        "app_id": result.app_id,
+        "client_sig": attestation.signature
+    }
 
 
-def _verify_kms_peer(request: Request) -> str:
-    """Verify the sync caller is a registered KMS peer. Returns wallet."""
+def _verify_kms_peer(request: Request) -> dict:
+    """Verify the sync caller is a registered KMS peer. Returns auth info."""
     from auth import get_attestation
 
     try:
@@ -163,7 +163,22 @@ def _verify_kms_peer(request: Request) -> str:
     ok, reason = _node_verifier.verify_peer(attestation.tee_wallet)
     if not ok:
         raise HTTPException(status_code=403, detail=reason or "Unauthorized peer")
-    return attestation.tee_wallet
+    return {
+        "wallet": attestation.tee_wallet,
+        "client_sig": attestation.signature
+    }
+
+
+def _add_mutual_signature(response: Response, client_sig: Optional[str]):
+    """If client used PoP signature, add a mutual response signature header."""
+    if client_sig and _odyn and _node_info.get("tee_wallet"):
+        try:
+            # Create Response Message: NovaKMS:Response:<Sig_A>:<KMS_Wallet>
+            resp_msg = f"NovaKMS:Response:{client_sig}:{_node_info['tee_wallet']}"
+            sig_res = _odyn.sign_message(resp_msg)
+            response.headers["X-KMS-Response-Signature"] = sig_res["signature"]
+        except Exception as exc:
+            logger.warning(f"Failed to sign mutual response: {exc}")
 
 
 # =============================================================================
@@ -247,9 +262,11 @@ def list_operators():
 # =============================================================================
 
 @router.post("/kms/derive")
-def derive_key(body: DeriveRequest, request: Request):
+def derive_key(body: DeriveRequest, request: Request, response: Response):
     """Derive a deterministic key for the requesting app."""
-    app_id = _authorize_app(request)
+    auth_info = _authorize_app(request)
+    app_id = auth_info["app_id"]
+    _add_mutual_signature(response, auth_info.get("client_sig"))
 
     if not _master_secret_mgr or not _master_secret_mgr.is_initialized:
         raise HTTPException(status_code=503, detail="Master secret not initialized")
@@ -270,9 +287,10 @@ def derive_key(body: DeriveRequest, request: Request):
 # =============================================================================
 
 @router.post("/kms/sign_cert")
-def sign_cert(body: SignCertRequest, request: Request):
+def sign_cert(body: SignCertRequest, request: Request, response: Response):
     """Sign a CSR with the KMS CA."""
-    _authorize_app(request)
+    auth_info = _authorize_app(request)
+    _add_mutual_signature(response, auth_info.get("client_sig"))
 
     if not _ca:
         raise HTTPException(status_code=503, detail="CA not available")
@@ -297,9 +315,11 @@ def sign_cert(body: SignCertRequest, request: Request):
 # =============================================================================
 
 @router.get("/kms/data/{key}")
-def get_data(key: str, request: Request):
+def get_data(key: str, request: Request, response: Response):
     """Read a key from the app's KV namespace."""
-    app_id = _authorize_app(request)
+    auth_info = _authorize_app(request)
+    app_id = auth_info["app_id"]
+    _add_mutual_signature(response, auth_info.get("client_sig"))
     record = _data_store.get(app_id, key)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Key not found: {key}")
@@ -312,17 +332,21 @@ def get_data(key: str, request: Request):
 
 
 @router.get("/kms/data")
-def list_keys(request: Request):
+def list_keys(request: Request, response: Response):
     """List all keys in the app's KV namespace."""
-    app_id = _authorize_app(request)
+    auth_info = _authorize_app(request)
+    app_id = auth_info["app_id"]
+    _add_mutual_signature(response, auth_info.get("client_sig"))
     keys = _data_store.keys(app_id)
     return {"app_id": app_id, "keys": keys, "count": len(keys)}
 
 
 @router.put("/kms/data")
-def put_data(body: DataPutRequest, request: Request):
+def put_data(body: DataPutRequest, request: Request, response: Response):
     """Write a key-value pair to the app's KV namespace."""
-    app_id = _authorize_app(request)
+    auth_info = _authorize_app(request)
+    app_id = auth_info["app_id"]
+    _add_mutual_signature(response, auth_info.get("client_sig"))
     try:
         value_bytes = base64.b64decode(body.value)
     except Exception:
@@ -341,9 +365,11 @@ def put_data(body: DataPutRequest, request: Request):
 
 
 @router.delete("/kms/data")
-def delete_data(body: DataDeleteRequest, request: Request):
+def delete_data(body: DataDeleteRequest, request: Request, response: Response):
     """Delete a key from the app's KV namespace."""
-    app_id = _authorize_app(request)
+    auth_info = _authorize_app(request)
+    app_id = auth_info["app_id"]
+    _add_mutual_signature(response, auth_info.get("client_sig"))
     record = _data_store.delete(app_id, body.key)
     if record is None:
         raise HTTPException(status_code=404, detail=f"Key not found: {body.key}")
@@ -355,17 +381,37 @@ def delete_data(body: DataDeleteRequest, request: Request):
 # =============================================================================
 
 @router.post("/sync")
-def sync_endpoint(body: SyncRequest, request: Request):
+def sync_endpoint(body: SyncRequest, request: Request, response: Response):
     """
     Handle incoming sync from a KMS peer.
-    In production, the peer is verified via mutual RA-TLS.
-    HMAC signature is validated when available.
+    Verified via mutual RA-TLS or lightweight signature PoP.
     """
-    _verify_kms_peer(request)
-
     if not _sync_manager:
         raise HTTPException(status_code=503, detail="Sync manager not available")
 
-    # Pass HMAC signature from header for verification
+    # Extract Lightweight PoP headers
+    kms_pop = {
+        "wallet": request.headers.get("x-kms-wallet"),
+        "signature": request.headers.get("x-kms-signature"),
+        "timestamp": request.headers.get("x-kms-timestamp"),
+        "nonce": request.headers.get("x-kms-nonce"),
+    }
+
+    # Pass HMAC signature from header
     signature = request.headers.get("x-sync-signature")
-    return _sync_manager.handle_incoming_sync(body.model_dump(), signature=signature)
+    
+    result = _sync_manager.handle_incoming_sync(
+        body.model_dump(), 
+        signature=signature,
+        kms_pop=kms_pop
+    )
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=403, detail=result.get("reason", "Sync denied"))
+
+    # Return server signature if available for mutual auth
+    resp_sig = result.pop("_kms_response_sig", None)
+    if resp_sig:
+        response.headers["X-KMS-Peer-Signature"] = resp_sig
+
+    return result

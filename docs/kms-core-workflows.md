@@ -1,171 +1,269 @@
-# KMS Core Workflows
+# KMS Core Workflows & Security Architecture
 
-This document consolidates the core KMS workflows for deployment, node enrollment, node initialization, and Nova app access.
+This document consolidates the complete lifecycle and security architecture for Nova KMS, covering deployment, node enrollment, anti-split-brain initialization, and lightweight mutual authentication.
 
-## KMS Registry Deployment Workflow
+---
 
-This workflow describes how to deploy the KMS registry and wire it into Nova App Registry so KMS nodes and Nova apps can discover it.
+## 1. KMS Registry Deployment & Platform Registration
+
+The `KMSRegistry` contract is the trust anchor for the KMS cluster. It must be deployed and correctly linked to the Nova Platform before nodes can join.
 
 ### Workflow
-
-1. Set the Nova App Registry address in the deploy script or environment.
-2. Deploy the KMS registry contract.
-3. Record the deployed KMS registry address.
-4. When creating the KMS service as a Nova app in Nova Platform, set the KMS registry contract address as the app contract address. This is recorded in Nova App Registry.
+1.  **Contract Deployment**:
+    - Deploy `KMSRegistry` implementation and proxy contracts.
+    - Initialize the proxy with the platform's `NovaAppRegistry` address.
+2.  **Platform App Creation**:
+    - Create a new application on the **Nova Platform** (e.g., via `POST /apps`).
+    - **Crucial**: You must provide the `KMSRegistry` proxy address as the `dappContract` during this step.
+    - This creates the off-chain record for the service.
+3.  **On-Chain Registration**:
+    - In the Nova Platform UI/API, perform the **Register App On-Chain** step.
+    - The platform submits a transaction to `NovaAppRegistry` using the `dappContract` address provided in Step 2.
+    - Once confirmed, the platform provides the on-chain **Application ID** (`KMS_APP_ID`).
+4.  **KMS ID Configuration**:
+    - Set the assigned `KMS_APP_ID` on the `KMSRegistry` contract (e.g., via `make set-app-id`). 
+    - This allows the registry to verify that callbacks (like `addOperator`) are coming from the legitimate platform registry for the correct app.
 
 ### Mermaid Diagram
-
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
-    participant DeployScript as Deploy Script
-    participant KMSRegistry as KMS Registry
-    participant NovaPlatform as Nova Platform
-    participant NovaRegistry as Nova App Registry
+    participant KMSReg as KMS Registry
+    participant Platform as Nova Platform
+    participant AppReg as Nova App Registry
 
-    Operator->>DeployScript: Set NOVA_APP_REGISTRY address
-    Operator->>DeployScript: Deploy KMS registry
-    DeployScript->>KMSRegistry: Create contract
-    DeployScript-->>Operator: Output KMS registry address
-    Operator->>NovaPlatform: Create KMS app (app contract = KMS registry address)
-    NovaPlatform->>NovaRegistry: Store app contract address
-    NovaRegistry-->>Operator: Confirmation
+    Operator->>KMSReg: Deploy Proxy & Implementation
+    
+    Operator->>Platform: 1. Create App (Set dappContract = KMSReg)
+    Platform-->>Operator: App Created (assigned internal ID)
+    
+    Operator->>Platform: 2. Register App On-Chain
+    Platform->>AppReg: registerApp(KMSReg Address, ...)
+    AppReg-->>Platform: Result: KMS_APP_ID assigned
+    Platform-->>Operator: On-chain KMS_APP_ID
+    
+    Operator->>KMSReg: 3. Set KMS_APP_ID (setAppId)
+    KMSReg-->>Operator: Configuration Complete
 ```
 
-## KMS Node Join Workflow
+---
 
-This workflow describes how a KMS node is enrolled into the KMS registry by Nova Platform.
+## 2. KMS Node Join & Enrollment
+
+Once the registry is live, new nodes can be deployed and automatically enrolled into the cluster.
 
 ### Workflow
-
-1. The KMS service is registered as a Nova app, and the KMS registry contract address is set as the app contract address in Nova Platform.
-2. Nova App Registry stores app metadata (KMS app id, KMS registry contract address), enrolled versions, and code measurements per version.
-3. A KMS node is deployed on Nova Platform with the KMS registry as the app contract address.
-4. Nova Platform submits the node ZK proof to Nova App Registry for on-chain verification.
-5. Nova Platform verifies the node code measurement against the enrolled version.
-6. If all checks pass, Nova Platform registers the node as a KMS app instance.
-7. Nova App Registry calls `addOperator` on the KMS registry to add the node wallet.
+1. A KMS node is deployed on Nova Platform as an instance of the KMS app.
+2. Nova Platform performs the standard enrollment:
+    - Verifies the node's ZK proof (hardware attestation).
+    - Checks the code measurement against the enrolled version.
+3. If valid, Nova Platform registers the instance in `NovaAppRegistry`.
+4. **Callback**: `NovaAppRegistry` automatically calls `addOperator` on the `KMSRegistry` address stored as `dappContract`.
+5. `KMSRegistry` records the new node's TEE wallet as an authorized operator.
 
 ### Mermaid Diagram
-
 ```mermaid
 sequenceDiagram
     autonumber
-    participant NovaPlatform as Nova Platform
-    participant NovaRegistry as Nova App Registry
-    participant KMSRegistry as KMS Registry
-    participant KMSNode as KMS Node
+    participant Platform as Nova Platform
+    participant AppReg as Nova App Registry
+    participant KMSReg as KMS Registry
+    participant Node as New KMS Node
 
-    NovaPlatform->>NovaRegistry: Register KMS app (app contract = KMS registry)
-    NovaPlatform->>KMSNode: Deploy node with KMS registry address
-    NovaPlatform->>NovaRegistry: Submit ZK proof for verification
-    NovaRegistry-->>NovaPlatform: ZK proof verified
-    NovaPlatform->>NovaRegistry: Verify code measurement
-    NovaPlatform->>NovaRegistry: Register KMS node instance
-    NovaRegistry->>KMSRegistry: addOperator(teeWallet, appId, versionId, instanceId)
-    KMSRegistry-->>NovaRegistry: Operator added
+    Platform->>Node: Deploy instance
+    Node->>Platform: Submit Attestation/ZK Proof
+    Platform->>AppReg: Verify & Register Instance
+    AppReg->>KMSReg: addOperator(teeWallet, appId, versionId)
+    KMSReg-->>AppReg: Operator Added
 ```
 
-## KMS Node Initialization Workflow
+---
 
-This workflow describes how a KMS node initializes itself after deployment.
+## 3. Anti-Split-Brain Initialization
 
-### Workflow
+The primary goal of the initialization process is to ensure that all KMS nodes within a cluster share the same **Master Secret**. 
 
-0. Configure the Nova App Registry and KMS registry addresses.
-1. Query the KMS registry to get all operator wallets.
-2. Query the Nova App Registry for instance details of each operator.
-3. If this is the first KMS node, perform initial setup (master secret, namespace bootstrap).
-4. If this is not the first node, synchronize from existing KMS nodes:
-    4.1 Establish a connection and obtain the peer's Nitro attestation document.
-    4.2 Extract the peer's wallet address from the signed attestation `user_data` and verify it exists in the KMS registry.
-    4.3 If verified, save the peer as a legitimate KMS node. Otherwise, treat the peer as invalid and remove it from the node list.
-    4.4 On the receiving side, the peer node also extracts the connecting node's wallet address from the attestation `user_data` and verifies it against the KMS registry. If the wallet is not a registered operator, the peer rejects the sync request.
-    4.5 Synchronize data from the verified peer (master secret via sealed ECDH, then snapshot + deltas).
-    4.6 Repeat steps 4.1–4.5 for all discovered nodes.
-5. Periodically repeat step 1 to refresh the operator list.
+### The Problem
+When a node starts, it must decide whether to:
+1.  **Sync**: Fetch the existing secret from an active peer.
+2.  **Generate**: Create a new secret (only as the cluster "seed").
 
-### Mermaid Diagram
+A "Split-Brain" scenario occurs if two or more nodes generate different master secrets (e.g., due to simultaneous startup or network partition), leading to localized data silos and total system inconsistency.
 
+### Strict Initialization Logic
+To prevent this, KMS nodes implement a strict retry loop that always restarts upon any failure or uncertainty:
+1.  **Operator Discovery**: Fetch all registered KMS operators from the `KMSRegistry` contract.
+2.  **Self-Check**: If the registry contains **only** the current node, it is the absolute seed. **Generate** secret.
+3.  **Peer Status Check**: Query `NovaAppRegistry` for the runtime status of all other operators.
+4.  **Seed Node Condition**: If **all** other operators are `INACTIVE` or `FAILED`, the current node acts as the seed. **Generate** secret.
+5.  **Sync Attempt**: If any other operator is `ACTIVE`, the node **must** sync from one of them.
+6.  **Fail-Fast & Retry**: If active peers exist but are unreachable, or if authentication fails, the node **must not** fallback to generation. Instead, it waits and restarts the entire loop from step 1.
+
+### Diagram: Initialization Loop
+```mermaid
+flowchart TD
+    Start([Node Startup]) --> Discovery[Fetch Operators from KMSRegistry]
+    Discovery --> PeerCheck{Other Operators?}
+    
+    PeerCheck -- No --> SeedGen[Generate Master Secret]
+    PeerCheck -- Yes --> StatusCheck[Check Status in NovaAppRegistry]
+    
+    StatusCheck --> ActiveExists{Active Peers?}
+    
+    ActiveExists -- No --> SeedGen
+    ActiveExists -- Yes --> SyncAttempt[Attempt Sync from Active Peer]
+    
+    SyncAttempt -- Success --> Running([Node Ready])
+    SyncAttempt -- Failure --> Wait[Wait and Retry]
+    Wait --> Discovery
+```
+
+---
+
+## 4. Inter-Node Mutual Authentication (Lightweight PoP)
+
+KMS nodes perform **Mutual Authentication** at the application layer using a **Lightweight Proof of Possession (PoP)** handshake.
+
+### Why PoP?
+Since every KMS node's identity is already verified via ZKP and recorded on-chain, we can use signatures for performance instead of full 4KB attestation documents.
+
+### Handshake Flow
+1.  **Challenge**: Node A (Client) calls `GET /nonce` on Node B (Server) to get $Nonce_B$.
+2.  **Signature A ($Sig\_A$)**: Node A signs a message binding the challenge, the recipient, and a timestamp:
+    `NovaKMS:Auth:<Nonce_B>:<Wallet_B>:<Timestamp_A>`
+    This signature is sent in the `X-KMS-Signature` header.
+3.  **Request**: Node A sends `POST /sync` with PoP headers.
+4.  **Verification B**: 
+    - Node B recovers $Wallet_A$ from $Sig\_A$.
+    - Node B queries **KMSRegistry** to confirm $Wallet_A$ is an authorized operator.
+5.  **Mutual Proof**: Node B returns its own signature on the Client's signature ($Sig\_A$) to prove receipt and processing:
+    `NovaKMS:Response:<Sig_A>:<Wallet_B>`
+    returned in header `X-KMS-Peer-Signature`.
+6.  **Verification A**: Node A verifies Node B's signature against the operator list from **KMSRegistry**.
+
+### Diagram: Inter-Node Mutual PoP
 ```mermaid
 sequenceDiagram
     autonumber
-    participant KMSNode as KMS Node
-    participant KMSRegistry as KMS Registry
-    participant NovaRegistry as Nova App Registry
-    participant PeerNode as Existing KMS Node
+    participant A as KMS Node A (Client)
+    participant B as KMS Node B (Server)
+    participant KMSReg as KMS Registry
 
-    KMSNode->>KMSNode: Load registry addresses
-    KMSNode->>KMSRegistry: getOperators()
-    KMSRegistry-->>KMSNode: operator wallets
-    KMSNode->>NovaRegistry: getInstanceByWallet(wallets)
-    NovaRegistry-->>KMSNode: instance details
-    alt First KMS node
-        KMSNode->>KMSNode: Initialize master secret and state
-    else Not first node
-        loop For each peer node
-            KMSNode->>PeerNode: Connect and exchange Nitro attestation
-            PeerNode-->>KMSNode: Attestation (wallet in user data)
-            KMSNode->>KMSRegistry: Verify peer wallet is operator
-            Note over PeerNode: Peer also verifies connecting<br/>node wallet against KMS registry
-            alt Wallet verified (both sides)
-                KMSNode->>KMSNode: Save peer as legitimate node
-                KMSNode->>PeerNode: Sync (sealed master secret + snapshot)
-                PeerNode-->>KMSNode: Data
-            else Wallet not verified
-                KMSNode->>KMSNode: Remove peer from node list
-            end
-        end
-    end
-    KMSNode->>KMSNode: Schedule periodic refresh
+    A->>B: GET /nonce
+    B-->>A: Nonce_B
+    
+    Note over A: Create Message:<br/>"NovaKMS:Auth:Nonce_B:Wallet_B:TS"
+    Note over A: Sign with TEE Private Key (Sig_A)
+    
+    A->>B: POST /sync (Headers: Sig_A, Wallet_A, TS)
+    
+    B->>B: Recover Wallet_A from Sig_A
+    B->>KMSReg: isOperator(Wallet_A)?
+    KMSReg-->>B: Yes (Authorized)
+    
+    Note over B: Create Response Message:<br/>"NovaKMS:Response:Sig_A:Wallet_B"
+    Note over B: Sign with TEE Private Key (Sig_B)
+    
+    B-->>A: 200 OK (Data + Header: Sig_B)
+    
+    A->>A: Recover Wallet_B from Sig_B
+    A->>KMSReg: Verify Wallet_B is registered
+    Note over A: Sync Successful
 ```
 
-## Nova App Access to KMS Workflow
+---
 
-This workflow describes how a Nova app discovers and accesses the KMS service.
+## 5. Nova App Access to KMS (Mutual PoP)
 
-> **Note on authentication:** When a Nova app accesses a KMS node, the KMS node verifies the app's wallet address against **Nova App Registry** (app identity). When a KMS node syncs with another KMS node, each side verifies the other's wallet address against **KMS Registry** (operator identity). Attestation is verified **inside the enclave app** (no trusted proxies).
+KMS supports **Lightweight PoP** for high-performance app API calls.
 
-### Workflow
+### Mutual PoP Handshake Flow
+1.  **Discovery**: App queries **KMSRegistry** to get the list of authorized node wallets.
+2.  **Challenge**: App calls `GET /nonce` on a selected KMS node.
+3.  **Signature A ($Sig\_A$)**: App signs a message binding the challenge and the node:
+    `NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>`
+    This is sent in the `X-App-Signature` header.
+4.  **Authenticated Request**: App calls KMS API (e.g., `POST /kms/derive`) with PoP headers.
+5.  **Verification & Permission Management**: 
+    - KMS recovers App wallet signer from $Sig\_A$.
+    - KMS queries **NovaAppRegistry** using the `app_wallet` to find the corresponding **`app_id`**.
+    - KMS verifies the app status is `ACTIVE`.
+    - KMS uses the **`app_id`** to enforce permission boundaries (e.g., ensuring an app only accesses its own derived keys or KV namespace).
+6.  **Mutual Proof**: KMS returns its signature on $Sig\_A$ to prove it processed the request:
+    `NovaKMS:Response:<Sig_A>:<KMS_Wallet>`
+    returned in response header `X-KMS-Response-Signature`.
+7.  **Verification A**: App verifies KMS node's identity against the $KMS\_Wallet$ recorded in **KMSRegistry**.
 
-0. Configure the Nova App Registry and KMS registry addresses.
-1. Query the KMS registry to get all operator wallets.
-2. Query the Nova App Registry for instance details of each operator.
-3. Select a reachable KMS node from the list.
-4. Call `GET /nonce` on the selected KMS node to obtain a one-time challenge nonce.
-5. Use the nonce when requesting a Nitro attestation from Odyn so that it is embedded into the attestation document (payload `nonce` field).
-6. Establish a connection with the selected KMS node and provide a Nitro attestation document (for example via the `x-nitro-attestation` header). The signed attestation `user_data` includes the wallet address.
-7. The client validates that the wallet address in the KMS node attestation matches the operator wallet from the KMS registry. If it does not match, abort.
-8. The KMS node validates the app identity and metadata:
-    8.1 Verifies the Nitro attestation against AWS Nitro Root-G1 and checks that the embedded nonce matches a recently issued, unused nonce.
-    8.2 Extracts wallet address and measurement from the attestation `user_data`.
-    8.3 Queries Nova App Registry for app metadata by wallet and validates status / measurement.
-9. The KMS node returns or stores data for the app.
-
-### Mermaid Diagram
-
+### Diagram: App-to-KMS Mutual PoP
 ```mermaid
 sequenceDiagram
     autonumber
-    participant NovaApp as Nova App
-    participant KMSRegistry as KMS Registry
-    participant NovaRegistry as Nova App Registry
-    participant KMSNode as KMS Node
+    participant App as Nova App (Client)
+    participant KMS as KMS Node (Server)
+    participant AppReg as Nova App Registry
+    participant KMSReg as KMS Registry
 
-    NovaApp->>KMSRegistry: getOperators()
-    KMSRegistry-->>NovaApp: operator wallets
-    NovaApp->>NovaRegistry: getInstanceByWallet(wallets)
-    NovaRegistry-->>NovaApp: instance details
-    NovaApp->>NovaApp: Pick reachable KMS node
-    NovaApp->>KMSNode: GET /nonce
-    KMSNode-->>NovaApp: nonce
-    NovaApp->>NovaApp: Request Nitro attestation with embedded nonce
-    NovaApp->>KMSNode: Connect and present Nitro attestation
-    NovaApp->>NovaApp: Verify KMS node wallet in attestation
-    KMSNode->>KMSNode: Verify attestation + nonce (in-app)
-    KMSNode->>NovaRegistry: Verify app metadata by wallet
-    NovaRegistry-->>KMSNode: App data and permissions
-    KMSNode->>KMSNode: Authorize request
-    KMSNode-->>NovaApp: Return or store data
+    App->>KMSReg: getOperators()
+    KMSReg-->>App: List of authorized node wallets
+    
+    App->>KMS: GET /nonce
+    KMS-->>App: Nonce
+    
+    Note over App: Create Message:<br/>"NovaKMS:AppAuth:Nonce:KMS_Wallet:TS"
+    Note over App: Sign with TEE Private Key (Sig_A)
+    
+    App->>KMS: POST /kms/derive (App PoP Headers)
+    
+    KMS->>KMS: Recover App Wallet from Sig_A
+    KMS->>AppReg: getInstanceByWallet(AppWallet)
+    AppReg-->>KMS: Instance Details (AppID, VersionID, Status)
+    
+    Note over KMS: Verify Status == ACTIVE
+    Note over KMS: Use AppID for Partitioned Access
+    
+    Note over KMS: Create Response Message:<br/>"NovaKMS:Response:Sig_A:KMS_Wallet"
+    Note over KMS: Sign with TEE Private Key (Sig_KMS)
+
+    KMS-->>App: 200 OK (Data + Header: Sig_KMS)
+    
+    App->>App: Recover Wallet from Sig_KMS
+    App->>App: Verify recovered == KMS_Wallet (from KMSRegistry)
 ```
+
+---
+
+## 6. API Reference: Key Derivation (`/kms/derive`)
+
+The `/kms/derive` endpoint allows an authorized app to derive deterministic keys for specific paths.
+
+### Request Body (`POST /kms/derive`)
+```json
+{
+  "path": "m/0/1",       // The derivation path string (e.g. BIP-32 style or custom)
+  "context": "signing",  // Optional context string for domain separation
+  "length": 32           // Optional length of the derived key in bytes (default 32)
+}
+```
+
+### Response Body
+```json
+{
+  "app_id": 123,         // The verified Application ID
+  "path": "m/0/1",       // The path used for derivation
+  "key": "base64...",    // The derived key (Base64 encoded)
+  "length": 32           // The length of the derived key
+}
+```
+
+---
+
+## 7. Security Properties
+
+| Property | Mechanism |
+| :--- | :--- |
+| **Authenticity** | Signatures are recovered into Wallet addresses which are strictly matched against on-chain Registry records (`KMSRegistry` for nodes, `NovaAppRegistry` for apps). |
+| **Freshness** | One-time nonces and tight timestamps prevent replay attacks. |
+| **Identity Binding** | Signatures include the recipient's wallet address, preventing "Reflection" or "Re-routing" attacks (a signature for Node B cannot be used to authenticate to Node C). |
+| **Bidirectional Trust** | Mutual signatures ensure both client and server are verified against on-chain status before sensitive data is processed. |
+| **Cluster Integrity** | The strict initialization loop ensures no node creates a parallel state if an active cluster already exists. |
