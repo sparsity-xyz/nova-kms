@@ -200,16 +200,12 @@ def _startup_production() -> dict:
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
 
     # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
-    if kms_registry:
-        verified = sync_manager.verify_and_sync_peers(
-            kms_registry,
-            master_secret_mgr=master_secret_mgr,
-        )
-        logger.info(f"Peer verification complete: {verified} verified peers")
-
-    if not master_secret_mgr.is_initialized:
-        logger.info("Generating new master secret from hardware RNG")
-        master_secret_mgr.initialize_from_random(odyn)
+    # Uses strict initialization logic to prevent split-brain.
+    sync_manager.wait_for_master_secret(
+        kms_registry=kms_registry if kms_registry else None,
+        master_secret_mgr=master_secret_mgr,
+        odyn=odyn,
+    )
 
     # 7. CA & auth
     ca = CertificateAuthority(master_secret_mgr)

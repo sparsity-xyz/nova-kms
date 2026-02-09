@@ -137,6 +137,7 @@ class PeerCache:
                         "tee_wallet_address": instance.tee_wallet_address,
                         "node_url": instance.instance_url,
                         "operator": instance.operator,
+                        "status": instance.status,
                     })
                 except Exception as exc:
                     logger.debug(f"Instance lookup failed for operator {operator}: {exc}")
@@ -237,6 +238,66 @@ class SyncManager:
 
         logger.info(f"Peer verification complete: {verified_count}/{len(peers)} verified")
         return verified_count
+
+    def wait_for_master_secret(
+        self,
+        kms_registry,
+        master_secret_mgr,
+        odyn,
+        *,
+        retry_interval: int = 10,
+    ) -> None:
+        """
+        Wait until the master secret is initialized, either by syncing from an
+        existing active peer or by generating a new one if this is the only
+        active operator (Step 1-5 of the split-brain prevention logic).
+        """
+        from nova_registry import InstanceStatus
+
+        while not master_secret_mgr.is_initialized:
+            logger.info("Starting master secret initialization loop...")
+            try:
+                # 1. Fetch all operators from KMSRegistry
+                self.peer_cache.refresh()
+                all_peers = self.peer_cache.get_peers()
+                
+                # Filter for "others"
+                others = [p for p in all_peers if p["tee_wallet_address"].lower() != self.node_wallet.lower()]
+                
+                if not others:
+                    # 2. Only self in the registry
+                    logger.info("No other operators found in registry. Initializing as seed node.")
+                    master_secret_mgr.initialize_from_random(odyn)
+                    break
+
+                # 3. Check status of other operators
+                active_others = [p for p in others if p["status"] == InstanceStatus.ACTIVE]
+                
+                if not active_others:
+                    # 4. All others are non-active
+                    logger.info("Found other operators, but none are ACTIVE. Initializing as seed node.")
+                    master_secret_mgr.initialize_from_random(odyn)
+                    break
+
+                # 5. Active others exist, attempt to sync
+                logger.info(f"Found {len(active_others)} active peers. Attempting to sync master secret...")
+                for peer in active_others:
+                    peer_url = peer["node_url"]
+                    if self._sync_master_secret_from_peer(peer_url, master_secret_mgr):
+                        logger.info(f"Successfully synced master secret from {peer_url}")
+                        break
+                
+                if master_secret_mgr.is_initialized:
+                    break
+                
+                logger.warning("Could not connect to any active peers for master secret sync.")
+                
+            except Exception as exc:
+                logger.error(f"Error during master secret initialization: {exc}")
+
+            # 6. Wait and retry from step 1
+            logger.info(f"Retrying master secret initialization in {retry_interval} seconds...")
+            time.sleep(retry_interval)
 
     def _sync_master_secret_from_peer(self, peer_url: str, master_secret_mgr) -> bool:
         """
