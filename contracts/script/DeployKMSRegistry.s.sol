@@ -15,7 +15,6 @@ import {
 contract DeployKMSRegistry is Script {
     function run() external {
         address novaAppRegistryProxy = vm.envAddress("NOVA_APP_REGISTRY_PROXY");
-        uint256 kmsAppId = vm.envUint("KMS_APP_ID");
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployerAddr = vm.addr(deployerKey);
 
@@ -26,7 +25,7 @@ contract DeployKMSRegistry is Script {
 
         // 2. Deploy Proxy and Initialize
         // Initializing with owner and registry. kmsAppId defaults to 0.
-        // Owner must call setKmsAppId() later.
+        // Owner MUST call setKmsAppId() later.
         bytes memory initData = abi.encodeCall(
             KMSRegistry.initialize,
             (deployerAddr, novaAppRegistryProxy)
@@ -45,15 +44,17 @@ contract DeployKMSRegistry is Script {
             address(proxy)
         );
         console.log("NovaAppRegistry proxy:", novaAppRegistryProxy);
-        console.log("Initial KMS App ID set to 0. Owner must update this.");
         console.log("");
+        console.log("CRITICAL POST-DEPLOYMENT STEPS:");
+        console.log("1. Set dappContract on NovaAppRegistry for your KMS App.");
         console.log(
-            "NEXT: 1. Set dappContract on NovaAppRegistry for your AppId to",
-            address(proxy)
+            "2. Call setKmsAppId(YOUR_APP_ID) on the proxy to enable operator callbacks."
         );
+        console.log("");
+        console.log("Example using cast:");
         console.log(
-            "      2. Call setKmsAppId(%s) on the proxy if assigned.",
-            kmsAppId
+            'cast send %s "setKmsAppId(uint256)" <APP_ID> --private-key <KEY> --rpc-url <URL>',
+            address(proxy)
         );
 
         vm.stopBroadcast();

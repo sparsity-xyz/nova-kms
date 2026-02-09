@@ -61,11 +61,15 @@ cd contracts && forge test -vvv
 ```bash
 cd contracts
 export NOVA_APP_REGISTRY_PROXY=0x...
-export KMS_APP_ID=...
 export PRIVATE_KEY=0x...
 
-forge script script/DeployKMSRegistry.s.sol \
-  --rpc-url https://sepolia.base.org --broadcast
+# 1. Deploy
+make deploy
+
+# 2. Set App ID (after assigned by platform)
+export CONTRACT_ADDRESS=0x...
+export KMS_APP_ID=...
+make set-app-id
 ```
 
 ## API Reference

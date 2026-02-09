@@ -45,19 +45,34 @@ echo "║  Starting $NUM_NODES nodes on ports 8000-$((8000 + NUM_NODES - 1))    
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
+BASE_PORT=${BASE_PORT:-8010}
+VENV_PYTHON="${SCRIPT_DIR}/../.venv/bin/python3"
+PYTHON_CMD="python3"
+
+if [[ -f "$VENV_PYTHON" ]]; then
+    PYTHON_CMD="$VENV_PYTHON"
+fi
+
+# Construct SIM_PEERS_CSV for dynamic topology
+SIM_PEERS_CSV="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|http://localhost:$((BASE_PORT + 0)),"
+SIM_PEERS_CSV+="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|http://localhost:$((BASE_PORT + 1)),"
+SIM_PEERS_CSV+="0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC|http://localhost:$((BASE_PORT + 2))"
+
+export SIM_PEERS_CSV
+
 for i in $(seq 0 $((NUM_NODES - 1))); do
-    port=$((8000 + i))
+    port=$((BASE_PORT + i))
     echo "Starting node $i on port $port ..."
-    SIM_NODE_INDEX=$i python app.py &
+    SIM_PORT=$port SIM_NODE_INDEX=$i $PYTHON_CMD app.py &
     PIDS+=($!)
     sleep 1
 done
 
 echo ""
 echo "All $NUM_NODES nodes started.  Press Ctrl+C to stop."
-echo "  Node 0: http://localhost:8000"
-echo "  Node 1: http://localhost:8001"
-echo "  Node 2: http://localhost:8002"
+for i in $(seq 0 $((NUM_NODES - 1))); do
+    echo "  Node $i: http://localhost:$((BASE_PORT + i))"
+done
 echo ""
 
 # Wait for all background processes

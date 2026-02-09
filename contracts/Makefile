@@ -34,7 +34,7 @@ deploy:
 	@echo "======================================"
 	@echo "Deploying KMSRegistry"
 	@echo "======================================"
-	@echo "Required env vars: NOVA_APP_REGISTRY_PROXY, KMS_APP_ID, PRIVATE_KEY"
+	@echo "Required env vars: NOVA_APP_REGISTRY_PROXY, PRIVATE_KEY"
 	forge script script/DeployKMSRegistry.s.sol --tc DeployKMSRegistry \
 		--rpc-url $(RPC_URL) \
 		--private-key $(PRIVATE_KEY) \

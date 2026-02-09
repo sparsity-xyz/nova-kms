@@ -47,7 +47,6 @@ This guide covers deploying Nova KMS to production on the Nova Platform (AWS Nit
 cd nova-kms/contracts
 
 export NOVA_APP_REGISTRY_PROXY=0x...   # NovaAppRegistry proxy address
-export KMS_APP_ID=...                   # KMS appId from NovaAppRegistry
 export PRIVATE_KEY=0x...                # Deployer private key (admin)
 ```
 
@@ -57,22 +56,24 @@ export PRIVATE_KEY=0x...                # Deployer private key (admin)
 make deploy
 ```
 
-Or manually:
-forge script script/DeployKMSRegistry.s.sol \
-  --rpc-url https://sepolia.base.org \
-  --broadcast \
-  --verify \
-  -vvv
+Save the deployed **Proxy** contract address.
+
+### 1.3 Configure KMS App ID
+
+Once the KMS application is created in the Nova Platform and you have an `appId`:
+
+```bash
+export CONTRACT_ADDRESS=<KMS_REGISTRY_PROXY_ADDRESS>
+export KMS_APP_ID=<ASSIGNED_APP_ID>
+make set-app-id
 ```
 
-Save the deployed contract address. It will be needed for `config.py`.
-
-### 1.3 Verify
+### 1.4 Verify
 
 ```bash
 # Check the deployment
 cast call <KMS_REGISTRY_ADDRESS> "kmsAppId()" --rpc-url https://sepolia.base.org
-cast call <KMS_REGISTRY_ADDRESS> "admin()" --rpc-url https://sepolia.base.org
+cast call <KMS_REGISTRY_ADDRESS> "owner()" --rpc-url https://sepolia.base.org
 ```
 
 ## Step 2: Configure the Enclave Application

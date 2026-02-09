@@ -74,6 +74,9 @@ def _startup_simulation() -> dict:
     """
     from simulation import build_sim_components, get_sim_port
 
+    def data_key_callback(app_id: int) -> bytes:
+        return master_secret_mgr.derive(app_id, "data_key")
+
     sim = build_sim_components()
 
     tee_wallet = sim["tee_wallet"]
@@ -92,7 +95,7 @@ def _startup_simulation() -> dict:
         "simulation_mode": True,
     }
 
-    data_store = DataStore(node_id=tee_wallet)
+    data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
 
@@ -143,6 +146,9 @@ def _startup_production() -> dict:
 
     odyn = Odyn()
 
+    def data_key_callback(app_id: int) -> bytes:
+        return master_secret_mgr.derive(app_id, "data_key")
+
     # 1. Wait for Helios RPC
     try:
         wait_for_helios(timeout=60)
@@ -189,7 +195,7 @@ def _startup_production() -> dict:
     node_info["is_operator"] = is_operator
 
     # 5. Initialize data store & sync
-    data_store = DataStore(node_id=tee_wallet)
+    data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache)
 

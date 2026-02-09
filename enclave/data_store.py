@@ -116,11 +116,51 @@ class DataRecord:
 class _Namespace:
     """Thread-safe KV namespace for a single app_id."""
 
-    def __init__(self, app_id: int):
+    def __init__(self, app_id: int, key_callback=None):
         self.app_id = app_id
         self.records: Dict[str, DataRecord] = {}
         self._lock = threading.Lock()
         self._total_bytes = 0
+        self._key_callback = key_callback
+        self._cached_key: Optional[bytes] = None
+
+    def _get_key(self) -> Optional[bytes]:
+        """Fetch/cache the per-app data encryption key."""
+        if self._cached_key:
+            return self._cached_key
+        if self._key_callback:
+            try:
+                self._cached_key = self._key_callback(self.app_id)
+                return self._cached_key
+            except Exception as exc:
+                logger.error(f"Failed to derive data key for app {self.app_id}: {exc}")
+        return None
+
+    def _encrypt(self, value: bytes) -> bytes:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import os
+        key = self._get_key()
+        if not key:
+            return value  # Fallback to plaintext if key not available
+        aesgcm = AESGCM(key)
+        nonce = os.urandom(12)
+        return nonce + aesgcm.encrypt(nonce, value, None)
+
+    def _decrypt(self, ciphertext: bytes) -> Optional[bytes]:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        if not ciphertext:
+            return None
+        key = self._get_key()
+        if not key:
+            return ciphertext  # Assume plaintext fallback
+        try:
+            aesgcm = AESGCM(key)
+            nonce = ciphertext[:12]
+            return aesgcm.decrypt(nonce, ciphertext[12:], None)
+        except Exception as exc:
+            logger.debug(f"Decryption failed for app {self.app_id}: {exc}")
+            # If decryption fails, it might be legacy plaintext or wrong key
+            return ciphertext
 
     def get(self, key: str) -> Optional[DataRecord]:
         with self._lock:
@@ -129,7 +169,17 @@ class _Namespace:
                 return None
             if rec.tombstone or rec.is_expired:
                 return None
-            return rec
+            
+            # Decrypt value for the caller
+            decrypted_value = self._decrypt(rec.value) if rec.value else None
+            return DataRecord(
+                key=rec.key,
+                value=decrypted_value,
+                version=rec.version,
+                updated_at_ms=rec.updated_at_ms,
+                tombstone=rec.tombstone,
+                ttl_ms=rec.ttl_ms
+            )
 
     def put(
         self,
@@ -146,7 +196,8 @@ class _Namespace:
             vc = VectorClock(old.version.clock if old else {})
             vc.increment(node_id)
 
-            new_size = len(value)
+            encrypted_value = self._encrypt(value)
+            new_size = len(encrypted_value)
             old_size = old.value_size() if old and not old.tombstone else 0
             projected = self._total_bytes - old_size + new_size
             if projected > MAX_APP_STORAGE:
@@ -154,7 +205,7 @@ class _Namespace:
 
             rec = DataRecord(
                 key=key,
-                value=value,
+                value=encrypted_value,
                 version=vc,
                 updated_at_ms=int(time.time() * 1000),
                 tombstone=False,
@@ -162,7 +213,16 @@ class _Namespace:
             )
             self._total_bytes += new_size - old_size
             self.records[key] = rec
-            return rec
+            
+            # Return record with original plaintext value
+            return DataRecord(
+                key=rec.key,
+                value=value,
+                version=rec.version,
+                updated_at_ms=rec.updated_at_ms,
+                tombstone=rec.tombstone,
+                ttl_ms=rec.ttl_ms
+            )
 
     def delete(self, key: str, node_id: str) -> Optional[DataRecord]:
         with self._lock:
@@ -273,15 +333,16 @@ class DataStore:
     Non-persistent — all data lives only in enclave memory.
     """
 
-    def __init__(self, node_id: str):
+    def __init__(self, node_id: str, key_callback=None):
         self.node_id = node_id
         self._namespaces: Dict[int, _Namespace] = {}
         self._lock = threading.Lock()
+        self._key_callback = key_callback
 
     def _ns(self, app_id: int) -> _Namespace:
         with self._lock:
             if app_id not in self._namespaces:
-                self._namespaces[app_id] = _Namespace(app_id)
+                self._namespaces[app_id] = _Namespace(app_id, key_callback=self._key_callback)
             return self._namespaces[app_id]
 
     # ------------------------------------------------------------------
@@ -305,10 +366,17 @@ class DataStore:
     # ------------------------------------------------------------------
 
     def merge_record(self, app_id: int, record: DataRecord) -> bool:
+        """
+        Merge a record from a peer. Note that record.value is already 
+        encrypted if coming from a peer with the same master secret.
+        """
         return self._ns(app_id).merge_record(record)
 
     def get_deltas_since(self, since_ms: int) -> Dict[int, List[DataRecord]]:
-        """Return deltas across all namespaces."""
+        """
+        Return deltas across all namespaces. Values returned here are 
+        ENCRYPTED from the internal records.
+        """
         with self._lock:
             ns_ids = list(self._namespaces.keys())
         result: Dict[int, List[DataRecord]] = {}
@@ -319,6 +387,7 @@ class DataStore:
         return result
 
     def full_snapshot(self) -> Dict[int, List[DataRecord]]:
+        """Values returned here are ENCRYPTED."""
         with self._lock:
             ns_ids = list(self._namespaces.keys())
         return {

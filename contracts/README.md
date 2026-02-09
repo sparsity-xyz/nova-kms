@@ -51,7 +51,6 @@ Or export the following variables in your shell:
 | `RPC_URL` | The RPC endpoint for the target network (e.g., Base Sepolia) |
 | `PRIVATE_KEY` | Hex-encoded private key of the deployer |
 | `NOVA_APP_REGISTRY_PROXY` | Address of the `NovaAppRegistry` proxy contract |
-| `KMS_APP_ID` | The Application ID assigned to Nova KMS by the platform |
 
 ### 2. Deploy `KMSRegistry`
 
@@ -61,12 +60,23 @@ make deploy
 ```
 
 The script will:
-1. Deploy `KMSRegistry` with the configured `NOVA_APP_REGISTRY_PROXY` and `KMS_APP_ID`.
-2. Output the deployed contract address.
+1. Deploy `KMSRegistry` implementation and proxy.
+2. Initialize with the configured `NOVA_APP_REGISTRY_PROXY`.
+3. Output the deployed contract address.
 
-### 3. Post-Deployment: Platform Registration
+### 3. Setup KMS App ID
 
-After deployment, you **must** register the `KMSRegistry` address with the Nova Platform:
+Once you have the Application ID assigned to Nova KMS by the platform, you **must** set it on the proxy:
+
+```bash
+export CONTRACT_ADDRESS=0x_PROXY_ADDRESS
+export KMS_APP_ID=your_assigned_id
+make set-app-id
+```
+
+### 4. Post-Deployment: Platform Registration
+
+After deployment and setting the App ID, you **must** register the `KMSRegistry` address with the Nova Platform:
 
 1. Locate your KMS application in the `NovaAppRegistry`.
 2. Set the `dappContract` field to the address of the newly deployed `KMSRegistry`.
