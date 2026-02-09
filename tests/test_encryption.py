@@ -1,7 +1,7 @@
 import pytest
 import os
-from enclave.data_store import DataStore
-from enclave.kdf import MasterSecretManager
+from data_store import DataStore
+from kdf import MasterSecretManager
 
 def test_in_memory_encryption_transparency():
     # 1. Setup MasterSecretManager

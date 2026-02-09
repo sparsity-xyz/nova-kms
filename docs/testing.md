@@ -147,27 +147,30 @@ foundryup
 ```bash
 forge test           # all tests
 forge test -vvv      # verbose with traces
-forge test --match-test testRegisterNode  # single test
+forge test --match-test test_addOperator_success  # single test
 forge test --gas-report  # gas usage
 ```
 
 ### Test File: `KMSRegistry.t.sol`
 
-Uses a `MockNovaAppRegistry` contract that stubs `getInstanceByWallet`, `getApp`, and `getVersion`.
+Uses a mock `novaAppRegistry` address to simulate the callback pattern.
 
 | Test | Scenario |
 |------|----------|
-| `testRegisterNode` | Successful registration with valid instance |
-| `testRegisterDuplicate` | Revert on double registration |
-| `testRegisterWrongApp` | Revert if instance belongs to wrong appId |
-| `testRegisterNotZkVerified` | Revert if instance not zkVerified |
-| `testRegisterStoppedInstance` | Revert if instance is STOPPED |
-| `testRegisterRevokedVersion` | Revert if version is REVOKED |
-| `testDeactivateByNode` | Node wallet can deactivate own node |
-| `testDeactivateByAdmin` | Admin can deactivate any node |
-| `testDeactivateUnauthorized` | Non-owner/non-admin can't deactivate |
-| `testListNodes*` | Pagination with cursor + limit |
-| `testAdminTransfer` | Admin change |
+| `test_initialize_setsState` | Proxy initialization sets registry, appId, owner |
+| `test_initialize_revert_alreadyInitialized` | Cannot re-initialize |
+| `test_setNovaAppRegistry_byOwner` | Owner can update registry address |
+| `test_setNovaAppRegistry_revert_notOwner` | Non-owner cannot update registry |
+| `test_setKmsAppId_byOwner` | Owner can set KMS app ID |
+| `test_setKmsAppId_revert_notOwner` | Non-owner cannot set app ID |
+| `test_addOperator_success` | Successful operator addition via callback |
+| `test_addOperator_emitsEvent` | OperatorAdded event emitted |
+| `test_removeOperator_success` | Operator removed via callback |
+| `test_transferOwnership` | Ownable2Step ownership transfer |
+| `test_upgrade_authorized` | Owner can upgrade proxy |
+| `test_upgrade_revert_unauthorized` | Non-owner cannot upgrade |
+| `test_getOperators_empty` | Empty operator list |
+| `test_fullLifecycle` | Add 3 operators, remove 1, verify state |
 
 ---
 

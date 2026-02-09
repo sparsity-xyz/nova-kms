@@ -425,9 +425,13 @@ class TestSimulationApp:
     def test_sync_endpoint(self, sim_client):
         """Sync endpoint should accept incoming sync messages."""
         import time
+        import json
+        import hashlib
+        import hmac as hmac_mod
         from eth_account import Account
         from eth_account.messages import encode_defunct
-        from simulation import get_sim_private_key_hex
+        from simulation import get_sim_private_key_hex, get_sim_master_secret
+        from kdf import derive_sync_key
 
         nonce = sim_client.get("/nonce").json()["nonce"]
         ts = str(int(time.time()))
@@ -438,17 +442,32 @@ class TestSimulationApp:
         msg = f"NovaKMS:Auth:{nonce}:{recipient_wallet}:{ts}"
         sig = Account.from_key(bytes.fromhex(pk_hex)).sign_message(encode_defunct(text=msg)).signature.hex()
 
+        body = {
+            "type": "delta",
+            "sender_wallet": sender_wallet,
+            "data": {},
+        }
+        # Compute HMAC on the same dict that routes.py passes to handle_incoming_sync
+        # (SyncRequest.model_dump() includes all fields with defaults)
+        model_body = {
+            "type": "delta",
+            "sender_wallet": sender_wallet,
+            "data": {},
+            "master_secret": None,
+            "ecdh_pubkey": None,
+        }
+        sync_key = derive_sync_key(get_sim_master_secret())
+        payload_json = json.dumps(model_body, sort_keys=True, separators=(",", ":"))
+        hmac_sig = hmac_mod.new(sync_key, payload_json.encode("utf-8"), hashlib.sha256).hexdigest()
+
         r = sim_client.post(
             "/sync",
-            json={
-                "type": "delta",
-                "sender_wallet": sender_wallet,
-                "data": {},
-            },
+            json=body,
             headers={
                 "x-kms-signature": sig,
                 "x-kms-timestamp": ts,
                 "x-kms-nonce": nonce,
+                "x-sync-signature": hmac_sig,
             },
         )
         assert r.status_code == 200

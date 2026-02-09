@@ -203,7 +203,7 @@ class SyncManager:
         Implements KMS Node Initialization Workflow steps 4.1–4.5:
 
         For each discovered peer:
-          4.1 Probe the peer via /health (RA-TLS in production).
+          4.1 Probe the peer via /health.
           4.2 Verify the peer’s wallet address is in the KMS registry.
           4.3 Save verified peers; remove unverified ones from the cache.
           4.4 If master secret is not yet initialized and a verified peer
@@ -611,7 +611,10 @@ class SyncManager:
         logger.debug(f"KMS PoP verified for {p_wallet}")
 
         # 2. Verify HMAC signature if sync key is set
-        if self._sync_key and signature:
+        if self._sync_key:
+            if not signature:
+                logger.warning("Sync message rejected: HMAC signature required but not provided")
+                return {"status": "error", "reason": "Missing HMAC signature"}
             payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
             if not _verify_hmac(self._sync_key, payload_json.encode("utf-8"), signature):
                 logger.warning("Sync message HMAC verification failed")

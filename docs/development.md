@@ -281,8 +281,7 @@ make deploy
 ### `odyn.py` — Platform SDK (DO NOT MODIFY)
 Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 - `eth_address()` — TEE wallet address
-- `sign_tx(tx)` — sign EIP-1559 transactions
-- `get_attestation()` — attestation document (available in SDK; not used by this KMS)
+- `sign_message(msg)` — EIP-191 signing for PoP
 - `get_random_bytes()` — hardware RNG
 - `s3_put/get/delete` — persistent storage (not used by KMS)
 
@@ -290,7 +289,7 @@ Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 `Chain` class wrapping Web3.py. Key functions:
 - `wait_for_helios()` — blocks until RPC is synced
 - `eth_call(to, data)` — read-only call
-- `sign_and_broadcast()` — build, sign via Odyn, broadcast
+- `eth_call_finalized(to, data)` — read-only call at confirmed block depth
 
 ### `auth.py` — Authorization
 `AppAuthorizer` verifies the caller identity (from PoP signer wallet) against NovaAppRegistry:

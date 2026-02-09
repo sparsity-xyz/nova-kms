@@ -128,23 +128,23 @@ def _authorize_app(request: Request) -> dict:
     Verify the calling app via PoP / dev headers and return detailed auth info.
     Raises HTTPException(403) on failure.
     """
-    from auth import get_attestation
+    from auth import authenticate_app
 
     try:
-        attestation = get_attestation(request, dict(request.headers))
+        identity = authenticate_app(request, dict(request.headers))
     except RuntimeError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
-    if not attestation.tee_wallet:
+    if not identity.tee_wallet:
         raise HTTPException(status_code=403, detail="Missing TEE wallet in request")
 
-    result = _authorizer.verify(attestation)
+    result = _authorizer.verify(identity)
     if not result.authorized:
         raise HTTPException(status_code=403, detail=result.reason or "Unauthorized")
 
     return {
         "app_id": result.app_id,
-        "client_sig": attestation.signature
+        "client_sig": identity.signature
     }
 
 

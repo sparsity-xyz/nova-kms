@@ -46,17 +46,16 @@ def is_production_mode() -> bool:
 
 
 # =============================================================================
-# Attestation abstraction
+# Client Identity
 # =============================================================================
 
 @dataclass
-class ClientAttestation:
+class ClientIdentity:
     """
-    Represents the parsed RA-TLS client attestation.
+    Represents the verified identity of a requesting app.
 
-    In production, these fields are extracted from the TLS certificate
-    extensions populated by the Nitro enclave's attestation document.
-    In development, they can be injected via HTTP headers for testing.
+    In production, fields are recovered from PoP (EIP-191) signatures.
+    In dev/sim mode, they can be injected via HTTP headers for testing.
     """
 
     tee_wallet: str                  # Ethereum address of the instance
@@ -66,11 +65,10 @@ class ClientAttestation:
 
 class _NonceStore:
     """
-    In-enclave nonce cache for challenge-response.
+    In-enclave nonce cache for PoP challenge-response.
 
-    - KMS issues one-time nonces via a public endpoint.
-    - Clients must include the issued nonce inside the Nitro attestation
-      (payload['nonce']) when calling authenticated endpoints.
+    - KMS issues one-time nonces via ``GET /nonce``.
+    - Clients include the nonce in their PoP signature message.
     - Nonces are single-use and expire after a short TTL to prevent replay.
     """
 
@@ -112,7 +110,7 @@ class _NonceStore:
         self._nonces = {n: exp for n, exp in self._nonces.items() if exp >= now}
 
 
-_nonce_store = _NonceStore(ttl_seconds=getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120))
+_nonce_store = _NonceStore(ttl_seconds=getattr(config, "POP_MAX_AGE_SECONDS", 120))
 
 
 def issue_nonce() -> bytes:
@@ -120,40 +118,35 @@ def issue_nonce() -> bytes:
     return _nonce_store.issue()
 
 
-def issue_attestation_challenge() -> bytes:
-    """Backward-compatible alias for issue_nonce()."""
-    return issue_nonce()
-
-
-def attestation_from_headers(headers: dict) -> ClientAttestation:
+def identity_from_headers(headers: dict) -> ClientIdentity:
     """
-    Build a ClientAttestation from HTTP headers (dev / test mode).
+    Build a ClientIdentity from HTTP headers (dev / sim mode).
 
-    This helper provides a debugging shim for local development.
+    This helper provides a convenience shim for local development.
 
     In production mode (IN_ENCLAVE=True) this function raises an error to
     prevent header-based spoofing.
     """
     if is_production_mode():
         raise RuntimeError(
-            "Header-based attestation is disabled in production. "
+            "Header-based identity is disabled in production. "
             "Use PoP (X-App-Signature / X-App-Nonce / X-App-Timestamp)."
         )
     tee_wallet = headers.get("x-tee-wallet", "")
     measurement_hex = headers.get("x-tee-measurement", "")
     measurement = bytes.fromhex(measurement_hex.replace("0x", "")) if measurement_hex else None
     if tee_wallet:
-        logger.debug("Using header-based attestation (dev/sim mode)")
-    return ClientAttestation(tee_wallet=tee_wallet, measurement=measurement)
+        logger.debug("Using header-based identity (dev/sim mode)")
+    return ClientIdentity(tee_wallet=tee_wallet, measurement=measurement)
 
 
-def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
+def app_identity_from_signature(request) -> Optional[ClientIdentity]:
     """
     Extract app identity from PoP signature headers.
     Headers: X-App-Signature, X-App-Timestamp, X-App-Nonce
 
-    For backward compatibility, X-App-Wallet may be provided, but it is not
-    required. When omitted, the wallet is recovered from the signature.
+    X-App-Wallet may be provided as an optional hint, but is not required.
+    The wallet is always recovered from the signature.
     """
     sig = request.headers.get("x-app-signature")
     ts = request.headers.get("x-app-timestamp")
@@ -184,9 +177,9 @@ def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
         if wallet and recovered.lower() != wallet.lower():
             raise RuntimeError("App wallet header does not match signature")
 
-        # Return attestation with None measurement; AppAuthorizer will trust
+        # Return identity with None measurement; AppAuthorizer will trust
         # the on-chain measurement for this verified TEE wallet.
-        return ClientAttestation(
+        return ClientIdentity(
             tee_wallet=recovered.lower(),
             measurement=None,
             signature=sig
@@ -196,25 +189,25 @@ def app_attestation_from_signature(request) -> Optional[ClientAttestation]:
         raise RuntimeError(f"App PoP authentication failed: {exc}")
 
 
-def get_attestation(request, headers: dict) -> ClientAttestation:
+def authenticate_app(request, headers: dict) -> ClientIdentity:
     """
-    Unified attestation extraction.
+    Unified app authentication.
 
     - In production mode: require PoP signature.
     - In dev/sim mode: allow header-based identity for convenience.
     """
     if is_production_mode():
         # Require lightweight PoP signature
-        att = app_attestation_from_signature(request)
-        if att is not None:
-            return att
+        identity = app_identity_from_signature(request)
+        if identity is not None:
+            return identity
 
         raise RuntimeError(
             "Missing PoP authentication. "
             "Provide X-App-Signature / X-App-Nonce / X-App-Timestamp headers."
         )
     # Dev/sim mode: headers are acceptable
-    return attestation_from_headers(headers)
+    return identity_from_headers(headers)
 
 
 # =============================================================================
@@ -248,19 +241,19 @@ class AppAuthorizer:
     def __init__(self, registry: Optional[NovaRegistry] = None):
         self.registry = registry or NovaRegistry()
 
-    def verify(self, attestation: ClientAttestation) -> AuthResult:
+    def verify(self, identity: ClientIdentity) -> AuthResult:
         """
         Synchronous verification.  Returns AuthResult with authorized=True
         if all checks pass, or authorized=False with a reason string.
         """
-        if not attestation.tee_wallet:
+        if not identity.tee_wallet:
             return AuthResult(authorized=False, reason="Missing TEE wallet")
 
         # 1. Look up instance
         try:
-            instance = self.registry.get_instance_by_wallet(attestation.tee_wallet)
+            instance = self.registry.get_instance_by_wallet(identity.tee_wallet)
         except Exception as exc:
-            logger.warning(f"Instance lookup failed for {attestation.tee_wallet}: {exc}")
+            logger.warning(f"Instance lookup failed for {identity.tee_wallet}: {exc}")
             return AuthResult(authorized=False, reason="Instance not found")
 
         if instance.instance_id == 0:
@@ -293,15 +286,15 @@ class AppAuthorizer:
             return AuthResult(authorized=False, reason="Version not allowed")
 
         # 5. Measurement match
-        if attestation.measurement is not None:
-            if version.code_measurement != attestation.measurement:
+        if identity.measurement is not None:
+            if version.code_measurement != identity.measurement:
                 return AuthResult(authorized=False, reason="Measurement mismatch")
         elif config.REQUIRE_MEASUREMENT:
-            # In production, measurement is required for full attestation paths.
+            # In production, measurement is required for non-PoP identity paths.
             # For lightweight PoP, the wallet was already bound to a measured
             # version on-chain at enrollment time, so we allow missing measurement
             # ONLY when a PoP signature was presented.
-            if not attestation.signature:
+            if not identity.signature:
                 return AuthResult(authorized=False, reason="Measurement required")
 
         return AuthResult(
@@ -354,7 +347,16 @@ def _require_fresh_timestamp(ts: str) -> None:
     except Exception:
         raise RuntimeError("Invalid timestamp")
 
-    max_age = getattr(config, "ATTESTATION_MAX_AGE_SECONDS", 120)
+    max_age = getattr(config, "POP_MAX_AGE_SECONDS", 120)
     now = int(time.time())
     if abs(now - ts_int) > max_age:
         raise RuntimeError("Stale timestamp")
+
+
+# =============================================================================
+# Backward-compatibility aliases (deprecated — will be removed)
+# =============================================================================
+
+ClientAttestation = ClientIdentity
+attestation_from_headers = identity_from_headers
+get_attestation = authenticate_app

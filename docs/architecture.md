@@ -62,8 +62,8 @@ A Python/Flask application running inside AWS Nitro Enclave, packaged and deploy
 ```python
 # Get KMS node identity on startup
 eth_address = odyn.eth_address()      # KMS Ethereum address
-public_key = odyn.get_public_key()    # KMS P-384 public key
-attestation = odyn.get_attestation()  # KMS attestation document
+random_bytes = odyn.get_random_bytes() # Hardware RNG
+sig = odyn.sign_message(msg)          # EIP-191 signing for PoP
 ```
 
 ### 1.2 On-chain Contracts
@@ -247,10 +247,7 @@ sequenceDiagram
     participant AR as NovaAppRegistry
     participant KC as KMSRegistry Contract
     
-    Note over App: 1. Establish Secure Connection
-    App->>App: Generate Ephemeral Key Pair
-    App->>App: Get RA Quote via Odyn (binding sub_pubkey)
-    
+    Note over App: 1. Discover KMS Nodes
     App->>KC: getOperators()
     KC-->>App: address[]
     App->>AR: getInstanceByWallet(operator) [for each]
@@ -261,8 +258,8 @@ sequenceDiagram
     KMS->>KMS: Recover signer wallet & validate nonce/timestamp
     
     Note over KMS: 2. Verify App Identity via App Registry
-    App->>KMS: GET /kms/derive?path=app_secret
-    KMS->>KMS: Extract teeWallet + measurement from attestation user_data
+    App->>KMS: POST /kms/derive (path, context)
+    KMS->>KMS: Recover teeWallet from PoP signature
     
     KMS->>AR: getInstanceByWallet(teeWallet)
     AR-->>KMS: RuntimeInstance {appId, versionId, zkVerified, status}
@@ -352,9 +349,10 @@ sequenceDiagram
 |----------|--------|-------------|------|
 | `/health` | GET | Health check | None |
 | `/status` | GET | KMS node + cluster view | None |
-| `/kms/derive` | GET | **Derive application key** (KDF) | App PoP + NovaAppRegistry verification |
+| `/nonce` | GET | Issue one-time PoP nonce | None |
+| `/kms/derive` | POST | **Derive application key** (KDF) | App PoP + NovaAppRegistry verification |
 | `/kms/sign_cert`| POST | **Sign certificate** (CA) | App PoP + NovaAppRegistry verification |
-| `/kms/data` | GET | Get/Put/Delete KV data | App PoP + NovaAppRegistry verification |
+| `/kms/data` | GET/PUT/DELETE | KV data operations | App PoP + NovaAppRegistry verification |
 | `/sync` | POST | Receive sync event from other KMS nodes | KMS peer PoP + KMSRegistry operator verification |
 | `/nodes` | GET | Get list of KMS operators | None |
 
@@ -387,11 +385,10 @@ Payload format is simple JSON.
 >
 > **No trusted middleboxes**: the enclave application does not trust any proxy
 > or TLS terminator. In production, the caller must provide PoP signature
-> headers that the enclave verifies directly, and the
-> enclave app verifies it against the pinned AWS Nitro Root-G1 certificate
-> before extracting `tee_wallet` and `code_measurement` from signed `user_data`.
+> headers that the enclave verifies directly against on-chain registered
+> identities.
 
-**GET /kms/derive**
+**POST /kms/derive**
 ```json
 {
   "path": "app_disk_encryption",

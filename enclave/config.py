@@ -65,7 +65,8 @@ SIM_MASTER_SECRET_HEX: str = ""
 REQUIRE_MEASUREMENT: bool = IN_ENCLAVE
 
 # Max age (seconds) for PoP timestamps and the nonce TTL.
-ATTESTATION_MAX_AGE_SECONDS: int = int(os.getenv("ATTESTATION_MAX_AGE_SECONDS", "120"))
+POP_MAX_AGE_SECONDS: int = int(os.getenv("POP_MAX_AGE_SECONDS",
+                                          os.getenv("ATTESTATION_MAX_AGE_SECONDS", "120")))
 
 # =============================================================================
 # Security — Sync Integrity
