@@ -42,6 +42,7 @@ contract KMSRegistry is
     // ========== Events ==========
 
     event NovaAppRegistrySet(address indexed registry);
+    event KmsAppIdSet(uint256 indexed appId);
     event OperatorAdded(
         address indexed operator,
         uint256 indexed appId,
@@ -75,14 +76,12 @@ contract KMSRegistry is
 
     function initialize(
         address initialOwner,
-        address appRegistry_,
-        uint256 kmsAppId_
+        address appRegistry_
     ) public initializer {
         __Ownable_init(initialOwner);
 
         if (appRegistry_ == address(0)) revert InvalidRegistryAddress();
         _novaAppRegistryAddr = appRegistry_;
-        kmsAppId = kmsAppId_;
     }
 
     // ========== Upgrade Authorization ==========
@@ -103,6 +102,15 @@ contract KMSRegistry is
     /// @inheritdoc INovaAppInterface
     function novaAppRegistry() external view returns (address) {
         return _novaAppRegistryAddr;
+    }
+
+    /**
+     * @notice Updates the KMS App ID.
+     * @param newAppId The new application ID assigned by Nova.
+     */
+    function setKmsAppId(uint256 newAppId) external onlyOwner {
+        kmsAppId = newAppId;
+        emit KmsAppIdSet(newAppId);
     }
 
     /// @inheritdoc INovaAppInterface

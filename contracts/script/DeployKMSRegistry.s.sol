@@ -25,9 +25,11 @@ contract DeployKMSRegistry is Script {
         KMSRegistry implementation = new KMSRegistry();
 
         // 2. Deploy Proxy and Initialize
+        // Initializing with owner and registry. kmsAppId defaults to 0.
+        // Owner must call setKmsAppId() later.
         bytes memory initData = abi.encodeCall(
             KMSRegistry.initialize,
-            (deployerAddr, novaAppRegistryProxy, kmsAppId)
+            (deployerAddr, novaAppRegistryProxy)
         );
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(implementation),
@@ -43,13 +45,15 @@ contract DeployKMSRegistry is Script {
             address(proxy)
         );
         console.log("NovaAppRegistry proxy:", novaAppRegistryProxy);
-        console.log("KMS App ID:", kmsAppId);
+        console.log("Initial KMS App ID set to 0. Owner must update this.");
         console.log("");
         console.log(
-            "NEXT: Set dappContract on NovaAppRegistry for appId",
-            kmsAppId,
-            "to",
+            "NEXT: 1. Set dappContract on NovaAppRegistry for your AppId to",
             address(proxy)
+        );
+        console.log(
+            "      2. Call setKmsAppId(%s) on the proxy if assigned.",
+            kmsAppId
         );
 
         vm.stopBroadcast();

@@ -90,13 +90,17 @@ Once the implementation is verified:
 3. Click "More Options" -> "Is this a proxy?".
 4. Follow the prompts to verify the Proxy and link it to the implementation.
 
-## Management
+### Management Operations
 
-### Admin Operations
-The deployer is initially set as the `admin`. The admin can:
-- **Set a new admin**: `setAdmin(address newAdmin)`
-- **Manually add/remove operators**: In case the automatic callback fails (though the callback mechanism is the preferred path).
+#### Set KMS App ID
+If you deployed with App ID 0 or need to update it:
+```bash
+export CONTRACT_ADDRESS=0x_PROXY_ADDRESS
+export KMS_APP_ID=your_assigned_id
+make set-app-id
+```
 
+#### Manual Check
 Example manual check (using `cast`):
 ```bash
 # Check if a node is an operator

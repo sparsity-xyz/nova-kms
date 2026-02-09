@@ -30,15 +30,17 @@ contract KMSRegistryTest is Test {
         // 2. Deploy Proxy and Initialize
         bytes memory initData = abi.encodeCall(
             KMSRegistry.initialize,
-            (admin, mockAppRegistry, KMS_APP_ID)
+            (admin, mockAppRegistry)
         );
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(implementation),
             initData
         );
 
-        // 3. Cast Proxy to KMSRegistry for testing
+        // 3. Cast Proxy and set App ID
         registry = KMSRegistry(address(proxy));
+        vm.prank(admin);
+        registry.setKmsAppId(KMS_APP_ID);
     }
 
     // ========== Helper ==========
@@ -59,7 +61,7 @@ contract KMSRegistryTest is Test {
 
     function test_initialize_revert_alreadyInitialized() public {
         vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
-        registry.initialize(admin, mockAppRegistry, KMS_APP_ID);
+        registry.initialize(admin, mockAppRegistry);
     }
 
     // ========== setNovaAppRegistry Tests ==========
@@ -80,6 +82,25 @@ contract KMSRegistryTest is Test {
             )
         );
         registry.setNovaAppRegistry(address(0xBEEF));
+    }
+
+    // ========== setKmsAppId Tests ==========
+
+    function test_setKmsAppId_byOwner() public {
+        vm.prank(admin);
+        registry.setKmsAppId(999);
+        assertEq(registry.kmsAppId(), 999);
+    }
+
+    function test_setKmsAppId_revert_notOwner() public {
+        vm.prank(randomUser);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
+                randomUser
+            )
+        );
+        registry.setKmsAppId(999);
     }
 
     // ========== addOperator Tests ==========

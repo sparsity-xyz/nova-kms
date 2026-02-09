@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: install build clean test fmt deploy verify-blockscout verify-basescan
+.PHONY: install build clean test fmt deploy set-app-id verify-blockscout verify-basescan
 
 # Install dependencies
 install:
@@ -62,3 +62,12 @@ verify-basescan:
 		src/KMSRegistry.sol:KMSRegistry \
 		--etherscan-api-key $(BASESCAN_API_KEY) \
 		--watch
+
+# Set KMS App ID on the proxy
+set-app-id:
+	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS (proxy) not set"; exit 1; fi; \
+	if [ -z "$(KMS_APP_ID)" ]; then echo "Error: KMS_APP_ID not set"; exit 1; fi; \
+	echo "Setting KMS App ID to $(KMS_APP_ID) on $(CONTRACT_ADDRESS)..."; \
+	cast send $(CONTRACT_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
+		--rpc-url $(RPC_URL) \
+		--private-key $(PRIVATE_KEY)
