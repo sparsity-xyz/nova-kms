@@ -94,98 +94,122 @@ class RuntimeInstance:
 
 
 # =============================================================================
-# ABI Selectors
+# ABI Definition
 # =============================================================================
 
-_GET_APP = function_selector("getApp(uint256)")
-_GET_VERSION = function_selector("getVersion(uint256,uint256)")
-_GET_INSTANCE = function_selector("getInstance(uint256)")
-_GET_INSTANCE_BY_WALLET = function_selector("getInstanceByWallet(address)")
-_GET_INSTANCES_FOR_VERSION = function_selector("getInstancesForVersion(uint256,uint256)")
-
-
-# =============================================================================
-# ABI decoding helpers
-# =============================================================================
-
-def _decode_uint(data: bytes, offset: int) -> int:
-    return int.from_bytes(data[offset : offset + 32], "big")
-
-
-def _decode_address(data: bytes, offset: int) -> str:
-    return Web3.to_checksum_address("0x" + data[offset + 12 : offset + 32].hex())
-
-
-def _decode_bool(data: bytes, offset: int) -> bool:
-    return _decode_uint(data, offset) != 0
-
-
-def _decode_bytes32(data: bytes, offset: int) -> bytes:
-    return bytes(data[offset : offset + 32])
-
-
-def _decode_bytes(data: bytes, base: int, ptr_offset: int) -> bytes:
-    """Decode a dynamic `bytes` field from ABI-encoded data."""
-    ptr = _decode_uint(data, base + ptr_offset)
-    abs_offset = base + ptr
-    length = _decode_uint(data, abs_offset)
-    return bytes(data[abs_offset + 32 : abs_offset + 32 + length])
-
-
-def _decode_string(data: bytes, base: int, ptr_offset: int) -> str:
-    return _decode_bytes(data, base, ptr_offset).decode("utf-8", errors="replace")
-
-
-# =============================================================================
-# Decoders for each struct
-# =============================================================================
-
-def _decode_app(data: bytes) -> App:
-    """Decode ABI-encoded App struct (returned from getApp)."""
-    # The struct is returned as a tuple inside an outer offset pointer.
-    base = _decode_uint(data, 0)  # offset to tuple start
-    return App(
-        app_id=_decode_uint(data, base + 0 * 32),
-        owner=_decode_address(data, base + 1 * 32),
-        tee_arch=_decode_bytes32(data, base + 2 * 32),
-        dapp_contract=_decode_address(data, base + 3 * 32),
-        metadata_uri=_decode_string(data, base, 4 * 32),
-        latest_version_id=_decode_uint(data, base + 5 * 32),
-        created_at=_decode_uint(data, base + 6 * 32),
-        status=AppStatus(_decode_uint(data, base + 7 * 32)),
-    )
-
-
-def _decode_version(data: bytes) -> AppVersion:
-    base = _decode_uint(data, 0)
-    return AppVersion(
-        version_id=_decode_uint(data, base + 0 * 32),
-        version_name=_decode_string(data, base, 1 * 32),
-        code_measurement=_decode_bytes32(data, base + 2 * 32),
-        image_uri=_decode_string(data, base, 3 * 32),
-        audit_url=_decode_string(data, base, 4 * 32),
-        audit_hash=_decode_string(data, base, 5 * 32),
-        github_run_id=_decode_string(data, base, 6 * 32),
-        status=VersionStatus(_decode_uint(data, base + 7 * 32)),
-        enrolled_at=_decode_uint(data, base + 8 * 32),
-        enrolled_by=_decode_address(data, base + 9 * 32),
-    )
-
-
-def _decode_instance(data: bytes) -> RuntimeInstance:
-    base = _decode_uint(data, 0)
-    return RuntimeInstance(
-        instance_id=_decode_uint(data, base + 0 * 32),
-        app_id=_decode_uint(data, base + 1 * 32),
-        version_id=_decode_uint(data, base + 2 * 32),
-        operator=_decode_address(data, base + 3 * 32),
-        instance_url=_decode_string(data, base, 4 * 32),
-        tee_pubkey=_decode_bytes(data, base, 5 * 32),
-        tee_wallet_address=_decode_address(data, base + 6 * 32),
-        zk_verified=_decode_bool(data, base + 7 * 32),
-        status=InstanceStatus(_decode_uint(data, base + 8 * 32)),
-        registered_at=_decode_uint(data, base + 9 * 32),
-    )
+_NOVA_REGISTRY_ABI = [
+    {
+        "inputs": [{"internalType": "uint256", "name": "appId", "type": "uint256"}],
+        "name": "getApp",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
+                    {"internalType": "address", "name": "owner", "type": "address"},
+                    {"internalType": "bytes32", "name": "teeArch", "type": "bytes32"},
+                    {"internalType": "address", "name": "dappContract", "type": "address"},
+                    {"internalType": "string", "name": "metadataUri", "type": "string"},
+                    {"internalType": "uint256", "name": "latestVersionId", "type": "uint256"},
+                    {"internalType": "uint256", "name": "createdAt", "type": "uint256"},
+                    {"internalType": "enum AppStatus", "name": "status", "type": "uint8"},
+                ],
+                "internalType": "struct App",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "appId", "type": "uint256"},
+            {"internalType": "uint256", "name": "versionId", "type": "uint256"},
+        ],
+        "name": "getVersion",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
+                    {"internalType": "string", "name": "versionName", "type": "string"},
+                    {"internalType": "bytes32", "name": "codeMeasurement", "type": "bytes32"},
+                    {"internalType": "string", "name": "imageUri", "type": "string"},
+                    {"internalType": "string", "name": "auditUrl", "type": "string"},
+                    {"internalType": "string", "name": "auditHash", "type": "string"},
+                    {"internalType": "string", "name": "githubRunId", "type": "string"},
+                    {"internalType": "enum VersionStatus", "name": "status", "type": "uint8"},
+                    {"internalType": "uint256", "name": "enrolledAt", "type": "uint256"},
+                    {"internalType": "address", "name": "enrolledBy", "type": "address"},
+                ],
+                "internalType": "struct AppVersion",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "uint256", "name": "instanceId", "type": "uint256"}],
+        "name": "getInstance",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
+                    {"internalType": "uint256", "name": "appId", "type": "uint256"},
+                    {"internalType": "uint256", "name": "versionId", "type": "uint256"},
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                    {"internalType": "string", "name": "instanceUrl", "type": "string"},
+                    {"internalType": "bytes", "name": "teePubkey", "type": "bytes"},
+                    {"internalType": "address", "name": "teeWalletAddress", "type": "address"},
+                    {"internalType": "bool", "name": "zkVerified", "type": "bool"},
+                    {"internalType": "enum InstanceStatus", "name": "status", "type": "uint8"},
+                    {"internalType": "uint256", "name": "registeredAt", "type": "uint256"},
+                ],
+                "internalType": "struct RuntimeInstance",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "wallet", "type": "address"}],
+        "name": "getInstanceByWallet",
+        "outputs": [
+            {
+                "components": [
+                    {"internalType": "uint256", "name": "id", "type": "uint256"},
+                    {"internalType": "uint256", "name": "appId", "type": "uint256"},
+                    {"internalType": "uint256", "name": "versionId", "type": "uint256"},
+                    {"internalType": "address", "name": "operator", "type": "address"},
+                    {"internalType": "string", "name": "instanceUrl", "type": "string"},
+                    {"internalType": "bytes", "name": "teePubkey", "type": "bytes"},
+                    {"internalType": "address", "name": "teeWalletAddress", "type": "address"},
+                    {"internalType": "bool", "name": "zkVerified", "type": "bool"},
+                    {"internalType": "enum InstanceStatus", "name": "status", "type": "uint8"},
+                    {"internalType": "uint256", "name": "registeredAt", "type": "uint256"},
+                ],
+                "internalType": "struct RuntimeInstance",
+                "name": "",
+                "type": "tuple",
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "appId", "type": "uint256"},
+            {"internalType": "uint256", "name": "versionId", "type": "uint256"},
+        ],
+        "name": "getInstancesForVersion",
+        "outputs": [{"internalType": "uint256[]", "name": "", "type": "uint256[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
 
 
 # =============================================================================
@@ -199,46 +223,98 @@ class NovaRegistry:
         self.address = address or NOVA_APP_REGISTRY_ADDRESS
         if not self.address:
             raise ValueError("NOVA_APP_REGISTRY_ADDRESS not configured")
+        
+        self.chain = get_chain()
+        # Initialize Web3 Contract object for encoding/decoding
+        self.contract = self.chain.w3.eth.contract(
+            address=Web3.to_checksum_address(self.address),
+            abi=_NOVA_REGISTRY_ABI
+        )
 
-    def _call(self, data: str) -> bytes:
+    def _call(self, fn_name: str, args: list) -> Any:
         """
-        Low-level helper for read-only registry calls.
-
-        Uses eth_call_finalized to protect against short-lived reorgs spoofing
-        App / Version / Instance state. Falls back to latest if the RPC node
-        does not support historical calls.
+        Execute a read-only registry call using eth_call_finalized.
+        Encodes calldata using web3.py and decodes the result.
         """
-        chain = get_chain()
+        # 1. Encode calldata
+        calldata = self.contract.encodeABI(fn_name=fn_name, args=args)
+        
+        # 2. Perform finalized call (raw bytes)
         # Prefer finalized reads where available for stronger consistency.
-        return chain.eth_call_finalized(self.address, data)
+        raw_result = self.chain.eth_call_finalized(self.address, calldata)
+        
+        # 3. Decode result
+        return self.contract.decode_function_result(fn_name, raw_result)
 
     def get_app(self, app_id: int) -> App:
-        data = _GET_APP + encode_uint256(app_id)
-        raw = self._call(data)
-        return _decode_app(raw)
+        # returns (id, owner, teeArch, dappContract, metadataUri, latestVersionId, createdAt, status)
+        result = self._call("getApp", [app_id])
+        # result is a list/tuple or a dict depending on web3 version/strictness, 
+        # usually a list of values if returned as a struct in tuple form.
+        # Ensure we map correctly to App dataclass
+        # web3.py usually returns structs as tuples/lists
+        
+        # Unpack tuple assuming order matches ABI
+        return App(
+            app_id=result[0],
+            owner=result[1],
+            tee_arch=result[2],
+            dapp_contract=result[3],
+            metadata_uri=result[4],
+            latest_version_id=result[5],
+            created_at=result[6],
+            status=AppStatus(result[7]),
+        )
 
     def get_version(self, app_id: int, version_id: int) -> AppVersion:
-        data = _GET_VERSION + encode_uint256(app_id) + encode_uint256(version_id)
-        raw = self._call(data)
-        return _decode_version(raw)
+        result = self._call("getVersion", [app_id, version_id])
+        return AppVersion(
+            version_id=result[0],
+            version_name=result[1],
+            code_measurement=result[2],
+            image_uri=result[3],
+            audit_url=result[4],
+            audit_hash=result[5],
+            github_run_id=result[6],
+            status=VersionStatus(result[7]),
+            enrolled_at=result[8],
+            enrolled_by=result[9],
+        )
 
     def get_instance(self, instance_id: int) -> RuntimeInstance:
-        data = _GET_INSTANCE + encode_uint256(instance_id)
-        raw = self._call(data)
-        return _decode_instance(raw)
+        result = self._call("getInstance", [instance_id])
+        return RuntimeInstance(
+            instance_id=result[0],
+            app_id=result[1],
+            version_id=result[2],
+            operator=result[3],
+            instance_url=result[4],
+            tee_pubkey=result[5],
+            tee_wallet_address=result[6],
+            zk_verified=result[7],
+            status=InstanceStatus(result[8]),
+            registered_at=result[9],
+        )
 
     def get_instance_by_wallet(self, wallet: str) -> RuntimeInstance:
-        data = _GET_INSTANCE_BY_WALLET + encode_address(wallet)
-        raw = self._call(data)
-        return _decode_instance(raw)
+        result = self._call("getInstanceByWallet", [Web3.to_checksum_address(wallet)])
+        return RuntimeInstance(
+            instance_id=result[0],
+            app_id=result[1],
+            version_id=result[2],
+            operator=result[3],
+            instance_url=result[4],
+            tee_pubkey=result[5],
+            tee_wallet_address=result[6],
+            zk_verified=result[7],
+            status=InstanceStatus(result[8]),
+            registered_at=result[9],
+        )
 
     def get_instances_for_version(self, app_id: int, version_id: int) -> List[int]:
-        data = _GET_INSTANCES_FOR_VERSION + encode_uint256(app_id) + encode_uint256(version_id)
-        raw = self._call(data)
-        # Returns uint256[]
-        offset = _decode_uint(raw, 0)
-        length = _decode_uint(raw, offset)
-        return [_decode_uint(raw, offset + 32 + i * 32) for i in range(length)]
+        result = self._call("getInstancesForVersion", [app_id, version_id])
+        # result is list of uint256
+        return result
 
 
 # =============================================================================

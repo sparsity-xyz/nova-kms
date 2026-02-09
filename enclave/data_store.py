@@ -22,6 +22,12 @@ from config import DEFAULT_TTL_MS, MAX_APP_STORAGE, MAX_CLOCK_SKEW_MS, MAX_VALUE
 logger = logging.getLogger("nova-kms.data_store")
 
 
+
+class DecryptionError(Exception):
+    """Raised when data decryption fails."""
+    pass
+
+
 # =============================================================================
 # Vector Clock
 # =============================================================================
@@ -158,9 +164,8 @@ class _Namespace:
             nonce = ciphertext[:12]
             return aesgcm.decrypt(nonce, ciphertext[12:], None)
         except Exception as exc:
-            logger.debug(f"Decryption failed for app {self.app_id}: {exc}")
-            # If decryption fails, it might be legacy plaintext or wrong key
-            return ciphertext
+            logger.error(f"Decryption failed for app {self.app_id}: {exc}")
+            raise DecryptionError(f"Decryption failed for app {self.app_id}") from exc
 
     def get(self, key: str) -> Optional[DataRecord]:
         with self._lock:
