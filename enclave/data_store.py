@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import config
 from config import DEFAULT_TTL_MS, MAX_APP_STORAGE, MAX_CLOCK_SKEW_MS, MAX_VALUE_SIZE
 
 logger = logging.getLogger("nova-kms.data_store")
@@ -25,6 +26,11 @@ logger = logging.getLogger("nova-kms.data_store")
 
 class DecryptionError(Exception):
     """Raised when data decryption fails."""
+    pass
+
+
+class DataKeyUnavailableError(RuntimeError):
+    """Raised when per-app encryption keys are required but unavailable."""
     pass
 
 
@@ -147,7 +153,9 @@ class _Namespace:
         import os
         key = self._get_key()
         if not key:
-            return value  # Fallback to plaintext if key not available
+            if getattr(config, "ALLOW_PLAINTEXT_FALLBACK", True):
+                return value  # Dev-only fallback
+            raise DataKeyUnavailableError(f"Encryption key unavailable for app {self.app_id}")
         aesgcm = AESGCM(key)
         nonce = os.urandom(12)
         return nonce + aesgcm.encrypt(nonce, value, None)
@@ -158,7 +166,9 @@ class _Namespace:
             return None
         key = self._get_key()
         if not key:
-            return ciphertext  # Assume plaintext fallback
+            if getattr(config, "ALLOW_PLAINTEXT_FALLBACK", True):
+                return ciphertext  # Dev-only fallback
+            raise DataKeyUnavailableError(f"Decryption key unavailable for app {self.app_id}")
         try:
             aesgcm = AESGCM(key)
             nonce = ciphertext[:12]
@@ -175,8 +185,14 @@ class _Namespace:
             if rec.tombstone or rec.is_expired:
                 return None
             
-            # Decrypt value for the caller
-            decrypted_value = self._decrypt(rec.value) if rec.value else None
+            # Decrypt value for the caller.
+            # If decryption fails (e.g., poisoned/invalid ciphertext), treat as missing
+            # to avoid persistent 500s on repeated reads.
+            try:
+                decrypted_value = self._decrypt(rec.value) if rec.value else None
+            except DecryptionError:
+                logger.warning(f"Returning None due to decryption failure for app {self.app_id}, key '{key}'")
+                return None
             return DataRecord(
                 key=rec.key,
                 value=decrypted_value,
@@ -265,6 +281,41 @@ class _Namespace:
         protection).
         """
         with self._lock:
+            # Basic bounds checks (defense-in-depth regardless of mode)
+            if incoming.value is not None:
+                # incoming.value is stored encrypted; allow modest overhead.
+                if len(incoming.value) > (MAX_VALUE_SIZE + 128):
+                    logger.warning(
+                        f"Rejecting record '{incoming.key}': value too large ({len(incoming.value)} bytes)"
+                    )
+                    return False
+
+            # In production, reject obviously invalid ciphertext and optionally probe-decrypt.
+            if getattr(config, "IN_ENCLAVE", False) and incoming.value is not None and not incoming.tombstone:
+                # Format is: 12-byte nonce + AESGCM(ciphertext||tag). Tag is 16 bytes.
+                if len(incoming.value) < (12 + 16):
+                    logger.warning(
+                        f"Rejecting record '{incoming.key}': ciphertext too short ({len(incoming.value)} bytes)"
+                    )
+                    return False
+                key = self._get_key()
+                if not key:
+                    logger.warning(
+                        f"Rejecting record '{incoming.key}': encryption key unavailable for validation"
+                    )
+                    return False
+                try:
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                    aesgcm = AESGCM(key)
+                    nonce = incoming.value[:12]
+                    _ = aesgcm.decrypt(nonce, incoming.value[12:], None)
+                except Exception as exc:
+                    logger.warning(
+                        f"Rejecting record '{incoming.key}': ciphertext failed validation ({exc})"
+                    )
+                    return False
+
             # Clock skew protection: reject records with implausible timestamps
             now_ms = int(time.time() * 1000)
             skew = abs(incoming.updated_at_ms - now_ms)

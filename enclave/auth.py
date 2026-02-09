@@ -72,16 +72,27 @@ class _NonceStore:
     - Nonces are single-use and expire after a short TTL to prevent replay.
     """
 
-    def __init__(self, ttl_seconds: int = 120):
+    def __init__(self, ttl_seconds: int = 120, max_nonces: int = 4096):
+        from collections import OrderedDict
+
         self._ttl = ttl_seconds
-        self._nonces: Dict[bytes, float] = {}
+        self._max_nonces = max(1, int(max_nonces))
+        self._nonces: "OrderedDict[bytes, float]" = OrderedDict()
 
     def issue(self) -> bytes:
         import os
         import time
 
+        # Best-effort cleanup first.
         nonce = os.urandom(16)
         now = time.time()
+
+        if len(self._nonces) >= self._max_nonces:
+            self._purge(now=now)
+        # Still full: evict the oldest nonce (FIFO) to keep memory bounded.
+        if len(self._nonces) >= self._max_nonces:
+            self._nonces.popitem(last=False)
+
         self._nonces[nonce] = now + self._ttl
         return nonce
 
@@ -107,10 +118,16 @@ class _NonceStore:
 
         if now is None:
             now = time.time()
-        self._nonces = {n: exp for n, exp in self._nonces.items() if exp >= now}
+        # Preserve insertion order for FIFO eviction.
+        for n in list(self._nonces.keys()):
+            if self._nonces.get(n, 0) < now:
+                self._nonces.pop(n, None)
 
 
-_nonce_store = _NonceStore(ttl_seconds=getattr(config, "POP_MAX_AGE_SECONDS", 120))
+_nonce_store = _NonceStore(
+    ttl_seconds=getattr(config, "POP_MAX_AGE_SECONDS", 120),
+    max_nonces=getattr(config, "MAX_NONCES", 4096),
+)
 
 
 def issue_nonce() -> bytes:

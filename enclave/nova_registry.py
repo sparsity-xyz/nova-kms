@@ -244,7 +244,12 @@ class NovaRegistry:
         raw_result = self.chain.eth_call_finalized(self.address, calldata)
         
         # 3. Decode result
-        return self.contract.decode_function_result(fn_name, raw_result)
+        decoded = self.contract.decode_function_result(fn_name, raw_result)
+        # web3.py returns a tuple of outputs. If the function returns a single
+        # value (including a struct), that value is wrapped in a 1-tuple.
+        if isinstance(decoded, (list, tuple)) and len(decoded) == 1:
+            return decoded[0]
+        return decoded
 
     def get_app(self, app_id: int) -> App:
         # returns (id, owner, teeArch, dappContract, metadataUri, latestVersionId, createdAt, status)

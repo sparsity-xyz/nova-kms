@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app import app
 
 
-def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_hex: str) -> dict:
+def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_hex: str) -> tuple[dict, str]:
     """Build PoP headers for /sync requests."""
     from eth_account import Account
     from eth_account.messages import encode_defunct
@@ -24,12 +24,14 @@ def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_h
     ts = str(int(time.time()))
     msg = f"NovaKMS:Auth:{nonce_b64}:{recipient_wallet}:{ts}"
     pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
-    sig = Account.from_key(bytes.fromhex(pk)).sign_message(encode_defunct(text=msg)).signature.hex()
-    return {
+    acct = Account.from_key(bytes.fromhex(pk))
+    sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
+    return ({
         "x-kms-signature": sig,
         "x-kms-timestamp": ts,
         "x-kms-nonce": nonce_b64,
-    }
+        "x-kms-wallet": acct.address,
+    }, acct.address)
 
 
 @pytest.fixture(autouse=True)
@@ -212,12 +214,12 @@ class TestData:
 
 class TestSync:
     def test_sync_delta(self, client):
-        headers = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32)
+        headers, sender_wallet = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32)
         resp = client.post(
             "/sync",
             json={
                 "type": "delta",
-                "sender_wallet": "0xPeer",
+                "sender_wallet": sender_wallet,
                 "data": {
                     "10": [
                         {
@@ -237,10 +239,10 @@ class TestSync:
         assert resp.json()["merged"] == 1
 
     def test_sync_snapshot_request(self, client):
-        headers = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32)
+        headers, sender_wallet = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32)
         resp = client.post(
             "/sync",
-            json={"type": "snapshot_request", "sender_wallet": "0xPeer"},
+            json={"type": "snapshot_request", "sender_wallet": sender_wallet},
             headers=headers,
         )
         assert resp.status_code == 200

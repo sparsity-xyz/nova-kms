@@ -13,7 +13,7 @@ from data_store import DataStore
 from sync_manager import PeerCache, SyncManager
 
 
-def _make_kms_pop(*, recipient_wallet: str, private_key_hex: str = "44" * 32) -> dict:
+def _make_kms_pop(*, recipient_wallet: str, private_key_hex: str = "44" * 32) -> tuple[dict, str]:
     from auth import issue_nonce
     from eth_account import Account
     from eth_account.messages import encode_defunct
@@ -22,8 +22,9 @@ def _make_kms_pop(*, recipient_wallet: str, private_key_hex: str = "44" * 32) ->
     ts = str(int(time.time()))
     msg = f"NovaKMS:Auth:{nonce_b64}:{recipient_wallet}:{ts}"
     pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
-    sig = Account.from_key(bytes.fromhex(pk)).sign_message(encode_defunct(text=msg)).signature.hex()
-    return {"signature": sig, "timestamp": ts, "nonce": nonce_b64}
+    acct = Account.from_key(bytes.fromhex(pk))
+    sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
+    return ({"signature": sig, "timestamp": ts, "nonce": nonce_b64, "wallet": acct.address}, acct.address)
 
 
 class TestSyncManagerLocal:
@@ -36,6 +37,8 @@ class TestSyncManagerLocal:
         mock_kms = MagicMock()
         mock_kms.is_operator.return_value = True
         mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=mock_kms))
+
+        kms_pop, sender_wallet = _make_kms_pop(recipient_wallet=mgr.node_wallet)
 
         # Simulate incoming delta
         delta_payload = {
@@ -54,10 +57,10 @@ class TestSyncManagerLocal:
         result = mgr.handle_incoming_sync(
             {
                 "type": "delta",
-                "sender_wallet": "0xNode2",
+                "sender_wallet": sender_wallet,
                 "data": delta_payload,
             },
-            kms_pop=_make_kms_pop(recipient_wallet=mgr.node_wallet),
+            kms_pop=kms_pop,
         )
         assert result["status"] == "ok"
         assert result["merged"] == 1
@@ -72,12 +75,14 @@ class TestSyncManagerLocal:
         mock_kms.is_operator.return_value = True
         mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=mock_kms))
 
+        kms_pop, sender_wallet = _make_kms_pop(recipient_wallet=mgr.node_wallet)
+
         result = mgr.handle_incoming_sync(
             {
                 "type": "snapshot_request",
-                "sender_wallet": "0xNode2",
+                "sender_wallet": sender_wallet,
             },
-            kms_pop=_make_kms_pop(recipient_wallet=mgr.node_wallet),
+            kms_pop=kms_pop,
         )
         assert result["status"] == "ok"
         assert "1" in result["data"]
@@ -89,9 +94,11 @@ class TestSyncManagerLocal:
         mock_kms.is_operator.return_value = True
         mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=mock_kms))
 
+        kms_pop, _sender_wallet = _make_kms_pop(recipient_wallet=mgr.node_wallet)
+
         result = mgr.handle_incoming_sync(
             {"type": "invalid"},
-            kms_pop=_make_kms_pop(recipient_wallet=mgr.node_wallet),
+            kms_pop=kms_pop,
         )
         assert result["status"] == "error"
 

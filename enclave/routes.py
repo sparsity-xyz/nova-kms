@@ -31,6 +31,9 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+import config
+from rate_limiter import TokenBucket
+
 if TYPE_CHECKING:
     from auth import AppAuthorizer
     from data_store import DataStore
@@ -84,6 +87,8 @@ def init(
 # =============================================================================
 
 router = APIRouter(tags=["kms"])
+
+_nonce_rate_limiter = TokenBucket(config.NONCE_RATE_LIMIT_PER_MINUTE)
 
 
 # =============================================================================
@@ -174,13 +179,17 @@ def health_check():
 # =============================================================================
 
 @router.get("/nonce")
-def get_nonce():
+def get_nonce(request: Request):
     """
     Issue a one-time nonce for Proof-of-Possession (PoP) challenge-response.
 
     Nonces are single-use and expire after a short TTL.
     """
     from auth import issue_nonce
+
+    client_ip = request.client.host if request.client else "unknown"
+    if not _nonce_rate_limiter.allow(client_ip):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again later.")
 
     nonce = issue_nonce()
     return {"nonce": base64.b64encode(nonce).decode()}
@@ -297,7 +306,12 @@ def get_data(key: str, request: Request, response: Response):
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
     _add_mutual_signature(response, auth_info.get("client_sig"))
-    record = _data_store.get(app_id, key)
+    from data_store import DataKeyUnavailableError
+
+    try:
+        record = _data_store.get(app_id, key)
+    except DataKeyUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     if record is None:
         raise HTTPException(status_code=404, detail=f"Key not found: {key}")
     return {
@@ -333,6 +347,11 @@ def put_data(body: DataPutRequest, request: Request, response: Response):
         record = _data_store.put(app_id, body.key, value_bytes, ttl_ms=body.ttl_ms)
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as exc:
+        from data_store import DataKeyUnavailableError
+        if isinstance(exc, DataKeyUnavailableError):
+            raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
 
     return {
         "app_id": app_id,

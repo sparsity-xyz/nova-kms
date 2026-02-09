@@ -197,3 +197,14 @@ class TestDataStore:
         assert stats["namespaces"] == 2
         assert stats["total_keys"] == 2
         assert stats["total_bytes"] == 10
+
+    def test_fail_closed_without_key_in_production(self, monkeypatch):
+        import config
+        from data_store import DataKeyUnavailableError
+
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+
+        ds = DataStore(node_id="node1")
+        with pytest.raises(DataKeyUnavailableError):
+            ds.put(1, "k", b"v")

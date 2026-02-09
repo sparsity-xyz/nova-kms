@@ -68,6 +68,13 @@ REQUIRE_MEASUREMENT: bool = IN_ENCLAVE
 POP_MAX_AGE_SECONDS: int = int(os.getenv("POP_MAX_AGE_SECONDS",
                                           os.getenv("ATTESTATION_MAX_AGE_SECONDS", "120")))
 
+# In production (IN_ENCLAVE=True), never fall back to plaintext storage when
+# per-app encryption keys are unavailable.
+ALLOW_PLAINTEXT_FALLBACK: bool = os.getenv(
+    "ALLOW_PLAINTEXT_FALLBACK",
+    "true" if not IN_ENCLAVE else "false",
+).strip().lower() in ("1", "true", "yes")
+
 # =============================================================================
 # Security — Sync Integrity
 # =============================================================================
@@ -85,6 +92,13 @@ MAX_SYNC_PAYLOAD_BYTES: int = int(os.getenv("MAX_SYNC_PAYLOAD_BYTES", str(50 * 1
 
 # Global rate limit: max requests per minute across all endpoints
 RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
+
+# Dedicated /nonce rate limit (per-IP). Lower than the global limit to reduce
+# nonce-store churn under abuse.
+NONCE_RATE_LIMIT_PER_MINUTE: int = int(os.getenv("NONCE_RATE_LIMIT_PER_MINUTE", "30"))
+
+# Hard cap on active nonces held in memory.
+MAX_NONCES: int = int(os.getenv("MAX_NONCES", "4096"))
 
 # Maximum request body size in bytes for non-sync endpoints
 MAX_REQUEST_BODY_BYTES: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(2 * 1024 * 1024)))  # 2 MB

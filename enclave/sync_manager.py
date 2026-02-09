@@ -600,6 +600,11 @@ class SyncManager:
 
         p_wallet = recovered
 
+        # Bind body.sender_wallet to the recovered PoP wallet to avoid spoofing/confusing logs.
+        body_sender = body.get("sender_wallet") if isinstance(body, dict) else None
+        if body_sender and body_sender.lower() != p_wallet.lower():
+            return {"status": "error", "reason": "sender_wallet does not match PoP signature"}
+
         # C. Verify wallet is a registered operator
         try:
             if not self.peer_cache.kms_registry.is_operator(p_wallet):
