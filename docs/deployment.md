@@ -261,6 +261,6 @@ cast send <KMS_REGISTRY_ADDRESS> \
 - [ ] `NODE_URL` set to the correct public HTTPS endpoint
 - [ ] All nodes running the same code measurement (version)
 - [ ] ZK verification enabled for the KMS app in NovaAppRegistry
-- [ ] No trusted proxies in front of the enclave app (attestation is verified in-app)
+- [ ] No trusted proxies in front of the enclave app (PoP auth is verified in-app)
 - [ ] Firewall allows egress to Base Sepolia RPC
 - [ ] At least 2 nodes deployed for redundancy

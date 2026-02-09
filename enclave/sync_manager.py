@@ -221,7 +221,7 @@ class SyncManager:
             peer_url = peer["node_url"]
             peer_wallet = peer["tee_wallet_address"]
 
-            # 4.1 Probe the peer (health check / RA-TLS handshake)
+            # 4.1 Probe the peer (health check)
             if not probe_node(peer_url, timeout=probe_timeout):
                 logger.debug(f"Peer {peer_wallet} at {peer_url} is unreachable")
                 continue

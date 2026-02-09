@@ -4,7 +4,8 @@ Nova KMS - Main Application (app.py)
 =============================================================================
 
 Entry point for the distributed Key Management Service running in
-AWS Nitro Enclave.  Follows the Nova app-template pattern (FastAPI + Uvicorn).
+a TEE (Nitro Enclave on Nova Platform).  Follows the Nova app-template
+pattern (FastAPI + Uvicorn).
 
 Supports two modes:
 
@@ -202,7 +203,7 @@ def _startup_production() -> dict:
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
 
     # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
-    # Uses strict initialization logic with mutual attestation to prevent split-brain.
+    # Uses strict initialization logic with mutual PoP auth to prevent split-brain.
     sync_manager.wait_for_master_secret(
         kms_registry=kms_registry if kms_registry else None,
         master_secret_mgr=master_secret_mgr,

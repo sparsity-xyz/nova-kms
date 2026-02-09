@@ -212,10 +212,10 @@ sequenceDiagram
     participant AR as NovaAppRegistry
     participant KC as KMSRegistry Contract
     
-    Note over KMS: Start and get attestation
-    KMS->>KMS: Generate attestation via Odyn
+    Note over KMS: Start in Nitro Enclave
+    KMS->>KMS: Obtain TEE wallet via Odyn
     
-    KMS->>ZKP: Submit attestation
+    KMS->>ZKP: Submit enclave proof
     ZKP->>ZKP: Generate ZK proof
 
     Note over AR: Verify ZK proof and register instance
@@ -280,7 +280,7 @@ sequenceDiagram
 ### 2.3 App Authorization Logic (Instance + App Registry)
 
 ```python
-async def verify_app_request(request: KMSRequest, client_attestation: Attestation) -> tuple[bool, str | None]:
+async def verify_app_request(request: KMSRequest, identity: ClientIdentity) -> tuple[bool, str | None]:
     """
     Verify that request comes from a valid and authorized Nova application.
     
@@ -293,8 +293,8 @@ async def verify_app_request(request: KMSRequest, client_attestation: Attestatio
        - Version status is ENROLLED/DEPRECATED.
        - Code measurement matches the enrolled version.
     """
-    measurement = client_attestation.get_measurement()
-    tee_wallet = client_attestation.get_extension("TEE_WALLET")
+    measurement = identity.measurement
+    tee_wallet = identity.tee_wallet
     
     instance = await nova_app_registry.get_instance_by_wallet(tee_wallet)
     if instance.instance_id == 0:
@@ -318,7 +318,7 @@ async def verify_app_request(request: KMSRequest, client_attestation: Attestatio
 
 ### 2.4 Data Synchronization Flow (PoP Secured)
 
-KMS nodes synchronize data using attested requests verified in-app.
+KMS nodes synchronize data using PoP-authenticated requests verified in-app.
 
 ```mermaid
 sequenceDiagram
@@ -380,7 +380,7 @@ The `/status` endpoint returns a merged view of local health and on-chain cluste
 Payload format is simple JSON.
 
 > Note: The KMS **does not trust client-provided App IDs**. It derives `appId`
-> from the attested TEE wallet via NovaAppRegistry. If a header is provided,
+> from the PoP-identified TEE wallet via NovaAppRegistry. If a header is provided,
 > it must match.
 >
 > **No trusted middleboxes**: the enclave application does not trust any proxy
@@ -502,8 +502,8 @@ class DataRecord:
 |--------|------------|
 | Unauthorized data access | PoP + NovaAppRegistry instance verification |
 | App Code Upgrade Leak | App/Version hierarchy allows owners to rotate approved measurements |
-| Man-in-the-middle | TLS + in-app attestation verification (no trusted proxies) |
-| Replay attack | Attestation timestamp window (configurable) |
+| Man-in-the-middle | TLS + in-app PoP verification (no trusted proxies) |
+| Replay attack | PoP nonce + timestamp window (configurable) |
 | Node impersonation during sync | PoP + KMSRegistry operator verification |
 
 ### 5.2 Access Control Matrix (Instance Based)
@@ -517,10 +517,10 @@ class DataRecord:
 ### 5.3 Sync Request Verification
 
 ```python
-async def verify_sync_request(request: SyncRequest, client_attestation: Attestation) -> bool:
+async def verify_sync_request(request: SyncRequest, identity: ClientIdentity) -> bool:
     """Verify that sync request comes from a valid KMS operator."""
     # 1. Recover KMS Node wallet from PoP signature
-    tee_wallet = client_attestation.get_extension("TEE_WALLET")
+    tee_wallet = identity.tee_wallet
     
     # 2. Check if it's a registered operator
     return kms_registry.is_operator(tee_wallet)
@@ -592,6 +592,6 @@ nova-kms/
 ## Next Steps
 
 1. Implement KMSRegistry smart contract
-2. Implement KMS enclave application core logic (attestation + KDF)
-3. Implement data synchronization protocol with attested requests
+2. Implement KMS enclave application core logic (PoP auth + KDF)
+3. Implement data synchronization protocol with PoP-secured requests
 4. Deploy to test environment for verification

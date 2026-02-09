@@ -228,7 +228,7 @@ class AuthResult:
 
 class AppAuthorizer:
     """
-    Verifies that a client attestation maps to an authorized Nova app.
+    Verifies that a client identity maps to an authorized Nova app.
 
     Steps (mirrors architecture doc §2.3):
       1. getInstanceByWallet(teeWallet)  →  instance

@@ -1,6 +1,6 @@
 # Nova KMS
 
-Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclave and provides **key derivation**, **certificate signing**, and an **in-memory KV store** to other Nova applications — all secured by **RA-TLS** and on-chain **App Registry** verification.
+Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclave and provides **key derivation**, **certificate signing**, and an **in-memory KV store** to other Nova applications — all secured by **Proof-of-Possession (PoP) signatures** and on-chain **App Registry** verification.
 
 ## Features
 
@@ -10,13 +10,13 @@ Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro 
 | **Certificate Authority** | Sign CSRs with a deterministic CA rooted in the master secret |
 | **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction |
 | **Distributed Sync** | Delta + snapshot sync across KMS nodes (eventual consistency, LWW) |
-| **RA-TLS Auth** | Mutual attestation; app identity verified via NovaAppRegistry |
+| **PoP Auth** | Proof-of-Possession signatures; app identity verified via NovaAppRegistry |
 | **On-Chain Membership** | KMSRegistry contract tracks nodes; client probes determine health |
 
 ## Architecture
 
 ```
-Nova Apps ──RA-TLS──▶ KMS Cluster ──sync──▶ KMS Cluster
+Nova Apps ──PoP Sig──▶ KMS Cluster ──sync──▶ KMS Cluster
                          │                      │
                     KMSRegistry ◀──── NovaAppRegistry
                     (membership)       (app identity)
@@ -78,11 +78,12 @@ make set-app-id
 |----------|--------|------|-------------|
 | `/health` | GET | None | Health check |
 | `/status` | GET | None | Node + cluster status |
+| `/nonce` | GET | None | Issue one-time PoP nonce |
 | `/nodes` | GET | None | Paginated KMS node list |
-| `/kms/derive` | POST | RA-TLS | Derive application key |
-| `/kms/sign_cert` | POST | RA-TLS | Sign CSR with KMS CA |
-| `/kms/data` | GET/PUT/DELETE | RA-TLS | App-scoped KV store |
-| `/sync` | POST | KMS Peer | Inter-node synchronization |
+| `/kms/derive` | POST | App PoP | Derive application key |
+| `/kms/sign_cert` | POST | App PoP | Sign CSR with KMS CA |
+| `/kms/data` | GET/PUT/DELETE | App PoP | App-scoped KV store |
+| `/sync` | POST | Peer PoP + HMAC | Inter-node synchronization |
 
 ### Example: Derive a Key
 
@@ -121,7 +122,7 @@ nova-kms/
 │   └── script/
 ├── enclave/             # Python KMS application
 │   ├── app.py           # FastAPI entry point
-│   ├── auth.py          # RA-TLS + registry verification
+│   ├── auth.py          # PoP auth + registry verification
 │   ├── chain.py         # Blockchain RPC helpers
 │   ├── config.py        # Configuration constants
 │   ├── data_store.py    # In-memory KV store
