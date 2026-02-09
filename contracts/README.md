@@ -64,12 +64,12 @@ The script will:
 2. Initialize with the configured `NOVA_APP_REGISTRY_PROXY`.
 3. Output the deployed contract address.
 
-### 3. Setup KMS App ID
+### Setup KMS App ID
 
 Once you have the Application ID assigned to Nova KMS by the platform, you **must** set it on the proxy:
 
 ```bash
-export CONTRACT_ADDRESS=0x_PROXY_ADDRESS
+export PROXY_ADDRESS=0x_PROXY_ADDRESS
 export KMS_APP_ID=your_assigned_id
 make set-app-id
 ```
@@ -89,7 +89,7 @@ In the UUPS pattern, you must verify the **Implementation** contract.
 ### 1. Verify Implementation
 Find the `KMSRegistry Implementation` address from your deployment output:
 ```bash
-export CONTRACT_ADDRESS=0x_IMPLEMENTATION_ADDRESS
+export IMPL_ADDRESS=0x_IMPLEMENTATION_ADDRESS
 make verify-basescan # or verify-blockscout
 ```
 
@@ -103,9 +103,9 @@ Once the implementation is verified:
 ### Management Operations
 
 #### Set KMS App ID
-If you deployed with App ID 0 or need to update it:
+If you need to update the App ID later:
 ```bash
-export CONTRACT_ADDRESS=0x_PROXY_ADDRESS
+export PROXY_ADDRESS=0x_PROXY_ADDRESS
 export KMS_APP_ID=your_assigned_id
 make set-app-id
 ```

@@ -63,7 +63,7 @@ Save the deployed **Proxy** contract address.
 Once the KMS application is created in the Nova Platform and you have an `appId`:
 
 ```bash
-export CONTRACT_ADDRESS=<KMS_REGISTRY_PROXY_ADDRESS>
+export PROXY_ADDRESS=<KMS_REGISTRY_PROXY_ADDRESS>
 export KMS_APP_ID=<ASSIGNED_APP_ID>
 make set-app-id
 ```

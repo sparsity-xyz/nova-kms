@@ -42,11 +42,11 @@ deploy:
 
 # Verify KMSRegistry implementation on Blockscout
 verify-blockscout:
-	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
-	echo "Verifying KMSRegistry Implementation at $(CONTRACT_ADDRESS) on Blockscout..."; \
+	@if [ -z "$(IMPL_ADDRESS)" ]; then echo "Error: IMPL_ADDRESS not set"; exit 1; fi; \
+	echo "Verifying KMSRegistry Implementation at $(IMPL_ADDRESS) on Blockscout..."; \
 	forge verify-contract \
 		--rpc-url $(RPC_URL) \
-		$(CONTRACT_ADDRESS) \
+		$(IMPL_ADDRESS) \
 		src/KMSRegistry.sol:KMSRegistry \
 		--verifier blockscout \
 		--verifier-url https://base-sepolia.blockscout.com/api/ \
@@ -54,20 +54,20 @@ verify-blockscout:
 
 # Verify KMSRegistry implementation on Basescan
 verify-basescan:
-	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
-	echo "Verifying KMSRegistry Implementation at $(CONTRACT_ADDRESS) on Basescan..."; \
+	@if [ -z "$(IMPL_ADDRESS)" ]; then echo "Error: IMPL_ADDRESS not set"; exit 1; fi; \
+	echo "Verifying KMSRegistry Implementation at $(IMPL_ADDRESS) on Basescan..."; \
 	forge verify-contract \
 		--rpc-url $(RPC_URL) \
-		$(CONTRACT_ADDRESS) \
+		$(IMPL_ADDRESS) \
 		src/KMSRegistry.sol:KMSRegistry \
 		--etherscan-api-key $(BASESCAN_API_KEY) \
 		--watch
 
 # Set KMS App ID on the proxy
 set-app-id:
-	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS (proxy) not set"; exit 1; fi; \
+	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS (proxy) not set"; exit 1; fi; \
 	if [ -z "$(KMS_APP_ID)" ]; then echo "Error: KMS_APP_ID not set"; exit 1; fi; \
-	echo "Setting KMS App ID to $(KMS_APP_ID) on $(CONTRACT_ADDRESS)..."; \
-	cast send $(CONTRACT_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
+	echo "Setting KMS App ID to $(KMS_APP_ID) on $(PROXY_ADDRESS)..."; \
+	cast send $(PROXY_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
 		--rpc-url $(RPC_URL) \
 		--private-key $(PRIVATE_KEY)
