@@ -37,7 +37,7 @@ pip install -r enclave/requirements.txt
 #    → enclave/config.py (set contract addresses)
 
 # 3. Run
-cd enclave && python app.py
+make simulation
 # Server at http://localhost:8000
 
 # 4. Test
@@ -128,9 +128,13 @@ nova-kms/
 │   ├── probe.py         # Liveness probing
 │   ├── routes.py        # API endpoints
 │   ├── sync_manager.py  # Peer synchronization
-│   └── Dockerfile
+├── scripts/             # Bash scripts for development
+│   ├── run_dev.sh
+│   └── run_multi_node.sh
 ├── tests/               # Python tests
 ├── docs/                # Documentation
+├── Dockerfile           # Production Docker image
+├── Makefile             # Project management
 ├── enclaver.yaml        # Enclaver config
 └── nova-build.yaml      # Build config
 ```

@@ -2,26 +2,31 @@
 pragma solidity ^0.8.33;
 
 import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
+import {
+    Initializable
+} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {
+    UUPSUpgradeable
+} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {
+    Ownable2StepUpgradeable
+} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 
 /**
  * @title KMSRegistry
  * @notice On-chain operator list for KMS nodes, implementing INovaAppInterface.
- * @dev The KMSRegistry is purely managed by NovaAppRegistry callbacks:
- *      - addOperator()    → TEE wallet added to operator set
- *      - removeOperator() → TEE wallet removed from operator set
- *
- *      KMS nodes do NOT submit any on-chain transactions.
- *
- *      Clients and KMS nodes query `getOperators()` to discover cluster members,
- *      then look up each operator's instance details (instanceUrl, teePubkey, etc.)
- *      from NovaAppRegistry via `getInstanceByWallet(operator)`.
+ * @dev UUPS Upgradeable version. Managed by NovaAppRegistry callbacks.
  */
-contract KMSRegistry is INovaAppInterface {
+contract KMSRegistry is
+    INovaAppInterface,
+    Initializable,
+    Ownable2StepUpgradeable,
+    UUPSUpgradeable
+{
     // ========== State Variables ==========
 
     address private _novaAppRegistryAddr;
     uint256 public kmsAppId;
-    address public admin;
 
     /// @notice Operator set – managed by addOperator / removeOperator callbacks
     mapping(address => bool) private _operators;
@@ -30,7 +35,6 @@ contract KMSRegistry is INovaAppInterface {
 
     // ========== Errors ==========
 
-    error NotAdmin();
     error OnlyNovaAppRegistry();
     error InvalidRegistryAddress();
     error AppIdMismatch();
@@ -38,43 +42,59 @@ contract KMSRegistry is INovaAppInterface {
     // ========== Events ==========
 
     event NovaAppRegistrySet(address indexed registry);
-    event OperatorAdded(address indexed operator, uint256 appId, uint256 versionId, uint256 instanceId);
-    event OperatorRemoved(address indexed operator, uint256 appId, uint256 versionId, uint256 instanceId);
-    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
+    event OperatorAdded(
+        address indexed operator,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
+    event OperatorRemoved(
+        address indexed operator,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
 
     // ========== Modifiers ==========
 
-    modifier onlyAdmin() {
-        _onlyAdmin();
-        _;
-    }
-
     modifier onlyNovaAppRegistryMod() {
-        _onlyNovaAppRegistryMod();
+        _checkOnlyNovaAppRegistry();
         _;
     }
 
-    function _onlyAdmin() internal view {
-        if (msg.sender != admin) revert NotAdmin();
-    }
-
-    function _onlyNovaAppRegistryMod() internal view {
+    function _checkOnlyNovaAppRegistry() internal view {
         if (msg.sender != _novaAppRegistryAddr) revert OnlyNovaAppRegistry();
     }
 
-    // ========== Constructor ==========
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
-    constructor(address appRegistry_, uint256 kmsAppId_) {
+    // ========== Initializer ==========
+
+    function initialize(
+        address initialOwner,
+        address appRegistry_,
+        uint256 kmsAppId_
+    ) public initializer {
+        __Ownable_init(initialOwner);
+
         if (appRegistry_ == address(0)) revert InvalidRegistryAddress();
         _novaAppRegistryAddr = appRegistry_;
         kmsAppId = kmsAppId_;
-        admin = msg.sender;
     }
+
+    // ========== Upgrade Authorization ==========
+
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyOwner {}
 
     // ========== INovaAppInterface Implementation ==========
 
     /// @inheritdoc INovaAppInterface
-    function setNovaAppRegistry(address registry) external onlyAdmin {
+    function setNovaAppRegistry(address registry) external onlyOwner {
         if (registry == address(0)) revert InvalidRegistryAddress();
         _novaAppRegistryAddr = registry;
         emit NovaAppRegistrySet(registry);
@@ -86,8 +106,6 @@ contract KMSRegistry is INovaAppInterface {
     }
 
     /// @inheritdoc INovaAppInterface
-    /// @dev Called by NovaAppRegistry when a TEE instance registers for the KMS app.
-    ///      Validates appId matches kmsAppId, then adds the wallet to the operator set.
     function addOperator(
         address teeWalletAddress,
         uint256 appId,
@@ -100,8 +118,6 @@ contract KMSRegistry is INovaAppInterface {
     }
 
     /// @inheritdoc INovaAppInterface
-    /// @dev Called by NovaAppRegistry when a TEE instance is stopped/failed.
-    ///      Removes the wallet from the operator set.
     function removeOperator(
         address teeWalletAddress,
         uint256 appId,
@@ -112,40 +128,27 @@ contract KMSRegistry is INovaAppInterface {
         emit OperatorRemoved(teeWalletAddress, appId, versionId, instanceId);
     }
 
-    // ========== Admin Functions ==========
-
-    function setAdmin(address newAdmin) external onlyAdmin {
-        address old = admin;
-        admin = newAdmin;
-        emit AdminChanged(old, newAdmin);
-    }
-
     // ========== Operator View Functions ==========
 
-    /// @notice Check if an address is a registered operator
     function isOperator(address account) public view returns (bool) {
         return _operators[account];
     }
 
-    /// @notice Get the total number of operators
     function operatorCount() public view returns (uint256) {
         return _operatorList.length;
     }
 
-    /// @notice Get operator address at a specific index
     function operatorAt(uint256 index) public view returns (address) {
         require(index < _operatorList.length, "Index out of bounds");
         return _operatorList[index];
     }
 
-    /// @notice Get all operator addresses
     function getOperators() public view returns (address[] memory) {
         return _operatorList;
     }
 
     // ========== Internal Functions ==========
 
-    /// @dev Add an operator to the set (idempotent)
     function _addOperatorInternal(address operator) internal {
         if (_operators[operator]) return;
         _operators[operator] = true;
@@ -153,7 +156,6 @@ contract KMSRegistry is INovaAppInterface {
         _operatorList.push(operator);
     }
 
-    /// @dev Remove an operator from the set using swap-and-pop for O(1) removal (idempotent)
     function _removeOperatorInternal(address operator) internal {
         if (!_operators[operator]) return;
 
@@ -170,4 +172,9 @@ contract KMSRegistry is INovaAppInterface {
         delete _operatorIndex[operator];
         delete _operators[operator];
     }
+
+    /**
+     * @dev Reserved storage space to allow for layout changes in the future.
+     */
+    uint256[46] private _gap;
 }

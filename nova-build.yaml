@@ -7,7 +7,7 @@ version: "1.0.0"
 description: "Distributed Key Management Service for Nova Platform"
 
 build:
-  context: "./enclave"
+  context: "."
   dockerfile: "Dockerfile"
 
 enclave:

@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/../enclave"
 
 export SIMULATION_MODE="${SIMULATION_MODE:-1}"
 export SIM_NODE_INDEX="${SIM_NODE_INDEX:-0}"

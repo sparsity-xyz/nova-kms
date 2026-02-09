@@ -534,23 +534,24 @@ async def verify_sync_request(request: SyncRequest, client_attestation: Attestat
 ## 6. Project Structure
 
 ```
-dkms/
-├── enclave/
-│   ├── app.py                 # Main Flask application + /status endpoint
-│   ├── odyn.py                # Odyn API wrapper
-│   ├── data_store.py          # In-memory KV store with vector clock
-│   ├── sync_manager.py        # Data synchronization logic (attested sync)
-│   ├── probe.py               # Liveness probing helpers
-│   ├── auth.py                # Nitro attestation verification (in-app)
-│   ├── kdf.py                 # Key Derivation Function utilities
-│   ├── nova_registry.py       # NovaAppRegistry contract interaction
-│   ├── kms_registry.py        # KMS Registry contract interaction
-│   ├── requirements.txt
-│   └── Dockerfile
+nova-kms/
 ├── contracts/
-│   └── KMSRegistry.sol        # KMS node registry contract
-├── docs/
-│   └── architecture.md        # This document
+│   ├── src/
+│   │   ├── KMSRegistry.sol    # KMS node registry contract
+│   │   └── interfaces/
+│   │       └── INovaAppInterface.sol
+│   ├── script/
+│   │   └── DeployKMSRegistry.s.sol
+│   └── test/
+│       └── KMSRegistry.t.sol
+├── enclave/
+│   ├── app.py                 # Main application
+│   ├── auth.py                # Authorization logic
+│   ├── nova_registry.py       # NovaAppRegistry client
+│   └── ...
+├── scripts/                   # Development scripts
+├── Dockerfile                 # Production Docker image
+├── Makefile                   # Project automation
 └── README.md
 ```
 

@@ -108,7 +108,11 @@ helios_rpc:
 ## Step 3: Build the Docker Image
 
 ```bash
-cd nova-kms/enclave
+make build-docker
+```
+
+Or manually from the root directory:
+```bash
 docker build -t nova-kms:latest .
 ```
 

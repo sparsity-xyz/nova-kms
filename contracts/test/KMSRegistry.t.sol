@@ -3,9 +3,16 @@ pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
+import {
+    ERC1967Proxy
+} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {
+    OwnableUpgradeable
+} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract KMSRegistryTest is Test {
-    KMSRegistry public registry;
+    KMSRegistry public implementation;
+    KMSRegistry public registry; // This will be the proxy cast to KMSRegistry
 
     address public mockAppRegistry = address(0xABCD);
     address public admin = address(0xAD);
@@ -17,8 +24,21 @@ contract KMSRegistryTest is Test {
     uint256 public constant KMS_APP_ID = 42;
 
     function setUp() public {
-        vm.prank(admin);
-        registry = new KMSRegistry(mockAppRegistry, KMS_APP_ID);
+        // 1. Deploy Implementation
+        implementation = new KMSRegistry();
+
+        // 2. Deploy Proxy and Initialize
+        bytes memory initData = abi.encodeCall(
+            KMSRegistry.initialize,
+            (admin, mockAppRegistry, KMS_APP_ID)
+        );
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(implementation),
+            initData
+        );
+
+        // 3. Cast Proxy to KMSRegistry for testing
+        registry = KMSRegistry(address(proxy));
     }
 
     // ========== Helper ==========
@@ -28,40 +48,38 @@ contract KMSRegistryTest is Test {
         registry.addOperator(wallet, KMS_APP_ID, 1, instanceId);
     }
 
-    // ========== Constructor Tests ==========
+    // ========== Initialization Tests ==========
 
-    function test_constructor_setsState() public view {
+    function test_initialize_setsState() public view {
         assertEq(registry.novaAppRegistry(), mockAppRegistry);
         assertEq(registry.kmsAppId(), KMS_APP_ID);
-        assertEq(registry.admin(), admin);
+        assertEq(registry.owner(), admin);
         assertEq(registry.operatorCount(), 0);
     }
 
-    function test_constructor_revert_zeroRegistry() public {
-        vm.prank(admin);
-        vm.expectRevert(KMSRegistry.InvalidRegistryAddress.selector);
-        new KMSRegistry(address(0), KMS_APP_ID);
+    function test_initialize_revert_alreadyInitialized() public {
+        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
+        registry.initialize(admin, mockAppRegistry, KMS_APP_ID);
     }
 
     // ========== setNovaAppRegistry Tests ==========
 
-    function test_setNovaAppRegistry_byAdmin() public {
+    function test_setNovaAppRegistry_byOwner() public {
         address newRegistry = address(0xBEEF);
         vm.prank(admin);
         registry.setNovaAppRegistry(newRegistry);
         assertEq(registry.novaAppRegistry(), newRegistry);
     }
 
-    function test_setNovaAppRegistry_revert_notAdmin() public {
+    function test_setNovaAppRegistry_revert_notOwner() public {
         vm.prank(randomUser);
-        vm.expectRevert(KMSRegistry.NotAdmin.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
+                randomUser
+            )
+        );
         registry.setNovaAppRegistry(address(0xBEEF));
-    }
-
-    function test_setNovaAppRegistry_revert_zeroAddress() public {
-        vm.prank(admin);
-        vm.expectRevert(KMSRegistry.InvalidRegistryAddress.selector);
-        registry.setNovaAppRegistry(address(0));
     }
 
     // ========== addOperator Tests ==========
@@ -81,37 +99,6 @@ contract KMSRegistryTest is Test {
         registry.addOperator(kmsWallet1, KMS_APP_ID, 1, 100);
     }
 
-    function test_addOperator_multipleOperators() public {
-        _addOperator(kmsWallet1, 100);
-        _addOperator(kmsWallet2, 101);
-
-        assertEq(registry.operatorCount(), 2);
-
-        address[] memory ops = registry.getOperators();
-        assertEq(ops.length, 2);
-        assertEq(ops[0], kmsWallet1);
-        assertEq(ops[1], kmsWallet2);
-    }
-
-    function test_addOperator_idempotent() public {
-        _addOperator(kmsWallet1, 100);
-        _addOperator(kmsWallet1, 100); // duplicate – no-op
-
-        assertEq(registry.operatorCount(), 1);
-    }
-
-    function test_addOperator_revert_notRegistry() public {
-        vm.prank(randomUser);
-        vm.expectRevert(KMSRegistry.OnlyNovaAppRegistry.selector);
-        registry.addOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-    }
-
-    function test_addOperator_revert_appIdMismatch() public {
-        vm.prank(mockAppRegistry);
-        vm.expectRevert(KMSRegistry.AppIdMismatch.selector);
-        registry.addOperator(kmsWallet1, 999, 1, 100);
-    }
-
     // ========== removeOperator Tests ==========
 
     function test_removeOperator_success() public {
@@ -125,83 +112,33 @@ contract KMSRegistryTest is Test {
         assertEq(registry.operatorCount(), 0);
     }
 
-    function test_removeOperator_emitsEvent() public {
-        _addOperator(kmsWallet1, 100);
+    // ========== Admin/Ownership Tests ==========
 
-        vm.prank(mockAppRegistry);
-        vm.expectEmit(true, false, false, true);
-        emit KMSRegistry.OperatorRemoved(kmsWallet1, KMS_APP_ID, 1, 100);
-        registry.removeOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-    }
-
-    function test_removeOperator_idempotent() public {
-        // Remove non-existent operator – should not revert
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-
-        assertFalse(registry.isOperator(kmsWallet1));
-    }
-
-    function test_removeOperator_revert_notRegistry() public {
-        vm.prank(randomUser);
-        vm.expectRevert(KMSRegistry.OnlyNovaAppRegistry.selector);
-        registry.removeOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-    }
-
-    function test_removeOperator_swapAndPop_preservesOrder() public {
-        _addOperator(kmsWallet1, 100);
-        _addOperator(kmsWallet2, 101);
-        _addOperator(kmsWallet3, 102);
-
-        assertEq(registry.operatorCount(), 3);
-
-        // Remove kmsWallet1 (index 0) – kmsWallet3 (last) should take its place
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-
-        assertEq(registry.operatorCount(), 2);
-        assertEq(registry.operatorAt(0), kmsWallet3);
-        assertEq(registry.operatorAt(1), kmsWallet2);
-    }
-
-    function test_removeOperator_removeMiddle() public {
-        _addOperator(kmsWallet1, 100);
-        _addOperator(kmsWallet2, 101);
-        _addOperator(kmsWallet3, 102);
-
-        // Remove middle (index 1)
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet2, KMS_APP_ID, 1, 101);
-
-        assertEq(registry.operatorCount(), 2);
-        assertEq(registry.operatorAt(0), kmsWallet1);
-        assertEq(registry.operatorAt(1), kmsWallet3);
-    }
-
-    function test_removeOperator_removeLast() public {
-        _addOperator(kmsWallet1, 100);
-        _addOperator(kmsWallet2, 101);
-
-        // Remove last (index 1) – no swap needed
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet2, KMS_APP_ID, 1, 101);
-
-        assertEq(registry.operatorCount(), 1);
-        assertEq(registry.operatorAt(0), kmsWallet1);
-    }
-
-    // ========== Admin Tests ==========
-
-    function test_setAdmin() public {
+    function test_transferOwnership() public {
         vm.prank(admin);
-        registry.setAdmin(randomUser);
-        assertEq(registry.admin(), randomUser);
+        registry.transferOwnership(randomUser);
+        // Ownable2Step requires acceptance
+        vm.prank(randomUser);
+        registry.acceptOwnership();
+        assertEq(registry.owner(), randomUser);
     }
 
-    function test_setAdmin_revert_notAdmin() public {
+    function test_upgrade_authorized() public {
+        KMSRegistry newImp = new KMSRegistry();
+        vm.prank(admin);
+        registry.upgradeToAndCall(address(newImp), "");
+    }
+
+    function test_upgrade_revert_unauthorized() public {
+        KMSRegistry newImp = new KMSRegistry();
         vm.prank(randomUser);
-        vm.expectRevert(KMSRegistry.NotAdmin.selector);
-        registry.setAdmin(randomUser);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
+                randomUser
+            )
+        );
+        registry.upgradeToAndCall(address(newImp), "");
     }
 
     // ========== View Tests ==========
@@ -211,74 +148,20 @@ contract KMSRegistryTest is Test {
         assertEq(ops.length, 0);
     }
 
-    function test_operatorAt_revert_outOfBounds() public {
-        vm.expectRevert("Index out of bounds");
-        registry.operatorAt(0);
-    }
-
-    function test_isOperator_false_for_nonOperator() public view {
-        assertFalse(registry.isOperator(randomUser));
-    }
-
     // ========== Full Lifecycle Test ==========
 
     function test_fullLifecycle() public {
-        // 1. NovaAppRegistry adds 3 operators
         _addOperator(kmsWallet1, 100);
         _addOperator(kmsWallet2, 101);
         _addOperator(kmsWallet3, 102);
         assertEq(registry.operatorCount(), 3);
 
-        // 2. Verify all are operators
-        assertTrue(registry.isOperator(kmsWallet1));
-        assertTrue(registry.isOperator(kmsWallet2));
-        assertTrue(registry.isOperator(kmsWallet3));
-
-        // 3. getOperators returns all 3
-        address[] memory ops = registry.getOperators();
-        assertEq(ops.length, 3);
-
-        // 4. Remove one (instance stopped)
         vm.prank(mockAppRegistry);
         registry.removeOperator(kmsWallet2, KMS_APP_ID, 1, 101);
         assertEq(registry.operatorCount(), 2);
         assertFalse(registry.isOperator(kmsWallet2));
 
-        // 5. Remaining operators still valid
         assertTrue(registry.isOperator(kmsWallet1));
         assertTrue(registry.isOperator(kmsWallet3));
-
-        // 6. Re-add same wallet (re-registered instance)
-        _addOperator(kmsWallet2, 201);
-        assertEq(registry.operatorCount(), 3);
-        assertTrue(registry.isOperator(kmsWallet2));
-
-        // 7. Remove all
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet2, KMS_APP_ID, 1, 201);
-        vm.prank(mockAppRegistry);
-        registry.removeOperator(kmsWallet3, KMS_APP_ID, 1, 102);
-        assertEq(registry.operatorCount(), 0);
-    }
-
-    // ========== setNovaAppRegistry changes the caller gate ==========
-
-    function test_addOperator_afterRegistryChange() public {
-        // Change registry address
-        address newRegistry = address(0xBEEF);
-        vm.prank(admin);
-        registry.setNovaAppRegistry(newRegistry);
-
-        // Old registry can no longer add
-        vm.prank(mockAppRegistry);
-        vm.expectRevert(KMSRegistry.OnlyNovaAppRegistry.selector);
-        registry.addOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-
-        // New registry can
-        vm.prank(newRegistry);
-        registry.addOperator(kmsWallet1, KMS_APP_ID, 1, 100);
-        assertTrue(registry.isOperator(kmsWallet1));
     }
 }

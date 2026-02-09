@@ -22,7 +22,7 @@ nova-kms/
 │   ├── src/
 │   │   ├── KMSRegistry.sol       # Main KMS node registry
 │   │   └── interfaces/
-│   │       └── INovaAppRegistry.sol
+│   │       └── INovaAppInterface.sol
 │   ├── test/
 │   │   └── KMSRegistry.t.sol     # Foundry unit tests
 │   ├── script/
@@ -42,10 +42,10 @@ nova-kms/
 │   ├── sync_manager.py           # Peer synchronization
 │   ├── probe.py                  # Liveness probing
 │   ├── routes.py                 # API endpoint definitions
+│   └── requirements.txt
+├── scripts/                      # Bash scripts for development
 │   ├── run_dev.sh                # Single-node simulation launcher
-│   ├── run_multi_node.sh         # Multi-node simulation launcher
-│   ├── requirements.txt
-│   └── Dockerfile
+│   └── run_multi_node.sh         # Multi-node simulation launcher
 ├── tests/                        # Python unit & integration tests
 │   ├── test_simulation.py        # Simulation mode tests (45 tests)
 │   ├── test_auth.py
@@ -58,6 +58,8 @@ nova-kms/
 │   ├── development.md            # This file
 │   ├── testing.md                # Testing guide
 │   └── deployment.md             # Deployment guide
+├── Dockerfile                    # Production Docker image
+├── Makefile                      # Project management
 ├── enclaver.yaml                 # Enclaver configuration
 ├── nova-build.yaml               # Nova Platform build config
 └── README.md
@@ -141,10 +143,7 @@ Simulation mode lets you run one or more KMS nodes locally **without any blockch
 ### Quick Start — Single Node
 
 ```bash
-cd enclave
-SIMULATION_MODE=1 python app.py
-# or
-./run_dev.sh
+make simulation
 ```
 
 The server starts on `http://localhost:8000` with:
@@ -155,9 +154,9 @@ The server starts on `http://localhost:8000` with:
 ### Quick Start — Multi-Node (3 nodes)
 
 ```bash
-cd enclave
-./run_multi_node.sh         # Starts 3 nodes on 8000/8001/8002
-./run_multi_node.sh stop    # Stop all
+make simulation-multi
+# To stop:
+make stop-simulation
 ```
 
 Or manually:

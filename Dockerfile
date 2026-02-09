@@ -11,11 +11,11 @@ WORKDIR /app
 ENV IN_ENCLAVE=true
 
 # Install dependencies first for Docker layer caching
-COPY requirements.txt .
+COPY enclave/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY enclave/ .
 
 EXPOSE 8000
 
