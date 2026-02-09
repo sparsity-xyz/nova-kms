@@ -112,7 +112,7 @@ class SimPeer:
 
 def _make_default_sim_peers() -> List[SimPeer]:
     peers: List[SimPeer] = []
-    for idx, url in enumerate(("http://localhost:8000", "http://localhost:8001", "http://localhost:8002")):
+    for idx, url in enumerate(("http://localhost:4000", "http://localhost:4001", "http://localhost:4002")):
         priv_hex = _derive_sim_private_key_hex(f"peer-{idx}".encode("utf-8"))
         wallet = _derive_wallet_from_private_key_hex(priv_hex)
         _SIM_PRIV_BY_WALLET[wallet.lower()] = priv_hex
@@ -306,7 +306,7 @@ def is_simulation_mode() -> bool:
 
 def get_sim_port() -> int:
     """Return the port for this simulation node (default 8000)."""
-    return int(os.getenv("SIM_PORT", "8000"))
+    return int(os.getenv("SIM_PORT", "4000"))
 
 
 def get_sim_node_index() -> int:

@@ -398,7 +398,7 @@ def sync_endpoint(body: SyncRequest, request: Request, response: Response):
     signature = request.headers.get("x-sync-signature")
     
     result = _sync_manager.handle_incoming_sync(
-        body.model_dump(), 
+        body.model_dump(exclude_unset=True), 
         signature=signature,
         kms_pop=kms_pop
     )
