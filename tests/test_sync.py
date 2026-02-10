@@ -142,3 +142,101 @@ class TestPeerCache:
         peers = cache.get_peers(exclude_wallet="0xSELF")
         assert len(peers) == 1
         assert peers[0]["tee_wallet_address"] == "0xother"
+
+
+class TestSyncAuth:
+    """Tests for sync authentication (rejecting non-operators)."""
+
+    def test_handle_sync_from_non_operator(self):
+        ds = DataStore(node_id="node1")
+        mock_kms = MagicMock()
+        # Simulation: Valid signature, but NOT in operator list
+        mock_kms.is_operator.return_value = False
+
+        mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=mock_kms))
+
+        # Generate a valid PoP signature from an unknown wallet
+        kms_pop, sender_wallet = _make_kms_pop(recipient_wallet=mgr.node_wallet)
+
+        result = mgr.handle_incoming_sync(
+            {
+                "type": "delta",
+                "sender_wallet": sender_wallet,
+                "data": {},
+            },
+            kms_pop=kms_pop,
+        )
+
+        assert result["status"] == "error"
+        assert "Not a registered KMS operator" in result["reason"]
+
+
+class TestMasterSecretInitialization:
+    """Tests for the split-brain prevention logic in wait_for_master_secret."""
+
+    @pytest.fixture
+    def mgr_deps(self):
+        ds = MagicMock(spec=DataStore)
+        kms_reg = MagicMock()
+        peer_cache = MagicMock(spec=PeerCache)
+        secret_mgr = MagicMock()
+        # Initially False to enter loop
+        secret_mgr.is_initialized = False
+        odyn = MagicMock()
+
+        sync_mgr = SyncManager(ds, "0xSelf", peer_cache, odyn=odyn)
+        return sync_mgr, kms_reg, secret_mgr, peer_cache
+
+    def test_init_solo(self, mgr_deps):
+        """If I am the only operator, initialize from random (seed node)."""
+        sync_mgr, kms_reg, secret_mgr, peer_cache = mgr_deps
+
+        # Setup: Peer cache returns only self
+        peer_cache.get_peers.return_value = [
+            {"tee_wallet_address": "0xSelf", "node_url": "http://self", "status": "ACTIVE"}
+        ]
+
+        sync_mgr.wait_for_master_secret(kms_reg, secret_mgr)
+
+        secret_mgr.initialize_from_random.assert_called_once_with(sync_mgr.odyn)
+
+    def test_init_peers_inactive(self, mgr_deps):
+        """If other operators exist but are not ACTIVE, initialize from random."""
+        sync_mgr, kms_reg, secret_mgr, peer_cache = mgr_deps
+        from nova_registry import InstanceStatus
+
+        # Peers exist but are STOPPED/inactive
+        peer_cache.get_peers.return_value = [
+            {"tee_wallet_address": "0xSelf", "node_url": "http://self", "status": InstanceStatus.ACTIVE},
+            {"tee_wallet_address": "0xOther", "node_url": "http://other", "status": InstanceStatus.STOPPED},
+        ]
+
+        sync_mgr.wait_for_master_secret(kms_reg, secret_mgr)
+
+        secret_mgr.initialize_from_random.assert_called_once_with(sync_mgr.odyn)
+
+    def test_init_peers_active(self, mgr_deps):
+        """If active peers exist, must sync from them (do not gen random)."""
+        sync_mgr, kms_reg, secret_mgr, peer_cache = mgr_deps
+        from nova_registry import InstanceStatus
+
+        # Peer is ACTIVE
+        peer_cache.get_peers.return_value = [
+            {"tee_wallet_address": "0xSelf", "node_url": "http://self", "status": InstanceStatus.ACTIVE},
+            {"tee_wallet_address": "0xOther", "node_url": "http://other", "status": InstanceStatus.ACTIVE},
+        ]
+
+        # Mock _sync_master_secret_from_peer to succeed
+        with patch.object(sync_mgr, "_sync_master_secret_from_peer", return_value=True) as mock_sync:
+            # Side effect: when sync succeeds, mark manager as initialized so loop breaks
+            def mark_initialized(*args, **kwargs):
+                secret_mgr.is_initialized = True
+                return True
+            mock_sync.side_effect = mark_initialized
+
+            sync_mgr.wait_for_master_secret(kms_reg, secret_mgr)
+
+            mock_sync.assert_called_once()
+            # Crucially: should NOT initialize from random if peers exist
+            secret_mgr.initialize_from_random.assert_not_called()
+

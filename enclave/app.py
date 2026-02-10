@@ -125,7 +125,6 @@ def _startup_simulation() -> dict:
     return {
         "odyn": odyn,
         "data_store": data_store,
-
         "authorizer": authorizer,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,
@@ -217,7 +216,6 @@ def _startup_production() -> dict:
     return {
         "odyn": odyn,
         "data_store": data_store,
-
         "authorizer": authorizer,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,

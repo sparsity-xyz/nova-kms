@@ -41,7 +41,7 @@ def _setup_routes():
     without real chain / Odyn.
     """
     import routes
-    from auth import AppAuthorizer, AuthResult, ClientAttestation
+    from auth import AppAuthorizer, AuthResult, ClientIdentity
     from data_store import DataStore
     from kdf import MasterSecretManager
     from sync_manager import SyncManager, PeerCache

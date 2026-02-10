@@ -6,7 +6,7 @@ Uses mocked NovaRegistry to avoid on-chain calls.
 import pytest
 from unittest.mock import MagicMock, patch
 
-from auth import AppAuthorizer, ClientAttestation, attestation_from_headers
+from auth import AppAuthorizer, ClientIdentity, identity_from_headers
 from nova_registry import (
     App,
     AppStatus,
@@ -93,19 +93,18 @@ def _mock_registry(
 # =============================================================================
 
 
-class TestAttestationFromHeaders:
+class TestIdentityFromHeaders:
     def test_basic(self):
-        att = attestation_from_headers({
+        att = identity_from_headers({
             "x-tee-wallet": "0xABCD",
             "x-tee-measurement": "ab" * 32,
         })
+        # Measurement header is now ignored, so we only check wallet
         assert att.tee_wallet == "0xABCD"
-        assert att.measurement == b"\xab" * 32
 
     def test_missing_headers(self):
-        att = attestation_from_headers({})
+        att = identity_from_headers({})
         assert att.tee_wallet == ""
-        assert att.measurement is None
 
 
 # =============================================================================
@@ -121,7 +120,7 @@ class TestAppAuthorizer:
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
 
-        att = ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=ver.code_measurement)
+        att = ClientIdentity(tee_wallet=inst.tee_wallet_address)
         result = auth.verify(att)
         assert result.authorized
         assert result.app_id == 100
@@ -129,7 +128,7 @@ class TestAppAuthorizer:
     def test_missing_wallet(self):
         reg = _mock_registry()
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet="", measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=""))
         assert not result.authorized
         assert "Missing" in result.reason
 
@@ -137,7 +136,7 @@ class TestAppAuthorizer:
         inst = _make_instance(instance_id=0)
         reg = _mock_registry(instance=inst)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet="0x1234", measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet="0x1234"))
         assert not result.authorized
         assert "not found" in result.reason
 
@@ -145,7 +144,7 @@ class TestAppAuthorizer:
         inst = _make_instance(status=InstanceStatus.STOPPED)
         reg = _mock_registry(instance=inst)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "not active" in result.reason
 
@@ -153,7 +152,7 @@ class TestAppAuthorizer:
         inst = _make_instance(zk_verified=False)
         reg = _mock_registry(instance=inst)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "zkVerified" in result.reason
 
@@ -162,7 +161,7 @@ class TestAppAuthorizer:
         app_obj = _make_app(status=AppStatus.REVOKED)
         reg = _mock_registry(instance=inst, app=app_obj)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "App not active" in result.reason
 
@@ -172,32 +171,9 @@ class TestAppAuthorizer:
         ver = _make_version(status=VersionStatus.REVOKED)
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "not allowed" in result.reason
-
-    def test_measurement_mismatch(self):
-        inst = _make_instance()
-        app_obj = _make_app()
-        ver = _make_version(measurement=b"\xab" * 32)
-        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
-        auth = AppAuthorizer(registry=reg)
-
-        wrong = b"\xff" * 32
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=wrong))
-        assert not result.authorized
-        assert "mismatch" in result.reason
-
-    def test_skip_measurement_if_none(self):
-        """If client doesn't provide measurement, skip that check."""
-        inst = _make_instance()
-        app_obj = _make_app()
-        ver = _make_version()
-        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
-        auth = AppAuthorizer(registry=reg)
-
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
-        assert result.authorized
 
     def test_deprecated_version_ok(self):
         inst = _make_instance()
@@ -205,6 +181,7 @@ class TestAppAuthorizer:
         ver = _make_version(status=VersionStatus.DEPRECATED)
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
-        result = auth.verify(ClientAttestation(tee_wallet=inst.tee_wallet_address, measurement=None))
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert result.authorized
+
 

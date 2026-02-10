@@ -59,7 +59,6 @@ class ClientIdentity:
     """
 
     tee_wallet: str                  # Ethereum address of the instance
-    measurement: Optional[bytes]     # PCR / code measurement (bytes32)
     signature: Optional[str] = None  # Original PoP signature (if applicable)
 
 
@@ -150,11 +149,9 @@ def identity_from_headers(headers: dict) -> ClientIdentity:
             "Use PoP (X-App-Signature / X-App-Nonce / X-App-Timestamp)."
         )
     tee_wallet = headers.get("x-tee-wallet", "")
-    measurement_hex = headers.get("x-tee-measurement", "")
-    measurement = bytes.fromhex(measurement_hex.replace("0x", "")) if measurement_hex else None
     if tee_wallet:
         logger.debug("Using header-based identity (dev/sim mode)")
-    return ClientIdentity(tee_wallet=tee_wallet, measurement=measurement)
+    return ClientIdentity(tee_wallet=tee_wallet)
 
 
 def app_identity_from_signature(request) -> Optional[ClientIdentity]:
@@ -194,11 +191,8 @@ def app_identity_from_signature(request) -> Optional[ClientIdentity]:
         if wallet and recovered.lower() != wallet.lower():
             raise RuntimeError("App wallet header does not match signature")
 
-        # Return identity with None measurement; AppAuthorizer will trust
-        # the on-chain measurement for this verified TEE wallet.
         return ClientIdentity(
             tee_wallet=recovered.lower(),
-            measurement=None,
             signature=sig
         )
     except Exception as exc:
@@ -252,7 +246,6 @@ class AppAuthorizer:
       2. instance must be ACTIVE and zkVerified
       3. getApp(appId) → app must be ACTIVE
       4. getVersion(appId, versionId) → ENROLLED or DEPRECATED
-      5. code measurement must match version.codeMeasurement
     """
 
     def __init__(self, registry: Optional[NovaRegistry] = None):
@@ -301,18 +294,6 @@ class AppAuthorizer:
 
         if version.status not in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED):
             return AuthResult(authorized=False, reason="Version not allowed")
-
-        # 5. Measurement match
-        if identity.measurement is not None:
-            if version.code_measurement != identity.measurement:
-                return AuthResult(authorized=False, reason="Measurement mismatch")
-        elif config.REQUIRE_MEASUREMENT:
-            # In production, measurement is required for non-PoP identity paths.
-            # For lightweight PoP, the wallet was already bound to a measured
-            # version on-chain at enrollment time, so we allow missing measurement
-            # ONLY when a PoP signature was presented.
-            if not identity.signature:
-                return AuthResult(authorized=False, reason="Measurement required")
 
         return AuthResult(
             authorized=True,
@@ -370,10 +351,4 @@ def _require_fresh_timestamp(ts: str) -> None:
         raise RuntimeError("Stale timestamp")
 
 
-# =============================================================================
-# Backward-compatibility aliases (deprecated — will be removed)
-# =============================================================================
 
-ClientAttestation = ClientIdentity
-attestation_from_headers = identity_from_headers
-get_attestation = authenticate_app

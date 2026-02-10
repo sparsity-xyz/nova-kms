@@ -346,68 +346,22 @@ class TestSealedKeyExchange:
 # =============================================================================
 
 
-class TestMeasurementEnforcement:
-    def test_measurement_required_in_production(self):
-        """When REQUIRE_MEASUREMENT=True, missing measurement → rejected."""
-        from auth import AppAuthorizer, ClientAttestation
-        from nova_registry import (
-            App, AppStatus, AppVersion, InstanceStatus, RuntimeInstance, VersionStatus,
-        )
-        from unittest.mock import MagicMock
 
-        instance = RuntimeInstance(1, 100, 1, "0x00", "url", b"", "0xAA", True, InstanceStatus.ACTIVE, 0)
-        app_obj = App(100, "0x00", b"\x00" * 32, "0x00", "", 1, 0, AppStatus.ACTIVE)
-        version = AppVersion(1, "v1", b"\xab" * 32, "", "", "", "", VersionStatus.ENROLLED, 0, "0x00")
-
-        reg = MagicMock()
-        reg.get_instance_by_wallet.return_value = instance
-        reg.get_app.return_value = app_obj
-        reg.get_version.return_value = version
-
-        auth = AppAuthorizer(registry=reg)
-
-        with patch("config.REQUIRE_MEASUREMENT", True):
-            result = auth.verify(ClientAttestation(tee_wallet="0xAA", measurement=None))
-            assert not result.authorized
-            assert "required" in result.reason.lower()
-
-    def test_measurement_optional_in_dev(self):
-        """When REQUIRE_MEASUREMENT=False, missing measurement → allowed."""
-        from auth import AppAuthorizer, ClientAttestation
-        from nova_registry import (
-            App, AppStatus, AppVersion, InstanceStatus, RuntimeInstance, VersionStatus,
-        )
-        from unittest.mock import MagicMock
-
-        instance = RuntimeInstance(1, 100, 1, "0x00", "url", b"", "0xAA", True, InstanceStatus.ACTIVE, 0)
-        app_obj = App(100, "0x00", b"\x00" * 32, "0x00", "", 1, 0, AppStatus.ACTIVE)
-        version = AppVersion(1, "v1", b"\xab" * 32, "", "", "", "", VersionStatus.ENROLLED, 0, "0x00")
-
-        reg = MagicMock()
-        reg.get_instance_by_wallet.return_value = instance
-        reg.get_app.return_value = app_obj
-        reg.get_version.return_value = version
-
-        auth = AppAuthorizer(registry=reg)
-
-        with patch("config.REQUIRE_MEASUREMENT", False):
-            result = auth.verify(ClientAttestation(tee_wallet="0xAA", measurement=None))
-            assert result.authorized
 
 
 class TestAttestationModes:
     def test_headers_disabled_in_production(self):
         """attestation_from_headers must raise when IN_ENCLAVE=True."""
-        from auth import attestation_from_headers
+        from auth import identity_from_headers
         with patch("auth.config.IN_ENCLAVE", True), patch("auth.config.SIMULATION_MODE", False):
             with pytest.raises(RuntimeError, match="disabled in production"):
-                attestation_from_headers({"x-tee-wallet": "0xAA"})
+                identity_from_headers({"x-tee-wallet": "0xAA"})
 
     def test_headers_work_in_dev(self):
         """attestation_from_headers works when IN_ENCLAVE=False."""
-        from auth import attestation_from_headers
+        from auth import identity_from_headers
         with patch("auth.config.IN_ENCLAVE", False):
-            att = attestation_from_headers({"x-tee-wallet": "0xBB"})
+            att = identity_from_headers({"x-tee-wallet": "0xBB"})
             assert att.tee_wallet == "0xBB"
 
 

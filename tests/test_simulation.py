@@ -296,11 +296,10 @@ class TestBuildSimComponents:
     def test_authorizer_verify_succeeds(self):
         """AppAuthorizer backed by SimNovaRegistry should accept known wallets."""
         comp = build_sim_components()
-        from auth import ClientAttestation
+        from auth import ClientIdentity
 
-        att = ClientAttestation(
+        att = ClientIdentity(
             tee_wallet=DEFAULT_SIM_PEERS[0].tee_wallet,
-            measurement=None,
         )
         result = comp["authorizer"].verify(att)
         assert result.authorized is True
