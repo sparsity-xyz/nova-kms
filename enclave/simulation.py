@@ -348,16 +348,20 @@ def build_sim_components(
     peers: Optional[List[SimPeer]] = None,
     *,
     kms_app_id: Optional[int] = None,
+    scheduler: Optional[Any] = None,  # Pass False to disable
 ) -> dict:
     """
     Factory that assembles all simulation-mode components.
 
     Returns a dict with keys:
         tee_wallet, node_url, kms_registry, nova_registry,
-        authorizer, odyn, master_secret
+        authorizer, odyn, master_secret, sync_manager, data_store
     """
     import config as _cfg
     from auth import AppAuthorizer
+    from data_store import DataStore
+    from kdf import MasterSecretManager
+    from sync_manager import PeerCache, SyncManager
 
     if peers is None:
         peers = get_sim_peers()
@@ -389,6 +393,23 @@ def build_sim_components(
         f"url={node_url}, peers={len(peers)}, app_id={app_id}"
     )
 
+    data_store = DataStore(node_id=this_node.tee_wallet)
+    peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
+    
+    # KDF manager
+    master_mgr = MasterSecretManager()
+    if master_secret:
+        master_mgr.initialize_from_peer(master_secret)
+
+    sync_manager = SyncManager(
+        data_store=data_store,
+        node_wallet=this_node.tee_wallet,
+        peer_cache=peer_cache,
+        odyn=odyn,
+        scheduler=scheduler,
+    )
+    sync_manager.set_sync_key(master_mgr.derive(0, "sync_key"))
+
     return {
         "tee_wallet": this_node.tee_wallet,
         "node_url": node_url,
@@ -397,4 +418,7 @@ def build_sim_components(
         "authorizer": authorizer,
         "odyn": odyn,
         "master_secret": master_secret,
+        "master_secret_mgr": master_mgr,
+        "sync_manager": sync_manager,
+        "data_store": data_store,
     }

@@ -179,6 +179,7 @@ class SyncManager:
         *,
         odyn=None,
         http_timeout: int = 15,
+        scheduler: Optional[Any] = None,
     ):
         self.data_store = data_store
         self.node_wallet = node_wallet
@@ -187,6 +188,35 @@ class SyncManager:
         self.http_timeout = http_timeout
         self._last_push_ms: int = 0
         self._sync_key: Optional[bytes] = None
+
+        if scheduler is False:
+            self.scheduler = None
+        else:
+            self.scheduler = scheduler or BackgroundScheduler()
+            self._start_scheduler()
+
+    def _start_scheduler(self):
+        """Start the background sync scheduler."""
+        if not self.scheduler:
+            return
+
+        # Periodic delta push
+        self.scheduler.add_job(
+            self.push_deltas,
+            "interval",
+            seconds=SYNC_INTERVAL_SECONDS,
+            id="push_deltas",
+            replace_existing=True,
+        )
+        # Periodic peer refresh
+        self.scheduler.add_job(
+            self.peer_cache.refresh,
+            "interval",
+            seconds=PEER_CACHE_TTL_SECONDS,
+            id="refresh_peers",
+            replace_existing=True,
+        )
+        self.scheduler.start()
 
     def set_sync_key(self, sync_key: bytes) -> None:
         """Set the HMAC key used for signing sync messages."""
