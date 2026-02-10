@@ -47,8 +47,7 @@ CONFIRMATION_DEPTH: int = 6
 NOVA_APP_REGISTRY_ADDRESS: str = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"
 
 # KMSRegistry contract address
-# TODO: Update this with the deployed KMSRegistry Proxy address
-KMS_REGISTRY_ADDRESS: str = ""
+KMS_REGISTRY_ADDRESS: str = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
 
 # KMS application ID assigned by NovaAppRegistry
 KMS_APP_ID: int = 43
