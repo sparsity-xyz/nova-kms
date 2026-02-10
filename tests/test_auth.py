@@ -1,12 +1,32 @@
-"""Tests for auth.py — AppAuthorizer and dev header identity.
+"""
+Tests for auth.py — Authentication + Authorization.
 
-Uses mocked NovaRegistry to avoid on-chain calls.
+Covers:
+  - identity_from_headers (dev/sim mode)
+  - identity_from_headers blocked in production
+  - _NonceStore (issue, validate, replay, expiry, capacity)
+  - AppAuthorizer.verify (all authorization steps and branches)
+  - authenticate_app (production vs dev routing)
+  - verify_wallet_signature / recover_wallet_from_signature
+  - _require_fresh_timestamp
 """
 
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 
-from auth import AppAuthorizer, ClientIdentity, identity_from_headers
+from auth import (
+    AppAuthorizer,
+    AuthResult,
+    ClientIdentity,
+    _NonceStore,
+    _require_fresh_timestamp,
+    authenticate_app,
+    identity_from_headers,
+    issue_nonce,
+    recover_wallet_from_signature,
+    verify_wallet_signature,
+)
 from nova_registry import (
     App,
     AppStatus,
@@ -59,12 +79,12 @@ def _make_app(*, app_id=100, status=AppStatus.ACTIVE) -> App:
 
 
 def _make_version(
-    *, version_id=1, status=VersionStatus.ENROLLED, measurement=b"\xab" * 32
+    *, version_id=1, status=VersionStatus.ENROLLED
 ) -> AppVersion:
     return AppVersion(
         version_id=version_id,
         version_name="v1.0",
-        code_measurement=measurement,
+        code_measurement=b"\xab" * 32,
         image_uri="",
         audit_url="",
         audit_hash="",
@@ -75,9 +95,7 @@ def _make_version(
     )
 
 
-def _mock_registry(
-    instance=None, app=None, version=None
-) -> MagicMock:
+def _mock_registry(instance=None, app=None, version=None) -> MagicMock:
     reg = MagicMock(spec=NovaRegistry)
     if instance is not None:
         reg.get_instance_by_wallet.return_value = instance
@@ -89,22 +107,86 @@ def _mock_registry(
 
 
 # =============================================================================
-# attestation_from_headers
+# identity_from_headers
 # =============================================================================
 
 
 class TestIdentityFromHeaders:
     def test_basic(self):
-        att = identity_from_headers({
-            "x-tee-wallet": "0xABCD",
-            "x-tee-measurement": "ab" * 32,
-        })
-        # Measurement header is now ignored, so we only check wallet
-        assert att.tee_wallet == "0xABCD"
+        with patch("auth.config.IN_ENCLAVE", False):
+            att = identity_from_headers({"x-tee-wallet": "0xABCD"})
+            assert att.tee_wallet == "0xABCD"
 
     def test_missing_headers(self):
-        att = identity_from_headers({})
-        assert att.tee_wallet == ""
+        with patch("auth.config.IN_ENCLAVE", False):
+            att = identity_from_headers({})
+            assert att.tee_wallet == ""
+
+    def test_disabled_in_production(self):
+        with patch("auth.config.IN_ENCLAVE", True), \
+             patch("auth.config.SIMULATION_MODE", False):
+            with pytest.raises(RuntimeError, match="disabled in production"):
+                identity_from_headers({"x-tee-wallet": "0xAA"})
+
+    def test_allowed_in_sim_mode(self):
+        with patch("auth.config.IN_ENCLAVE", True), \
+             patch("auth.config.SIMULATION_MODE", True):
+            att = identity_from_headers({"x-tee-wallet": "0xBB"})
+            assert att.tee_wallet == "0xBB"
+
+
+# =============================================================================
+# _NonceStore
+# =============================================================================
+
+
+class TestNonceStore:
+    def test_issue_returns_bytes(self):
+        store = _NonceStore(ttl_seconds=60)
+        nonce = store.issue()
+        assert isinstance(nonce, bytes)
+        assert len(nonce) == 16
+
+    def test_validate_and_consume(self):
+        store = _NonceStore(ttl_seconds=60)
+        nonce = store.issue()
+        assert store.validate_and_consume(nonce) is True
+
+    def test_replay_rejected(self):
+        store = _NonceStore(ttl_seconds=60)
+        nonce = store.issue()
+        store.validate_and_consume(nonce)
+        # Second use is rejected
+        assert store.validate_and_consume(nonce) is False
+
+    def test_expired_nonce_rejected(self):
+        store = _NonceStore(ttl_seconds=0)  # instant expiry
+        nonce = store.issue()
+        time.sleep(0.01)
+        assert store.validate_and_consume(nonce) is False
+
+    def test_none_nonce_rejected(self):
+        store = _NonceStore(ttl_seconds=60)
+        assert store.validate_and_consume(None) is False
+
+    def test_unknown_nonce_rejected(self):
+        store = _NonceStore(ttl_seconds=60)
+        assert store.validate_and_consume(b"unknown_nonce_00") is False
+
+    def test_max_capacity_evicts_oldest(self):
+        store = _NonceStore(ttl_seconds=60, max_nonces=2)
+        n1 = store.issue()
+        n2 = store.issue()
+        n3 = store.issue()
+        # n1 should have been evicted
+        assert store.validate_and_consume(n1) is False
+        assert store.validate_and_consume(n3) is True
+
+    def test_issue_nonce_global(self):
+        """issue_nonce() returns a fresh nonce from the global store."""
+        n = issue_nonce()
+        assert isinstance(n, bytes)
+        assert len(n) == 16
 
 
 # =============================================================================
@@ -120,10 +202,10 @@ class TestAppAuthorizer:
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
 
-        att = ClientIdentity(tee_wallet=inst.tee_wallet_address)
-        result = auth.verify(att)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert result.authorized
         assert result.app_id == 100
+        assert result.version_id == 1
 
     def test_missing_wallet(self):
         reg = _mock_registry()
@@ -132,9 +214,17 @@ class TestAppAuthorizer:
         assert not result.authorized
         assert "Missing" in result.reason
 
-    def test_instance_not_found(self):
+    def test_instance_not_found_zero_id(self):
         inst = _make_instance(instance_id=0)
         reg = _mock_registry(instance=inst)
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet="0x1234"))
+        assert not result.authorized
+        assert "not found" in result.reason
+
+    def test_instance_lookup_exception(self):
+        reg = MagicMock(spec=NovaRegistry)
+        reg.get_instance_by_wallet.side_effect = Exception("RPC error")
         auth = AppAuthorizer(registry=reg)
         result = auth.verify(ClientIdentity(tee_wallet="0x1234"))
         assert not result.authorized
@@ -147,6 +237,13 @@ class TestAppAuthorizer:
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "not active" in result.reason
+
+    def test_instance_failed(self):
+        inst = _make_instance(status=InstanceStatus.FAILED)
+        reg = _mock_registry(instance=inst)
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert not result.authorized
 
     def test_instance_not_zk_verified(self):
         inst = _make_instance(zk_verified=False)
@@ -164,6 +261,24 @@ class TestAppAuthorizer:
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "App not active" in result.reason
+
+    def test_app_inactive(self):
+        inst = _make_instance()
+        app_obj = _make_app(status=AppStatus.INACTIVE)
+        reg = _mock_registry(instance=inst, app=app_obj)
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert not result.authorized
+
+    def test_app_lookup_exception(self):
+        inst = _make_instance()
+        reg = MagicMock(spec=NovaRegistry)
+        reg.get_instance_by_wallet.return_value = inst
+        reg.get_app.side_effect = Exception("RPC error")
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert not result.authorized
+        assert "lookup failed" in result.reason
 
     def test_version_revoked(self):
         inst = _make_instance()
@@ -184,4 +299,109 @@ class TestAppAuthorizer:
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert result.authorized
 
+    def test_version_lookup_exception(self):
+        inst = _make_instance()
+        app_obj = _make_app()
+        reg = MagicMock(spec=NovaRegistry)
+        reg.get_instance_by_wallet.return_value = inst
+        reg.get_app.return_value = app_obj
+        reg.get_version.side_effect = Exception("RPC error")
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert not result.authorized
+        assert "lookup failed" in result.reason
 
+
+# =============================================================================
+# Signature helpers
+# =============================================================================
+
+
+class TestSignatureHelpers:
+    def test_verify_wallet_signature_valid(self):
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        acct = Account.create()
+        msg = "test message"
+        sig = acct.sign_message(encode_defunct(text=msg))
+        assert verify_wallet_signature(acct.address, msg, sig.signature.hex()) is True
+
+    def test_verify_wallet_signature_wrong_wallet(self):
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        acct = Account.create()
+        other = Account.create()
+        msg = "test message"
+        sig = acct.sign_message(encode_defunct(text=msg))
+        assert verify_wallet_signature(other.address, msg, sig.signature.hex()) is False
+
+    def test_verify_wallet_signature_empty(self):
+        assert verify_wallet_signature("", "msg", "sig") is False
+        assert verify_wallet_signature("0xAA", "msg", "") is False
+        assert verify_wallet_signature("0xAA", "", "sig") is False
+
+    def test_recover_wallet_from_signature(self):
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        acct = Account.create()
+        msg = "test recovery"
+        sig = acct.sign_message(encode_defunct(text=msg))
+        recovered = recover_wallet_from_signature(msg, sig.signature.hex())
+        assert recovered.lower() == acct.address.lower()
+
+    def test_recover_returns_none_on_empty(self):
+        assert recover_wallet_from_signature("msg", "") is None
+        assert recover_wallet_from_signature("", "sig") is None
+
+
+# =============================================================================
+# Timestamp freshness
+# =============================================================================
+
+
+class TestTimestampFreshness:
+    def test_fresh_timestamp_ok(self):
+        _require_fresh_timestamp(str(int(time.time())))
+
+    def test_stale_timestamp_raises(self):
+        old = str(int(time.time()) - 300)
+        with pytest.raises(RuntimeError, match="Stale"):
+            _require_fresh_timestamp(old)
+
+    def test_future_timestamp_raises(self):
+        future = str(int(time.time()) + 300)
+        with pytest.raises(RuntimeError, match="Stale"):
+            _require_fresh_timestamp(future)
+
+    def test_missing_timestamp_raises(self):
+        with pytest.raises(RuntimeError, match="Missing"):
+            _require_fresh_timestamp("")
+
+    def test_invalid_timestamp_raises(self):
+        with pytest.raises(RuntimeError, match="Invalid"):
+            _require_fresh_timestamp("not_a_number")
+
+
+# =============================================================================
+# authenticate_app
+# =============================================================================
+
+
+class TestAuthenticateApp:
+    def test_dev_mode_uses_headers(self):
+        with patch("auth.config.IN_ENCLAVE", False):
+            req = MagicMock()
+            headers = {"x-tee-wallet": "0xDEV"}
+            result = authenticate_app(req, headers)
+            assert result.tee_wallet == "0xDEV"
+
+    def test_production_mode_requires_pop(self):
+        with patch("auth.config.IN_ENCLAVE", True), \
+             patch("auth.config.SIMULATION_MODE", False):
+            req = MagicMock()
+            req.headers = {}  # empty dict — no PoP headers present
+            with pytest.raises(RuntimeError):
+                authenticate_app(req, {})

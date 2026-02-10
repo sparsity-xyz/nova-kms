@@ -1,541 +1,324 @@
 """
-Tests for security hardening features.
+Tests for url_validator.py, rate_limiter.py, chain.py, and cross-cutting
+security concerns.
 
 Covers:
-  - URL validator (SSRF protection)
-  - Rate limiter (token bucket)
-  - Data store eviction bug fix
-  - Data store clock skew rejection
-  - KDF epoch rotation and sealed key exchange
-  - KDF epoch rotation and sealed key exchange
-  - Auth measurement enforcement in production mode
-  - Sync manager HMAC signing
-  - Simulation mode safety guard
-  - CachedNovaRegistry TTL cache
+  - validate_peer_url (SSRF protection, scheme, port, hostname, private IPs)
+  - TokenBucket (rate limiting, cleanup)
+  - Chain (eth_call_finalized with confirmation depth, fallback)
+  - Clock skew protection (DataStore)
+  - MAX_NONCES eviction (auth._NonceStore)
+  - CachedNovaRegistry TTL expiry
 """
 
-import hashlib
-import hmac
-import json
-import os
+import socket
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import config
+
 
 # =============================================================================
-# URL Validator
+# URL Validator — SSRF Protection
 # =============================================================================
 
 
 class TestURLValidator:
-    def test_valid_https_url(self):
+    @pytest.fixture(autouse=True)
+    def _allow_http(self, monkeypatch):
+        monkeypatch.setattr(config, "IN_ENCLAVE", False)
+        monkeypatch.setattr(config, "ALLOWED_PEER_URL_SCHEMES", ["http", "https"])
+
+    def test_valid_https(self):
         from url_validator import validate_peer_url
-        result = validate_peer_url("https://peer.example.com:8443/sync", allow_private_ips=True)
-        assert result == "https://peer.example.com:8443/sync"
+        url = validate_peer_url("https://kms1.example.com:8443/health", allow_private_ips=True)
+        assert url == "https://kms1.example.com:8443/health"
 
-    def test_valid_http_dev_mode(self):
+    def test_valid_http_dev(self):
         from url_validator import validate_peer_url
-        result = validate_peer_url(
-            "http://localhost:8000",
-            allowed_schemes=["http", "https"],
-            allow_private_ips=True,
-        )
-        assert result == "http://localhost:8000"
+        url = validate_peer_url("http://kms.dev.example.com", allow_private_ips=True)
+        assert "http" in url
 
-    def test_rejects_ftp_scheme(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="scheme"):
-            validate_peer_url("ftp://evil.com/data", allowed_schemes=["https"])
-
-    def test_rejects_empty_url(self):
+    def test_empty_url_rejected(self):
         from url_validator import URLValidationError, validate_peer_url
         with pytest.raises(URLValidationError, match="Empty"):
             validate_peer_url("")
 
-    def test_rejects_no_hostname(self):
+    def test_none_url_rejected(self):
+        from url_validator import URLValidationError, validate_peer_url
+        with pytest.raises(URLValidationError):
+            validate_peer_url(None)
+
+    def test_bad_scheme_rejected(self):
+        from url_validator import URLValidationError, validate_peer_url
+        with pytest.raises(URLValidationError, match="scheme"):
+            validate_peer_url("ftp://evil.com/file", allow_private_ips=True)
+
+    def test_no_hostname_rejected(self):
         from url_validator import URLValidationError, validate_peer_url
         with pytest.raises(URLValidationError, match="hostname"):
-            validate_peer_url("https://", allowed_schemes=["https"], allow_private_ips=True)
+            validate_peer_url("http://", allow_private_ips=True)
 
-    def test_rejects_private_ip_in_production(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="blocked range"):
-            validate_peer_url(
-                "https://10.0.0.1:8443",
-                allowed_schemes=["https"],
-                allow_private_ips=False,
-            )
-
-    def test_rejects_loopback_ip_in_production(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="blocked range"):
-            validate_peer_url(
-                "https://127.0.0.1:8000",
-                allowed_schemes=["https"],
-                allow_private_ips=False,
-            )
-
-    def test_rejects_credentials_in_url(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="credentials"):
-            validate_peer_url(
-                "https://user:pass@peer.example.com",
-                allow_private_ips=True,
-            )
-
-    def test_rejects_blocked_port(self):
+    def test_blocked_port(self):
         from url_validator import URLValidationError, validate_peer_url
         with pytest.raises(URLValidationError, match="Port"):
-            validate_peer_url("https://peer.example.com:6379", allow_private_ips=True)
+            validate_peer_url("http://example.com:6379", allow_private_ips=True)
 
-    def test_allows_private_ip_in_dev(self):
+    def test_private_ip_blocked_in_production(self, monkeypatch):
+        from url_validator import URLValidationError, validate_peer_url
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
+        with pytest.raises(URLValidationError, match="blocked range"):
+            validate_peer_url("http://127.0.0.1:8000", allow_private_ips=False)
+
+    def test_private_ip_allowed_in_dev(self):
         from url_validator import validate_peer_url
-        result = validate_peer_url(
-            "http://192.168.1.5:8000",
-            allowed_schemes=["http", "https"],
-            allow_private_ips=True,
-        )
-        assert "192.168.1.5" in result
+        url = validate_peer_url("http://127.0.0.1:8000", allow_private_ips=True)
+        assert "127.0.0.1" in url
+
+    def test_credentials_in_url_rejected(self):
+        from url_validator import URLValidationError, validate_peer_url
+        with pytest.raises(URLValidationError, match="credentials"):
+            validate_peer_url("http://user:pass@example.com", allow_private_ips=True)
+
+    def test_link_local_blocked(self):
+        from url_validator import URLValidationError, validate_peer_url
+        with pytest.raises(URLValidationError, match="blocked"):
+            validate_peer_url("http://169.254.169.254/latest/meta-data", allow_private_ips=False)
+
+    def test_hostname_dns_failure(self):
+        from url_validator import URLValidationError, validate_peer_url
+        with pytest.raises(URLValidationError, match="Cannot resolve"):
+            validate_peer_url(
+                "http://this-hostname-does-not-exist-xyz123.example.invalid",
+                allow_private_ips=False,
+            )
 
 
 # =============================================================================
-# Rate Limiter
+# Token Bucket Rate Limiter
 # =============================================================================
 
 
 class TestTokenBucket:
-    def test_allows_initial_requests(self):
+    def test_allows_within_rate(self):
         from rate_limiter import TokenBucket
-        bucket = TokenBucket(rate_per_minute=10)
-        assert bucket.allow("client1") is True
-        assert bucket.allow("client1") is True
+        tb = TokenBucket(rate_per_minute=10)
+        assert tb.allow("ip1") is True
 
-    def test_rejects_after_exhaustion(self):
+    def test_exhausts_bucket(self):
         from rate_limiter import TokenBucket
-        bucket = TokenBucket(rate_per_minute=3)
-        for _ in range(3):
-            assert bucket.allow("client1") is True
-        # Next request should be rejected (no time to refill)
-        assert bucket.allow("client1") is False
+        tb = TokenBucket(rate_per_minute=2)
+        tb.allow("ip")
+        tb.allow("ip")
+        # Third should be rejected
+        assert tb.allow("ip") is False
 
     def test_separate_keys(self):
         from rate_limiter import TokenBucket
-        bucket = TokenBucket(rate_per_minute=2)
-        bucket.allow("a")
-        bucket.allow("a")
-        assert bucket.allow("a") is False
-        assert bucket.allow("b") is True  # different key
+        tb = TokenBucket(rate_per_minute=1)
+        assert tb.allow("a") is True
+        assert tb.allow("b") is True  # different key
 
     def test_zero_rate_allows_all(self):
         from rate_limiter import TokenBucket
-        bucket = TokenBucket(rate_per_minute=0)
-        assert bucket.allow("x") is True
+        tb = TokenBucket(rate_per_minute=0)
+        for _ in range(100):
+            assert tb.allow("x") is True
 
-    def test_cleanup_stale(self):
+    def test_cleanup(self):
         from rate_limiter import TokenBucket
-        bucket = TokenBucket(rate_per_minute=100)
-        bucket.allow("old_client")
-        # Simulate aging
-        with bucket._lock:
-            bucket._buckets["old_client"] = (0, time.monotonic() - 600)
-        bucket.cleanup(max_age=300)
-        assert "old_client" not in bucket._buckets
+        tb = TokenBucket(rate_per_minute=10)
+        tb.allow("stale")
+        # Manually age the entry
+        key = "stale"
+        tokens, _ = tb._buckets[key]
+        tb._buckets[key] = (tokens, time.monotonic() - 999)
+        tb.cleanup(max_age=300)
+        assert key not in tb._buckets
 
 
 # =============================================================================
-# Data Store: Eviction Fix
-# =============================================================================
-
-
-class TestEvictionFix:
-    def test_eviction_decrements_total_bytes(self):
-        """
-        Regression test: _evict_lru must properly decrement _total_bytes.
-        Previously it set value=None then called value_size() → 0.
-        """
-        from data_store import DataStore
-        import config
-
-        ds = DataStore(node_id="node1")
-        ns = ds._ns(1)
-
-        # Fill namespace with 3 records
-        ds.put(1, "a", b"x" * 100)
-        ds.put(1, "b", b"y" * 200)
-        ds.put(1, "c", b"z" * 300)
-
-        assert ns._total_bytes == 600
-
-        # Trigger eviction for 250 bytes
-        with ns._lock:
-            ns._evict_lru(250)
-
-        # After eviction, total_bytes should have decreased
-        assert ns._total_bytes < 600
-        # At least 250 bytes should have been freed
-        assert ns._total_bytes <= 350
-
-
-# =============================================================================
-# Data Store: Clock Skew Rejection
-# =============================================================================
-
-
-class TestClockSkewProtection:
-    def test_rejects_far_future_timestamp(self):
-        """Records with timestamps far in the future should be rejected."""
-        from data_store import DataStore, DataRecord, VectorClock
-
-        ds = DataStore(node_id="node1")
-        far_future = int(time.time() * 1000) + 120_000  # 2 minutes ahead
-
-        incoming = DataRecord(
-            key="key1",
-            value=b"data",
-            version=VectorClock({"node2": 1}),
-            updated_at_ms=far_future,
-            tombstone=False,
-        )
-        merged = ds.merge_record(1, incoming)
-        assert merged is False
-
-    def test_rejects_far_past_timestamp(self):
-        """Records with timestamps far in the past should be rejected."""
-        from data_store import DataStore, DataRecord, VectorClock
-
-        ds = DataStore(node_id="node1")
-        far_past = int(time.time() * 1000) - 120_000  # 2 minutes ago
-
-        incoming = DataRecord(
-            key="key2",
-            value=b"old_data",
-            version=VectorClock({"node2": 1}),
-            updated_at_ms=far_past,
-            tombstone=False,
-        )
-        merged = ds.merge_record(1, incoming)
-        assert merged is False
-
-    def test_accepts_within_skew_threshold(self):
-        """Records within the skew threshold should be accepted."""
-        from data_store import DataStore, DataRecord, VectorClock
-
-        ds = DataStore(node_id="node1")
-        within_range = int(time.time() * 1000) + 5_000  # 5 seconds ahead
-
-        incoming = DataRecord(
-            key="key3",
-            value=b"ok_data",
-            version=VectorClock({"node2": 1}),
-            updated_at_ms=within_range,
-            tombstone=False,
-        )
-        merged = ds.merge_record(1, incoming)
-        assert merged is True
-        assert ds.get(1, "key3").value == b"ok_data"
-
-
-# =============================================================================
-# KDF: Epoch Rotation
-# =============================================================================
-
-
-class TestEpochRotation:
-    def test_different_epochs_produce_different_keys(self):
-        from kdf import derive_app_key
-        secret = b"a" * 32
-        k0 = derive_app_key(secret, 42, "path", epoch=0)
-        k1 = derive_app_key(secret, 42, "path", epoch=1)
-        assert k0 != k1
-
-    def test_manager_epoch_starts_at_zero(self):
-        from kdf import MasterSecretManager
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        assert mgr.epoch == 0
-
-    def test_manager_rotate_increments_epoch(self):
-        from kdf import MasterSecretManager
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        new_epoch = mgr.rotate()
-        assert new_epoch == 1
-        assert mgr.epoch == 1
-
-    def test_manager_derive_uses_current_epoch(self):
-        from kdf import MasterSecretManager
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        k0 = mgr.derive(42, "test")
-        mgr.rotate()
-        k1 = mgr.derive(42, "test")
-        assert k0 != k1
-
-    def test_sync_key_derivation(self):
-        from kdf import MasterSecretManager
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        sync_key = mgr.get_sync_key()
-        assert len(sync_key) == 32
-
-    def test_rotate_without_init_raises(self):
-        from kdf import MasterSecretManager
-        mgr = MasterSecretManager()
-        with pytest.raises(RuntimeError, match="not initialized"):
-            mgr.rotate()
-
-
-# =============================================================================
-# KDF: Sealed Key Exchange
-# =============================================================================
-
-
-class TestSealedKeyExchange:
-    def test_seal_and_unseal(self):
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-        from kdf import seal_master_secret, unseal_master_secret
-
-        # Generate receiver keypair
-        receiver_key = ec.generate_private_key(ec.SECP256R1())
-        receiver_pub = receiver_key.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
-        )
-
-        secret = b"\xab" * 32
-        epoch = 7
-
-        sealed = seal_master_secret(secret, epoch, receiver_pub)
-        assert "ephemeral_pubkey" in sealed
-        assert "ciphertext" in sealed
-        assert "nonce" in sealed
-
-        recovered_secret, recovered_epoch = unseal_master_secret(sealed, receiver_key)
-        assert recovered_secret == secret
-        assert recovered_epoch == epoch
-
-    def test_different_key_fails(self):
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-        from kdf import seal_master_secret, unseal_master_secret
-
-        receiver_key = ec.generate_private_key(ec.SECP256R1())
-        wrong_key = ec.generate_private_key(ec.SECP256R1())
-        receiver_pub = receiver_key.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
-        )
-
-        sealed = seal_master_secret(b"\xcc" * 32, 0, receiver_pub)
-
-        with pytest.raises(Exception):
-            unseal_master_secret(sealed, wrong_key)
-
-
-# =============================================================================
-# KDF: CA Key Derivation Fix
-# =============================================================================
-
-
-
-
-
-# =============================================================================
-# Auth: Measurement Enforcement
-# =============================================================================
-
-
-
-
-
-class TestAttestationModes:
-    def test_headers_disabled_in_production(self):
-        """attestation_from_headers must raise when IN_ENCLAVE=True."""
-        from auth import identity_from_headers
-        with patch("auth.config.IN_ENCLAVE", True), patch("auth.config.SIMULATION_MODE", False):
-            with pytest.raises(RuntimeError, match="disabled in production"):
-                identity_from_headers({"x-tee-wallet": "0xAA"})
-
-    def test_headers_work_in_dev(self):
-        """attestation_from_headers works when IN_ENCLAVE=False."""
-        from auth import identity_from_headers
-        with patch("auth.config.IN_ENCLAVE", False):
-            att = identity_from_headers({"x-tee-wallet": "0xBB"})
-            assert att.tee_wallet == "0xBB"
-
-
-# =============================================================================
-# Sync Manager: HMAC Signing
-# =============================================================================
-
-
-class TestSyncHMAC:
-    def test_compute_verify_hmac(self):
-        from sync_manager import _compute_hmac, _verify_hmac
-        key = b"\x01" * 32
-        payload = b'{"type":"delta"}'
-        sig = _compute_hmac(key, payload)
-        assert _verify_hmac(key, payload, sig) is True
-
-    def test_wrong_key_fails(self):
-        from sync_manager import _compute_hmac, _verify_hmac
-        key1 = b"\x01" * 32
-        key2 = b"\x02" * 32
-        payload = b'{"type":"delta"}'
-        sig = _compute_hmac(key1, payload)
-        assert _verify_hmac(key2, payload, sig) is False
-
-    def test_handle_sync_rejects_bad_signature(self):
-        from data_store import DataStore
-        from sync_manager import PeerCache, SyncManager
-        from auth import issue_nonce
-
-        import base64
-        import time
-        from eth_account import Account
-        from eth_account.messages import encode_defunct
-        from unittest.mock import MagicMock
-
-        ds = DataStore(node_id="node1")
-        kms_reg = MagicMock()
-        kms_reg.is_operator.return_value = True
-        mgr = SyncManager(ds, "0xNode1", PeerCache(kms_registry_client=kms_reg))
-        mgr.set_sync_key(b"\xab" * 32)
-
-        nonce_b64 = base64.b64encode(issue_nonce()).decode()
-        ts = str(int(time.time()))
-        msg = f"NovaKMS:Auth:{nonce_b64}:{mgr.node_wallet}:{ts}"
-        sig = Account.from_key(bytes.fromhex("33" * 32)).sign_message(encode_defunct(text=msg)).signature.hex()
-        kms_pop = {"signature": sig, "timestamp": ts, "nonce": nonce_b64}
-
-        result = mgr.handle_incoming_sync(
-            {"type": "delta", "data": {}},
-            signature="badsignature",
-            kms_pop=kms_pop,
-        )
-        assert result["status"] == "error"
-        assert "signature" in result["reason"].lower()
-
-
-# =============================================================================
-# Simulation Mode: Safety Guard
-# =============================================================================
-
-
-class TestSimulationSafety:
-    def test_sim_mode_blocked_in_enclave(self):
-        """is_simulation_mode must return False when IN_ENCLAVE=True."""
-        import config
-        with patch.dict(os.environ, {"SIMULATION_MODE": "1"}):
-            original = config.IN_ENCLAVE
-            try:
-                config.IN_ENCLAVE = True
-                from simulation import is_simulation_mode
-                assert is_simulation_mode() is False
-            finally:
-                config.IN_ENCLAVE = original
-
-    def test_sim_mode_works_outside_enclave(self):
-        """is_simulation_mode returns True when IN_ENCLAVE=False."""
-        import config
-        with patch.dict(os.environ, {"SIMULATION_MODE": "1"}):
-            original = config.IN_ENCLAVE
-            try:
-                config.IN_ENCLAVE = False
-                from simulation import is_simulation_mode
-                assert is_simulation_mode() is True
-            finally:
-                config.IN_ENCLAVE = original
-
-
-# =============================================================================
-# CachedNovaRegistry
-# =============================================================================
-
-
-class TestCachedNovaRegistry:
-    def test_caches_app_result(self):
-        from nova_registry import App, AppStatus, CachedNovaRegistry
-
-        mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
-        mock_inner.get_app.return_value = app_obj
-
-        cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
-
-        # First call hits inner
-        result1 = cached.get_app(1)
-        assert result1.app_id == 1
-        assert mock_inner.get_app.call_count == 1
-
-        # Second call uses cache
-        result2 = cached.get_app(1)
-        assert result2.app_id == 1
-        assert mock_inner.get_app.call_count == 1  # still 1
-
-    def test_cache_expires(self):
-        from nova_registry import App, AppStatus, CachedNovaRegistry
-
-        mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
-        mock_inner.get_app.return_value = app_obj
-
-        cached = CachedNovaRegistry(inner=mock_inner, ttl=0)  # TTL=0 → always expired
-
-        cached.get_app(1)
-        cached.get_app(1)
-        assert mock_inner.get_app.call_count == 2  # cache miss both times
-
-    def test_invalidate_all(self):
-        from nova_registry import App, AppStatus, CachedNovaRegistry
-
-        mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
-        mock_inner.get_app.return_value = app_obj
-
-        cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
-        cached.get_app(1)
-        assert mock_inner.get_app.call_count == 1
-
-        cached.invalidate()
-        cached.get_app(1)
-        assert mock_inner.get_app.call_count == 2
-
-    def test_invalidate_specific_key(self):
-        from nova_registry import App, AppStatus, CachedNovaRegistry
-
-        mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
-        mock_inner.get_app.return_value = app_obj
-
-        cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
-        cached.get_app(1)
-        cached.invalidate("app:1")
-        cached.get_app(1)
-        assert mock_inner.get_app.call_count == 2
-
-    def test_caches_instance_by_wallet(self):
-        from nova_registry import CachedNovaRegistry, InstanceStatus, RuntimeInstance
-
-        mock_inner = MagicMock()
-        inst = RuntimeInstance(1, 1, 1, "0x00", "url", b"", "0xAA", True, InstanceStatus.ACTIVE, 0)
-        mock_inner.get_instance_by_wallet.return_value = inst
-
-        cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
-        cached.get_instance_by_wallet("0xAA")
-        cached.get_instance_by_wallet("0xAA")
-        assert mock_inner.get_instance_by_wallet.call_count == 1
-
-
-# =============================================================================
-# Chain: Finality
+# Chain — eth_call_finalized
 # =============================================================================
 
 
 class TestChainFinality:
-    def test_eth_call_finalized_exists(self):
-        """Chain class should have eth_call_finalized method."""
+    def test_eth_call_finalized_uses_confirmed_block(self):
         from chain import Chain
+
         chain = Chain.__new__(Chain)
-        assert hasattr(chain, "eth_call_finalized")
+        chain.endpoint = "mock"
+        mock_w3 = MagicMock()
+        mock_w3.eth.block_number = 100
+        mock_w3.eth.call.return_value = b"\x01" * 32
+        chain.w3 = mock_w3
+
+        result = chain.eth_call_finalized("0x" + "AA" * 20, "0x12345678")
+        assert len(result) == 32
+        # Should have been called with confirmed block = 100 - CONFIRMATION_DEPTH
+        call_args = mock_w3.eth.call.call_args
+        # call_args is ((tx_dict, block_id), {}) — positional args
+        confirmed_block = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("block_identifier")
+        assert confirmed_block == max(0, 100 - config.CONFIRMATION_DEPTH)
+
+    def test_eth_call_finalized_fallback_on_error(self):
+        from chain import Chain
+
+        chain = Chain.__new__(Chain)
+        chain.endpoint = "mock"
+        mock_w3 = MagicMock()
+        mock_w3.eth.block_number = 100
+        # First call (finalized) raises, second (latest) succeeds
+        mock_w3.eth.call.side_effect = [Exception("not found"), b"\x02" * 32]
+        chain.w3 = mock_w3
+
+        result = chain.eth_call_finalized("0x" + "AA" * 20, "0x12345678")
+        assert result == b"\x02" * 32
+        assert mock_w3.eth.call.call_count == 2
+
+    def test_function_selector(self):
+        from chain import function_selector
+        sel = function_selector("getOperators()")
+        assert sel.startswith("0x")
+        assert len(sel) == 10  # 0x + 8 hex chars
+
+    def test_encode_uint256(self):
+        from chain import encode_uint256
+        assert len(encode_uint256(42)) == 64
+        assert encode_uint256(0) == "0" * 64
+
+    def test_encode_address(self):
+        from chain import encode_address
+        enc = encode_address("0xAbCd1234567890ABcDeF1234567890aBCdEf1234")
+        assert len(enc) == 64
+        assert "0x" not in enc
+
+
+# =============================================================================
+# Clock Skew Protection (DataStore)
+# =============================================================================
+
+
+class TestClockSkewProtection:
+    def test_future_record_rejected(self, monkeypatch):
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+        monkeypatch.setattr(config, "IN_ENCLAVE", False)
+        monkeypatch.setattr(config, "MAX_CLOCK_SKEW_MS", 5000)
+        from data_store import DataRecord, DataStore, VectorClock
+
+        ds = DataStore(node_id="n")
+        far_future = int(time.time() * 1000) + 999_999
+        rec = DataRecord(key="k", value=b"v", version=VectorClock({"peer": 1}),
+                         updated_at_ms=far_future, tombstone=False, ttl_ms=0)
+        merged = ds.merge_record(42, rec)
+        assert not merged
+
+    def test_normal_skew_accepted(self, monkeypatch):
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+        monkeypatch.setattr(config, "IN_ENCLAVE", False)
+        monkeypatch.setattr(config, "MAX_CLOCK_SKEW_MS", 30000)
+        from data_store import DataRecord, DataStore, VectorClock
+
+        ds = DataStore(node_id="n")
+        now_ms = int(time.time() * 1000) + 1000  # 1 second ahead
+        rec = DataRecord(key="k", value=b"v", version=VectorClock({"peer": 1}),
+                         updated_at_ms=now_ms, tombstone=False, ttl_ms=0)
+        merged = ds.merge_record(42, rec)
+        assert merged
+
+
+# =============================================================================
+# Nonce Store Eviction (MAX_NONCES)
+# =============================================================================
+
+
+class TestNonceStoreEviction:
+    def test_eviction_under_pressure(self, monkeypatch):
+        from auth import _NonceStore
+
+        store = _NonceStore(max_nonces=5)
+        nonces = []
+        for _ in range(6):
+            n = store.issue()
+            nonces.append(n)
+
+        # The oldest nonce should have been evicted
+        assert not store.validate_and_consume(nonces[0])
+        # Recent nonces should still be valid
+        assert store.validate_and_consume(nonces[-1])
+
+
+# =============================================================================
+# CachedNovaRegistry TTL
+# =============================================================================
+
+
+class TestCachedNovaRegistryTTL:
+    def test_cache_returns_without_calling_inner(self, monkeypatch):
+        monkeypatch.setattr(config, "REGISTRY_CACHE_TTL_SECONDS", 60)
+        from nova_registry import CachedNovaRegistry
+
+        inner = MagicMock()
+        inner.get_app.return_value = MagicMock(app_id=1, status=1)
+        cached = CachedNovaRegistry(inner)
+
+        cached.get_app(1)
+        cached.get_app(1)
+        # Should have called the inner only once
+        assert inner.get_app.call_count == 1
+
+    def test_cache_expires(self, monkeypatch):
+        from nova_registry import CachedNovaRegistry
+
+        inner = MagicMock()
+        inner.get_app.return_value = MagicMock(app_id=1, status=1)
+        cached = CachedNovaRegistry(inner, ttl=0)
+
+        cached.get_app(1)
+        time.sleep(0.01)
+        cached.get_app(1)
+        assert inner.get_app.call_count == 2
+
+
+# =============================================================================
+# Probe helpers
+# =============================================================================
+
+
+class TestProbe:
+    def test_probe_node_success(self):
+        from probe import probe_node
+        with patch("probe.requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            assert probe_node("http://localhost:4000") is True
+
+    def test_probe_node_failure(self):
+        from probe import probe_node
+        with patch("probe.requests.get", side_effect=ConnectionError):
+            assert probe_node("http://localhost:4000") is False
+
+    def test_probe_nodes(self):
+        from probe import probe_nodes
+        nodes = [
+            {"node_url": "http://a:8000", "tee_wallet_address": "0xA"},
+            {"node_url": "http://b:8000", "tee_wallet_address": "0xB"},
+        ]
+        with patch("probe.requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            results = probe_nodes(nodes)
+        assert len(results) == 2
+        assert all(r["healthy"] for r in results)
+        assert all("probe_ms" in r for r in results)
+
+    def test_find_healthy_peer(self):
+        from probe import find_healthy_peer
+        nodes = [
+            {"node_url": "http://a:8000", "tee_wallet_address": "0xA"},
+            {"node_url": "http://b:8000", "tee_wallet_address": "0xB"},
+        ]
+        with patch("probe.requests.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=200)
+            peer = find_healthy_peer(nodes, exclude_wallet="0xA")
+        assert peer["tee_wallet_address"] == "0xB"

@@ -161,6 +161,12 @@ class TestSimNovaRegistry:
 
 
 class TestIsSimulationMode:
+    @pytest.fixture(autouse=True)
+    def _not_enclave(self, monkeypatch):
+        """is_simulation_mode() hard-returns False when IN_ENCLAVE is True."""
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", False)
+
     def test_env_true(self):
         with patch.dict(os.environ, {"SIMULATION_MODE": "1"}):
             assert is_simulation_mode() is True
@@ -173,27 +179,24 @@ class TestIsSimulationMode:
         with patch.dict(os.environ, {"SIMULATION_MODE": "0"}):
             assert is_simulation_mode() is False
 
-    def test_env_unset_config_false(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SIMULATION_MODE", None)
-            import config
-            original = getattr(config, "SIMULATION_MODE", False)
-            try:
-                config.SIMULATION_MODE = False
-                assert is_simulation_mode() is False
-            finally:
-                config.SIMULATION_MODE = original
+    def test_env_unset_config_false(self, monkeypatch):
+        os.environ.pop("SIMULATION_MODE", None)
+        import config
+        monkeypatch.setattr(config, "SIMULATION_MODE", False)
+        assert is_simulation_mode() is False
 
-    def test_env_unset_config_true(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SIMULATION_MODE", None)
-            import config
-            original = getattr(config, "SIMULATION_MODE", False)
-            try:
-                config.SIMULATION_MODE = True
-                assert is_simulation_mode() is True
-            finally:
-                config.SIMULATION_MODE = original
+    def test_env_unset_config_true(self, monkeypatch):
+        os.environ.pop("SIMULATION_MODE", None)
+        import config
+        monkeypatch.setattr(config, "SIMULATION_MODE", True)
+        assert is_simulation_mode() is True
+
+    def test_enclave_always_false(self, monkeypatch):
+        """Inside an enclave, simulation mode is always disabled."""
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
+        with patch.dict(os.environ, {"SIMULATION_MODE": "1"}):
+            assert is_simulation_mode() is False
 
 
 class TestGetSimPort:
@@ -261,10 +264,16 @@ class TestGetSimMasterSecret:
 
 
 class TestBuildSimComponents:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", False)
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+
     def test_default_build(self):
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "0"}, clear=False):
             os.environ.pop("SIM_PEERS_CSV", None)
-            comp = build_sim_components()
+            comp = build_sim_components(scheduler=False)
 
         assert "tee_wallet" in comp
         assert "node_url" in comp
@@ -284,18 +293,18 @@ class TestBuildSimComponents:
             SimPeer(tee_wallet="0xBEEF", node_url="http://localhost:7778"),
         ]
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "1"}):
-            comp = build_sim_components(peers=custom)
+            comp = build_sim_components(peers=custom, scheduler=False)
         assert comp["tee_wallet"] == "0xBEEF"
 
     def test_node_index_out_of_range_fallback(self):
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "99"}):
-            comp = build_sim_components()
+            comp = build_sim_components(scheduler=False)
         # Falls back to index 0
         assert comp["tee_wallet"] == DEFAULT_SIM_PEERS[0].tee_wallet
 
     def test_authorizer_verify_succeeds(self):
         """AppAuthorizer backed by SimNovaRegistry should accept known wallets."""
-        comp = build_sim_components()
+        comp = build_sim_components(scheduler=False)
         from auth import ClientIdentity
 
         att = ClientIdentity(
@@ -305,7 +314,7 @@ class TestBuildSimComponents:
         assert result.authorized is True
 
     def test_odyn_signer_available(self):
-        comp = build_sim_components()
+        comp = build_sim_components(scheduler=False)
         sig = comp["odyn"].sign_message("hello")
         assert "signature" in sig
 
@@ -316,11 +325,15 @@ class TestBuildSimComponents:
 
 
 @pytest.fixture()
-def sim_client():
+def sim_client(monkeypatch):
     """
     Start the app in simulation mode using TestClient.
     Routes are initialized via the lifespan with sim components.
     """
+    import config
+    monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+
     with patch.dict(os.environ, {"SIMULATION_MODE": "1", "SIM_NODE_INDEX": "0"}):
         from app import app as fastapi_app
 

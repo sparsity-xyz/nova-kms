@@ -1,11 +1,18 @@
 """
-Tests for routes.py — API endpoint integration tests using FastAPI TestClient.
+Tests for routes.py — API endpoint tests via FastAPI TestClient.
+
+Covers:
+  - /health, /status, /nodes
+  - /nonce (challenge issuance, rate limiting)
+  - /kms/derive (success, uninitialized master secret)
+  - /kms/data CRUD (GET, PUT, DELETE, list, errors)
+  - /sync (delta, snapshot_request, missing PoP, bad type)
+  - Auth 403 enforcement
 """
 
 import base64
-import json
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,8 +20,8 @@ from fastapi.testclient import TestClient
 from app import app
 
 
-def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_hex: str) -> tuple[dict, str]:
-    """Build PoP headers for /sync requests."""
+def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_hex: str):
+    """Build KMS PoP headers for /sync requests."""
     from eth_account import Account
     from eth_account.messages import encode_defunct
 
@@ -35,47 +42,43 @@ def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_h
 
 
 @pytest.fixture(autouse=True)
-def _setup_routes():
-    """
-    Initialize routes with mocked dependencies so TestClient works
-    without real chain / Odyn.
-    """
+def _setup_routes(monkeypatch):
+    """Initialize routes with mocked dependencies."""
+    import config
     import routes
     from auth import AppAuthorizer, AuthResult, ClientIdentity
     from data_store import DataStore
     from kdf import MasterSecretManager
-    from sync_manager import SyncManager, PeerCache
+    from sync_manager import PeerCache, SyncManager
+
+    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+    monkeypatch.setattr(config, "IN_ENCLAVE", False)
 
     odyn = MagicMock()
     odyn.eth_address.return_value = "0x" + "aa" * 20
 
     ds = DataStore(node_id="test_node")
-
     mgr = MasterSecretManager()
     mgr.initialize_from_peer(b"\x01" * 32)
 
-
-
-    # Mock authorizer that always succeeds with app_id=42
     authorizer = MagicMock(spec=AppAuthorizer)
     authorizer.verify.return_value = AuthResult(authorized=True, app_id=42, version_id=1)
 
-    # Mock KMS registry
     kms_reg = MagicMock()
     kms_reg.operator_count.return_value = 3
     kms_reg.is_operator.return_value = True
-    kms_reg.get_operators.return_value = [
-        "0x" + "AA" * 20,
-        "0x" + "BB" * 20,
-    ]
+    kms_reg.get_operators.return_value = ["0x" + "AA" * 20, "0x" + "BB" * 20]
 
-    sync_mgr = SyncManager(ds, "0xTestNode", PeerCache(kms_registry_client=kms_reg))
+    sync_mgr = SyncManager(
+        ds, "0xTestNode",
+        PeerCache(kms_registry_client=kms_reg),
+        scheduler=False,
+    )
 
     routes.init(
         odyn=odyn,
         data_store=ds,
         master_secret_mgr=mgr,
-
         authorizer=authorizer,
         kms_registry=kms_reg,
         sync_manager=sync_mgr,
@@ -88,8 +91,6 @@ def _setup_routes():
         },
     )
 
-    # Include router so endpoints are registered
-    # (in normal startup this is done in lifespan, but for test we add directly)
     if routes.router not in [r for r in app.routes]:
         app.include_router(routes.router)
 
@@ -118,6 +119,33 @@ class TestHealth:
         data = resp.json()
         assert "node" in data
         assert "cluster" in data
+        assert "data_store" in data
+
+    def test_status_contains_node_info(self, client):
+        resp = client.get("/status")
+        data = resp.json()
+        assert data["node"]["tee_wallet"] == "0xTestNode"
+        assert data["node"]["master_secret_initialized"] is True
+
+
+# =============================================================================
+# /nonce
+# =============================================================================
+
+
+class TestNonce:
+    def test_returns_nonce(self, client):
+        resp = client.get("/nonce")
+        assert resp.status_code == 200
+        nonce = resp.json()["nonce"]
+        # Must be valid base64
+        decoded = base64.b64decode(nonce)
+        assert len(decoded) == 16
+
+    def test_nonces_are_unique(self, client):
+        n1 = client.get("/nonce").json()["nonce"]
+        n2 = client.get("/nonce").json()["nonce"]
+        assert n1 != n2
 
 
 # =============================================================================
@@ -150,13 +178,42 @@ class TestDerive:
         data = resp.json()
         assert data["app_id"] == 42
         assert data["path"] == "test_key"
-        # Verify key is base64
         key_bytes = base64.b64decode(data["key"])
         assert len(key_bytes) == 32
 
+    def test_derive_custom_length(self, client):
+        resp = client.post(
+            "/kms/derive",
+            json={"path": "key", "length": 64},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 200
+        key_bytes = base64.b64decode(resp.json()["key"])
+        assert len(key_bytes) == 64
+
+    def test_derive_deterministic(self, client):
+        h = {"x-tee-wallet": "0x1234"}
+        r1 = client.post("/kms/derive", json={"path": "d"}, headers=h)
+        r2 = client.post("/kms/derive", json={"path": "d"}, headers=h)
+        assert r1.json()["key"] == r2.json()["key"]
+
+    def test_derive_unauthorized(self, client, _setup_routes):
+        """Derive returns 403 when authorizer rejects."""
+        import routes
+        from auth import AuthResult
+        routes._authorizer.verify.return_value = AuthResult(
+            authorized=False, reason="Unauthorized"
+        )
+        resp = client.post(
+            "/kms/derive",
+            json={"path": "x"},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 403
+
 
 # =============================================================================
-# /kms/data
+# /kms/data CRUD
 # =============================================================================
 
 
@@ -170,18 +227,12 @@ class TestData:
         )
         assert resp.status_code == 200
 
-        resp = client.get(
-            "/kms/data/mykey",
-            headers={"x-tee-wallet": "0x1234"},
-        )
+        resp = client.get("/kms/data/mykey", headers={"x-tee-wallet": "0x1234"})
         assert resp.status_code == 200
         assert base64.b64decode(resp.json()["value"]) == b"hello world"
 
     def test_get_not_found(self, client):
-        resp = client.get(
-            "/kms/data/nonexistent",
-            headers={"x-tee-wallet": "0x1234"},
-        )
+        resp = client.get("/kms/data/nonexistent", headers={"x-tee-wallet": "0x1234"})
         assert resp.status_code == 404
 
     def test_list_keys(self, client):
@@ -198,13 +249,28 @@ class TestData:
         value = base64.b64encode(b"v").decode()
         client.put("/kms/data", json={"key": "del_me", "value": value}, headers={"x-tee-wallet": "0x1234"})
         resp = client.request(
-            "DELETE",
-            "/kms/data",
+            "DELETE", "/kms/data",
             json={"key": "del_me"},
             headers={"x-tee-wallet": "0x1234"},
         )
         assert resp.status_code == 200
         assert resp.json()["deleted"]
+
+    def test_delete_not_found(self, client):
+        resp = client.request(
+            "DELETE", "/kms/data",
+            json={"key": "no_such_key"},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 404
+
+    def test_put_invalid_base64(self, client):
+        resp = client.put(
+            "/kms/data",
+            json={"key": "k", "value": "not_valid_base64!!!"},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 400
 
 
 # =============================================================================
@@ -214,23 +280,23 @@ class TestData:
 
 class TestSync:
     def test_sync_delta(self, client):
-        headers, sender_wallet = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32)
+        headers, sender_wallet = _kms_pop_headers(
+            client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32
+        )
         resp = client.post(
             "/sync",
             json={
                 "type": "delta",
                 "sender_wallet": sender_wallet,
                 "data": {
-                    "10": [
-                        {
-                            "key": "synced",
-                            "value": "cafe",
-                            "version": {"peer": 1},
-                            "updated_at_ms": int(time.time() * 1000),
-                            "tombstone": False,
-                            "ttl_ms": 0,
-                        }
-                    ]
+                    "10": [{
+                        "key": "synced",
+                        "value": "cafe",
+                        "version": {"peer": 1},
+                        "updated_at_ms": int(time.time() * 1000),
+                        "tombstone": False,
+                        "ttl_ms": 0,
+                    }]
                 },
             },
             headers=headers,
@@ -239,7 +305,9 @@ class TestSync:
         assert resp.json()["merged"] == 1
 
     def test_sync_snapshot_request(self, client):
-        headers, sender_wallet = _kms_pop_headers(client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32)
+        headers, sender_wallet = _kms_pop_headers(
+            client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32
+        )
         resp = client.post(
             "/sync",
             json={"type": "snapshot_request", "sender_wallet": sender_wallet},
@@ -247,3 +315,22 @@ class TestSync:
         )
         assert resp.status_code == 200
         assert "data" in resp.json()
+
+    def test_sync_without_pop_rejected(self, client):
+        """Sync without PoP headers should be rejected."""
+        resp = client.post(
+            "/sync",
+            json={"type": "delta", "sender_wallet": "0xAnon", "data": {}},
+        )
+        assert resp.status_code == 403
+
+    def test_sync_invalid_type(self, client):
+        headers, sender_wallet = _kms_pop_headers(
+            client, recipient_wallet="0xTestNode", private_key_hex="0x" + "33" * 32
+        )
+        resp = client.post(
+            "/sync",
+            json={"type": "bad_type", "sender_wallet": sender_wallet},
+            headers=headers,
+        )
+        assert resp.status_code == 403
