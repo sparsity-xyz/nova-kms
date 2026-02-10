@@ -205,77 +205,11 @@ Interaction summary:
 
 ### 2.1 KMS Node Registration Flow
 
-```mermaid
-sequenceDiagram
-    participant KMS as KMS Node (Enclave)
-    participant ZKP as ZKP Service
-    participant AR as NovaAppRegistry
-    participant KC as KMSRegistry Contract
-    
-    Note over KMS: Start in Nitro Enclave
-    KMS->>KMS: Obtain TEE wallet via Odyn
-    
-    KMS->>ZKP: Submit enclave proof
-    ZKP->>ZKP: Generate ZK proof
+See [KMS Core Workflows & Security Architecture - Section 2: KMS Node Join & Enrollment](./kms-core-workflows.md#2-kms-node-join--enrollment).
 
-    Note over AR: Verify ZK proof and register instance
-    ZKP->>AR: registerInstance(appId=kmsAppId, versionId, instanceUrl, proof)
-    AR->>KC: addOperator(teeWallet, appId, versionId, instanceId)
-    Note over KC: Wallet added to operator set
-    AR-->>KMS: instanceId (zkVerified = true)
-    
-    Note over KMS: Node is now discoverable (no on-chain tx needed)
-    KMS->>KC: getOperators() [read-only]
-    KC-->>KMS: operator addresses
-    KMS->>AR: getInstanceByWallet(operator) [for each peer]
-    AR-->>KMS: instanceUrl, teePubkey, status
-    
-    Note over AR: On instance stop/fail:
-    AR->>KC: removeOperator(teeWallet, ...)
-    Note over KC: Operator removed from set
-```
+### 2.2 App Request Flow
 
-> [!IMPORTANT]
-> **Security Mechanism**: The `addOperator` callback validates `appId == kmsAppId`, ensuring only verified KMS instances are added to the operator set. KMS nodes **never submit on-chain transactions** — all state management flows through NovaAppRegistry callbacks. When NovaAppRegistry calls `removeOperator`, the operator is removed from the set.
-
-### 2.2 App Request Flow (PoP + App Registry)
-
-```mermaid
-sequenceDiagram
-    participant App as Nova App (Enclave)
-    participant KMS as KMS Node
-    participant AR as NovaAppRegistry
-    participant KC as KMSRegistry Contract
-    
-    Note over App: 1. Discover KMS Nodes
-    App->>KC: getOperators()
-    KC-->>App: address[]
-    App->>AR: getInstanceByWallet(operator) [for each]
-    AR-->>App: instanceUrl, teePubkey, status
-    App->>App: Probe nodes (/health)
-    
-    App->>KMS: Send request with PoP signature headers
-    KMS->>KMS: Recover signer wallet & validate nonce/timestamp
-    
-    Note over KMS: 2. Verify App Identity via App Registry
-    App->>KMS: POST /kms/derive (path, context)
-    KMS->>KMS: Recover teeWallet from PoP signature
-    
-    KMS->>AR: getInstanceByWallet(teeWallet)
-    AR-->>KMS: RuntimeInstance {appId, versionId, zkVerified, status}
-    KMS->>AR: getApp(appId)
-    AR-->>KMS: App {status=ACTIVE}
-    KMS->>AR: getVersion(appId, versionId)
-    AR-->>KMS: AppVersion {codeMeasurement, status}
-    KMS->>KMS: Verify measurement matches + instance is ACTIVE + zkVerified
-    
-    alt Authorized
-        KMS->>KMS: Derive Key: KDF(MasterSecret, AppId, path)
-        KMS-->>App: 200 OK (Key Data)
-    else Forbidden
-        KMS-->>App: 403 Forbidden
-    end
-```
+See [KMS Core Workflows & Security Architecture - Section 5: Nova App Access to KMS](./kms-core-workflows.md#5-nova-app-access-to-kms-mutual-pop).
 
 ### 2.3 App Authorization Logic (Instance + App Registry)
 
@@ -316,28 +250,9 @@ async def verify_app_request(request: KMSRequest, identity: ClientIdentity) -> t
     return True, None
 ```
 
-### 2.4 Data Synchronization Flow (PoP Secured)
+### 2.4 Data Synchronization Flow
 
-KMS nodes synchronize data using PoP-authenticated requests verified in-app.
-
-```mermaid
-sequenceDiagram
-    participant KMS1 as KMS Node 1
-    participant KMS2 as KMS Node 2
-    participant KC as KMSRegistry Contract
-    
-    Note over KMS1: Data update occurs
-    KMS1->>KMS1: Update local data with Vector Clock
-    
-    KMS1->>KC: getOperators()
-    KC-->>KMS1: [operator2, operator3]
-    
-    par Async Sync
-        KMS1->>KMS2: POST /sync {event_data, vector_clock}
-        KMS2->>KMS2: Verify KMS Identity (PoP + KMSRegistry)
-        KMS2->>KMS2: Merge data (LWW)
-    end
-```
+See [KMS Core Workflows & Security Architecture - Section 4: Inter-Node Mutual Authentication](./kms-core-workflows.md#4-inter-node-mutual-authentication-lightweight-pop).
 
 ---
 
@@ -556,36 +471,7 @@ nova-kms/
 
 ## 7. Deployment
 
-### 7.1 Prerequisites
-1. Nova Platform account
-2. NovaAppRegistry proxy address (deployed by Nova Platform)
-3. KMSRegistry contract deployed (configured with NovaAppRegistry + kmsAppId)
-4. KMS app created in Nova Platform (appId assigned)
-
-### 7.2 Deployment Steps
-
-1. **Deploy KMSRegistry contract**
-   ```bash
-   cd contracts
-   forge script script/DeployKMSRegistry.s.sol --broadcast
-   ```
-   - **Note**: This script will output both an **Implementation Address** and a **Proxy Address**. 
-   - **Important**: Save the **Proxy Address**. This is the address you will provide to the Nova Platform and use for all configuration.
-
-2. **Create KMS application**
-   - Create new app in Nova Platform
-   - Record `kmsAppId` assigned by NovaAppRegistry
-   - Enable ZK verification
-
-3. **Trigger build and deploy**
-   - Trigger GitHub Actions build
-   - Deploy to Nitro Enclave
-
-4. **Verify operator registration**
-   - ZKP service automatically generates proof
-   - NovaAppRegistry verifies `registerInstance(...)` (zkVerified = true)
-   - NovaAppRegistry calls `KMSRegistry.addOperator()` → node is discoverable
-   - KMS node does NOT need any on-chain transactions
+See [KMS Core Workflows & Security Architecture - Section 1: KMS Registry Deployment & Platform Registration](./kms-core-workflows.md#1-kms-registry-deployment--platform-registration).
 
 ---
 
