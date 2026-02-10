@@ -11,12 +11,7 @@ interface INovaAppInterface {
     /// @param appId The app ID (for multi-app contracts).
     /// @param versionId The version ID of the code running in this instance.
     /// @param instanceId The unique instance ID from the registry.
-    function addOperator(
-        address teeWalletAddress,
-        uint256 appId,
-        uint256 versionId,
-        uint256 instanceId
-    ) external;
+    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
 
     /// @notice Called by NovaAppRegistry when a TEE instance is stopped or failed.
     /// @dev Only callable by the configured NovaAppRegistry address. Removes the TEE wallet from authorized operators.
@@ -24,12 +19,7 @@ interface INovaAppInterface {
     /// @param appId The app ID.
     /// @param versionId The version ID.
     /// @param instanceId The instance ID being deactivated.
-    function removeOperator(
-        address teeWalletAddress,
-        uint256 appId,
-        uint256 versionId,
-        uint256 instanceId
-    ) external;
+    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
 
     /// @notice Sets the NovaAppRegistry address that is allowed to call addOperator/removeOperator.
     /// @dev Should only be callable by the contract owner/admin.

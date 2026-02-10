@@ -12,7 +12,7 @@ Covers:
 
 import time
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from web3 import Web3
 
 from nova_registry import (
@@ -32,16 +32,25 @@ from nova_registry import (
 # =============================================================================
 
 def _make_registry():
-    """Create a NovaRegistry with mocked chain (no real RPC)."""
-    reg = NovaRegistry.__new__(NovaRegistry)
+    """Create a NovaRegistry with mocked chain (no real RPC).
+    
+    Returns (registry, nova_module).
+    """
+    import nova_registry as nova_mod
+
+    reg = nova_mod.NovaRegistry.__new__(nova_mod.NovaRegistry)
     reg.address = "0x" + "00" * 20
     reg.chain = MagicMock()
     reg.chain.eth_call_finalized.return_value = b"\x00"
     reg.contract = MagicMock()
-    reg.contract.encodeABI.return_value = "0xdeadbeef"
-    # Registry wrappers decode outputs via the function ABI (web3 7.x)
-    reg.contract.get_function_by_name.return_value.decode_output.return_value = (None,)
-    return reg
+    # Make fn.abi an empty dict so the unwrap logic doesn't trip on MagicMock
+    reg.contract.get_function_by_name.return_value.return_value.abi = {}
+    return reg, nova_mod
+
+
+def _mock_decode(nova_mod, decode_return):
+    """Patch nova_registry._decode_outputs on the exact module object."""
+    return patch.object(nova_mod, "_decode_outputs", return_value=decode_return)
 
 
 def _app_tuple(app_id=1, status=0):
@@ -95,26 +104,27 @@ def _instance_tuple(instance_id=1, app_id=1, zk_verified=True, status=0):
 class TestCallUnwrap:
     def test_unwraps_single_output_tuple(self):
         """Regression: _call correctly unwraps 1-tuple from web3.py."""
-        reg = _make_registry()
+        reg, nova_mod = _make_registry()
         mock_struct = (1, 2, 3)
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (mock_struct,)
-
-        out = reg._call("getApp", [123])
+        with _mock_decode(nova_mod, (mock_struct,)):
+            out = reg._call("getApp", [123])
         assert out == mock_struct
         assert out[0] == 1
 
     def test_passes_through_multi_output(self):
         """Multi-value outputs should not be unwrapped."""
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = ("a", "b")
-        out = reg._call("someFunc", [])
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, ("a", "b")):
+            out = reg._call("someFunc", [])
         assert out == ("a", "b")
 
     def test_encodes_and_calls_finalized(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (42,)
-        reg._call("func", [1, 2])
-        reg.contract.encodeABI.assert_called_with(fn_name="func", args=[1, 2])
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (42,)):
+            reg._call("func", [1, 2])
+        reg.contract.get_function_by_name.assert_called_with("func")
+        reg.contract.get_function_by_name.return_value.assert_called_with(1, 2)
+        reg.contract.get_function_by_name.return_value.return_value._encode_transaction_data.assert_called_once()
         reg.chain.eth_call_finalized.assert_called_once()
 
 
@@ -125,42 +135,42 @@ class TestCallUnwrap:
 
 class TestGetApp:
     def test_returns_app_dataclass(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_app_tuple(app_id=42),)
-        app = reg.get_app(42)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_app_tuple(app_id=42),)):
+            app = reg.get_app(42)
         assert isinstance(app, App)
         assert app.app_id == 42
         assert app.status == AppStatus.ACTIVE
 
     def test_revoked_status(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_app_tuple(status=2),)
-        app = reg.get_app(1)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_app_tuple(status=2),)):
+            app = reg.get_app(1)
         assert app.status == AppStatus.REVOKED
 
 
 class TestGetVersion:
     def test_returns_version_dataclass(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_version_tuple(version_id=3),)
-        ver = reg.get_version(1, 3)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_version_tuple(version_id=3),)):
+            ver = reg.get_version(1, 3)
         assert isinstance(ver, AppVersion)
         assert ver.version_id == 3
         assert ver.version_name == "v1.0"
         assert ver.status == VersionStatus.ENROLLED
 
     def test_deprecated_status(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_version_tuple(status=1),)
-        ver = reg.get_version(1, 1)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_version_tuple(status=1),)):
+            ver = reg.get_version(1, 1)
         assert ver.status == VersionStatus.DEPRECATED
 
 
 class TestGetInstance:
     def test_returns_instance_dataclass(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(instance_id=5, app_id=42),)
-        inst = reg.get_instance(5)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_instance_tuple(instance_id=5, app_id=42),)):
+            inst = reg.get_instance(5)
         assert isinstance(inst, RuntimeInstance)
         assert inst.instance_id == 5
         assert inst.app_id == 42
@@ -168,41 +178,42 @@ class TestGetInstance:
         assert inst.status == InstanceStatus.ACTIVE
 
     def test_stopped_instance(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(status=1),)
-        inst = reg.get_instance(1)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_instance_tuple(status=1),)):
+            inst = reg.get_instance(1)
         assert inst.status == InstanceStatus.STOPPED
 
 
 class TestGetInstanceByWallet:
     def test_returns_instance(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(instance_id=7),)
-        inst = reg.get_instance_by_wallet("0x" + "ee" * 20)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, (_instance_tuple(instance_id=7),)):
+            inst = reg.get_instance_by_wallet("0x" + "ee" * 20)
         assert inst.instance_id == 7
 
     def test_checksum_is_applied(self):
         """get_instance_by_wallet should checksum the address before ABI encoding."""
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(),)
+        reg, nova_mod = _make_registry()
         wallet_lower = "0x" + "aa" * 20
-        reg.get_instance_by_wallet(wallet_lower)
-        call_args = reg.contract.encodeABI.call_args
-        passed_wallet = call_args[1]["args"][0]
+        with _mock_decode(nova_mod, (_instance_tuple(),)):
+            reg.get_instance_by_wallet(wallet_lower)
+        # The checksummed address is passed as the first arg to the function call
+        mock_fn_cls = reg.contract.get_function_by_name.return_value
+        passed_wallet = mock_fn_cls.call_args[0][0]
         assert passed_wallet == Web3.to_checksum_address(wallet_lower)
 
 
 class TestGetInstancesForVersion:
     def test_returns_list_of_ids(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = ([10, 20, 30],)
-        ids = reg.get_instances_for_version(1, 1)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, ([10, 20, 30],)):
+            ids = reg.get_instances_for_version(1, 1)
         assert ids == [10, 20, 30]
 
     def test_empty_list(self):
-        reg = _make_registry()
-        reg.contract.get_function_by_name.return_value.decode_output.return_value = ([],)
-        ids = reg.get_instances_for_version(1, 1)
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, ([],)):
+            ids = reg.get_instances_for_version(1, 1)
         assert ids == []
 
 

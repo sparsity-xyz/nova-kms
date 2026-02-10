@@ -212,18 +212,8 @@ def _startup_production() -> dict:
     # scheduler=False: the lifespan creates the single background scheduler
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
 
-    # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
-    # Uses strict initialization logic with mutual PoP auth to prevent split-brain.
-    if is_operator:
-        sync_manager.wait_for_master_secret(
-            kms_registry=kms_registry if kms_registry else None,
-            master_secret_mgr=master_secret_mgr,
-        )
-    else:
-        logger.warning(
-            "This node is not a registered KMS operator; skipping master secret initialization. "
-            "KMS key endpoints will remain unavailable (503) until a valid operator starts this node."
-        )
+    # 6. Master secret and sync are handled by the single periodic node tick.
+    # Startup should not block on initialization.
 
     # 7. CA & auth
 
@@ -286,19 +276,22 @@ async def lifespan(app: FastAPI):
     if master_secret_mgr.is_initialized:
         components["sync_manager"].set_sync_key(master_secret_mgr.get_sync_key())
 
-    # 10. Background scheduler
+    # 10. Background scheduler (single job)
+    # Run one tick immediately so service availability is correct on startup.
+    # A second tick is needed when the first tick sets the on-chain hash
+    # (e.g., simulation): the second tick sees the non-zero hash and transitions
+    # the service to online.
+    try:
+        components["sync_manager"].node_tick(master_secret_mgr)
+    except Exception as exc:
+        logger.warning(f"Initial node tick failed: {exc}")
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(
-        components["sync_manager"].push_deltas,
+        components["sync_manager"].node_tick,
         "interval",
-        seconds=config.SYNC_INTERVAL_SECONDS,
-    )
-    # Periodically refresh the operator list from the KMS registry
-    # (workflow step: "Periodically repeat step 1 to refresh the operator list")
-    scheduler.add_job(
-        components["sync_manager"].peer_cache.refresh,
-        "interval",
-        seconds=config.PEER_CACHE_TTL_SECONDS,
+        seconds=getattr(config, "KMS_NODE_TICK_SECONDS", config.SELF_OPERATOR_REFRESH_SECONDS),
+        args=[master_secret_mgr],
     )
     scheduler.start()
     logger.info(f"=== Nova KMS started successfully ({mode_label}) ===")

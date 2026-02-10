@@ -3,12 +3,8 @@ pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
-import {
-    ERC1967Proxy
-} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {
-    OwnableUpgradeable
-} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract KMSRegistryTest is Test {
     KMSRegistry public implementation;
@@ -28,14 +24,8 @@ contract KMSRegistryTest is Test {
         implementation = new KMSRegistry();
 
         // 2. Deploy Proxy and Initialize
-        bytes memory initData = abi.encodeCall(
-            KMSRegistry.initialize,
-            (admin, mockAppRegistry)
-        );
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(implementation),
-            initData
-        );
+        bytes memory initData = abi.encodeCall(KMSRegistry.initialize, (admin, mockAppRegistry));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
 
         // 3. Cast Proxy and set App ID
         registry = KMSRegistry(address(proxy));
@@ -75,12 +65,7 @@ contract KMSRegistryTest is Test {
 
     function test_setNovaAppRegistry_revert_notOwner() public {
         vm.prank(randomUser);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
-                randomUser
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
         registry.setNovaAppRegistry(address(0xBEEF));
     }
 
@@ -94,12 +79,7 @@ contract KMSRegistryTest is Test {
 
     function test_setKmsAppId_revert_notOwner() public {
         vm.prank(randomUser);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
-                randomUser
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
         registry.setKmsAppId(999);
     }
 
@@ -153,12 +133,7 @@ contract KMSRegistryTest is Test {
     function test_upgrade_revert_unauthorized() public {
         KMSRegistry newImp = new KMSRegistry();
         vm.prank(randomUser);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                OwnableUpgradeable.OwnableUnauthorizedAccount.selector,
-                randomUser
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
         registry.upgradeToAndCall(address(newImp), "");
     }
 

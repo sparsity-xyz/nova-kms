@@ -4,9 +4,7 @@ pragma solidity ^0.8.33;
 import {Script} from "forge-std/Script.sol";
 import {console2 as console} from "forge-std/console2.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
-import {
-    ERC1967Proxy
-} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
  * @title DeployKMSRegistry
@@ -26,36 +24,19 @@ contract DeployKMSRegistry is Script {
         // 2. Deploy Proxy and Initialize
         // Initializing with owner and registry. kmsAppId defaults to 0.
         // Owner MUST call setKmsAppId() later.
-        bytes memory initData = abi.encodeCall(
-            KMSRegistry.initialize,
-            (deployerAddr, novaAppRegistryProxy)
-        );
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(implementation),
-            initData
-        );
+        bytes memory initData = abi.encodeCall(KMSRegistry.initialize, (deployerAddr, novaAppRegistryProxy));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
 
-        console.log(
-            "KMSRegistry Implementation deployed at:",
-            address(implementation)
-        );
-        console.log(
-            "KMSRegistry Proxy (USE THIS ONE) deployed at:",
-            address(proxy)
-        );
+        console.log("KMSRegistry Implementation deployed at:", address(implementation));
+        console.log("KMSRegistry Proxy (USE THIS ONE) deployed at:", address(proxy));
         console.log("NovaAppRegistry proxy:", novaAppRegistryProxy);
         console.log("");
         console.log("CRITICAL POST-DEPLOYMENT STEPS:");
         console.log("1. Set dappContract on NovaAppRegistry for your KMS App.");
-        console.log(
-            "2. Call setKmsAppId(YOUR_APP_ID) on the proxy to enable operator callbacks."
-        );
+        console.log("2. Call setKmsAppId(YOUR_APP_ID) on the proxy to enable operator callbacks.");
         console.log("");
         console.log("Example using cast:");
-        console.log(
-            'cast send %s "setKmsAppId(uint256)" <APP_ID> --private-key <KEY> --rpc-url <URL>',
-            address(proxy)
-        );
+        console.log('cast send %s "setKmsAppId(uint256)" <APP_ID> --private-key <KEY> --rpc-url <URL>', address(proxy));
 
         vm.stopBroadcast();
     }

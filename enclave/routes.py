@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 import config
@@ -57,6 +58,10 @@ _kms_registry: Optional["KMSRegistryClient"] = None
 _sync_manager: Optional["SyncManager"] = None
 _node_info: dict = {}
 
+_service_state_lock = threading.Lock()
+_service_available: bool = False
+_service_unavailable_reason: str = "initializing"
+
 
 def init(
     *,
@@ -81,11 +86,36 @@ def init(
     logger.info("Routes module initialized")
 
 
+def set_service_availability(available: bool, *, reason: str = "") -> None:
+    """Set whether this node should accept incoming HTTP requests.
+
+    When unavailable, all incoming requests should return 503.
+    """
+    global _service_available, _service_unavailable_reason
+    with _service_state_lock:
+        _service_available = bool(available)
+        _service_unavailable_reason = reason or ("" if available else "unavailable")
+
+
+def get_service_availability() -> tuple[bool, str]:
+    with _service_state_lock:
+        return _service_available, _service_unavailable_reason
+
+
+def _require_service_available(request: Request) -> None:
+    # Allow CORS preflight to proceed so clients see a proper 503 on real requests.
+    if request.method.upper() == "OPTIONS":
+        return
+    available, reason = get_service_availability()
+    if not available:
+        raise HTTPException(status_code=503, detail={"error": "Service unavailable", "reason": reason})
+
+
 # =============================================================================
 # Routers
 # =============================================================================
 
-router = APIRouter(tags=["kms"])
+router = APIRouter(tags=["kms"], dependencies=[Depends(_require_service_available)])
 
 _nonce_rate_limiter = TokenBucket(config.NONCE_RATE_LIMIT_PER_MINUTE)
 
@@ -249,6 +279,7 @@ def get_status():
             "tee_wallet": _node_info.get("tee_wallet"),
             "node_url": _node_info.get("node_url"),
             "is_operator": _node_info.get("is_operator", False),
+            "service_available": get_service_availability()[0],
             "master_secret": (
                 {
                     "state": getattr(_master_secret_mgr, "init_state", "uninitialized")

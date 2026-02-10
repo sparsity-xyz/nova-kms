@@ -146,6 +146,7 @@ class SimKMSRegistryClient:
         peers = peers if peers is not None else DEFAULT_SIM_PEERS
         self._operators: List[str] = [p.tee_wallet for p in peers]
         self._lower_set = {w.lower() for w in self._operators}
+        self._master_secret_hash: bytes = b"\x00" * 32
 
     # -- Views (match KMSRegistryClient API) ---------------------------------
 
@@ -162,6 +163,24 @@ class SimKMSRegistryClient:
         if index < 0 or index >= len(self._operators):
             raise IndexError(f"operator index {index} out of range")
         return self._operators[index]
+
+    def get_master_secret_hash(self) -> bytes:
+        """Return the in-memory master secret hash (bytes32)."""
+        return self._master_secret_hash
+
+    def set_master_secret_hash(self, odyn, *, setter_wallet: str, secret_hash32: bytes) -> str:
+        """Set the master secret hash (only when currently zero)."""
+        if self._master_secret_hash != b"\x00" * 32:
+            raise RuntimeError("MasterSecretHashAlreadySet")
+        if len(secret_hash32) != 32:
+            raise ValueError("secret_hash32 must be 32 bytes")
+        self._master_secret_hash = bytes(secret_hash32)
+        return "0x" + "00" * 32  # fake tx hash
+
+    def reset_master_secret_hash(self, odyn=None, *, owner_wallet: str = "") -> str:
+        """Reset master secret hash to zero."""
+        self._master_secret_hash = b"\x00" * 32
+        return "0x" + "00" * 32
 
 
 # =============================================================================
@@ -279,6 +298,14 @@ class SimNovaRegistry:
             if inst.instance_id == instance_id:
                 return inst
         raise ValueError(f"Instance {instance_id} not found")
+
+    def get_instances_for_version(self, app_id: int, version_id: int) -> List[int]:
+        """Return instance IDs belonging to the given version."""
+        return [
+            inst.instance_id
+            for inst in self._instances.values()
+            if inst.app_id == app_id and inst.version_id == version_id
+        ]
 
 
 # =============================================================================

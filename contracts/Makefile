@@ -1,6 +1,6 @@
 -include .env
 
-.PHONY: install build clean test fmt deploy set-app-id verify-blockscout verify-basescan
+.PHONY: install build clean test fmt deploy set-app-id reset-secret-hash verify-blockscout verify-basescan
 
 # Install dependencies
 install:
@@ -69,5 +69,13 @@ set-app-id:
 	if [ -z "$(KMS_APP_ID)" ]; then echo "Error: KMS_APP_ID not set"; exit 1; fi; \
 	echo "Setting KMS App ID to $(KMS_APP_ID) on $(PROXY_ADDRESS)..."; \
 	cast send $(PROXY_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
+		--rpc-url $(RPC_URL) \
+		--private-key $(PRIVATE_KEY)
+
+# Reset master secret hash on the proxy (owner-only)
+reset-secret-hash:
+	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS (proxy) not set"; exit 1; fi; \
+	echo "Resetting master secret hash to 0x0 on $(PROXY_ADDRESS)..."; \
+	cast send $(PROXY_ADDRESS) "resetMasterSecretHash()" \
 		--rpc-url $(RPC_URL) \
 		--private-key $(PRIVATE_KEY)

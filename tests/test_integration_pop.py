@@ -78,6 +78,7 @@ def _setup_pop_routes(monkeypatch):
             "kms_registry_address": "0xREG",
         },
     )
+    routes.set_service_availability(True)
 
     if routes.router not in [r for r in app.routes]:
         app.include_router(routes.router)

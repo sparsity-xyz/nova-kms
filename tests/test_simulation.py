@@ -333,6 +333,7 @@ def sim_client(monkeypatch):
     import config
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
     monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+    monkeypatch.setattr(config, "ALLOWED_PEER_URL_SCHEMES", ["http", "https"])
 
     with patch.dict(os.environ, {"SIMULATION_MODE": "1", "SIM_NODE_INDEX": "0"}):
         from app import app as fastapi_app

@@ -91,6 +91,9 @@ def _setup_routes(monkeypatch):
         },
     )
 
+    # Service must be marked available for endpoints to respond 200
+    routes.set_service_availability(True)
+
     if routes.router not in [r for r in app.routes]:
         app.include_router(routes.router)
 
@@ -123,6 +126,27 @@ class TestHealth:
         resp = client.get("/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+    def test_service_unavailable_returns_503(self, client):
+        """All router endpoints should 503 when service is unavailable."""
+        import routes
+        routes.set_service_availability(False, reason="test-offline")
+        try:
+            resp = client.post(
+                "/kms/derive",
+                json={"path": "x"},
+                headers={"x-tee-wallet": "0x1234"},
+            )
+            assert resp.status_code == 503
+            assert "test-offline" in resp.json()["detail"]["reason"]
+
+            resp_sync = client.post(
+                "/sync",
+                json={"type": "delta", "sender_wallet": "0x0", "data": {}},
+            )
+            assert resp_sync.status_code == 503
+        finally:
+            routes.set_service_availability(True)
 
     def test_status(self, client):
         resp = client.get("/status")

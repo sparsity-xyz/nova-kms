@@ -134,6 +134,12 @@ class MasterSecretManager:
     def epoch(self) -> int:
         return self._epoch
 
+    def get_sync_key(self) -> bytes:
+        """Derive the HMAC sync key for the current (secret, epoch)."""
+        if self._secret is None:
+            raise RuntimeError("Master secret not initialized")
+        return derive_sync_key(self._secret, epoch=self._epoch)
+
     def initialize_from_random(self, odyn) -> None:
         """Generate a new master secret from Odyn hardware RNG."""
         self._secret = odyn.get_random_bytes()

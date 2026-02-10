@@ -10,8 +10,7 @@ Handles data synchronization between KMS nodes.
 - **Master secret sharing**: new nodes receive the master secret from peers
   via sealed ECDH key exchange (not plaintext).
 
-Peer discovery: ``KMSRegistry.getOperators()`` → for each operator,
-``NovaAppRegistry.getInstanceByWallet(operator)`` → instance URL + wallet.
+Peer discovery: ``NovaAppRegistry`` → ``KMS_APP_ID`` → ENROLLED versions → ACTIVE instances.
 
 Security features:
 - All sync messages are HMAC-signed using a key derived from the master secret.
@@ -33,6 +32,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
+from eth_hash.auto import keccak
+
+import config as config_module
 
 from config import (
     MAX_SYNC_PAYLOAD_BYTES,
@@ -67,8 +69,8 @@ def _verify_hmac(sync_key: bytes, payload: bytes, signature: str) -> bool:
 
 class PeerCache:
     """
-    Caches the list of active KMS peer nodes discovered via KMSRegistry
-    operators + NovaAppRegistry instance data.
+    Caches the list of active KMS peer nodes discovered via NovaAppRegistry:
+    KMS_APP_ID -> ENROLLED versions -> ACTIVE instances.
     Refreshed every PEER_CACHE_TTL_SECONDS.
     """
 
@@ -127,33 +129,74 @@ class PeerCache:
         return None
 
     def _refresh(self):
-        """Refresh peer list from KMSRegistry operators + NovaAppRegistry."""
+        """Refresh peer list from NovaAppRegistry."""
         try:
-            operators = self.kms_registry.get_operators()
+            from config import KMS_APP_ID
+            from nova_registry import InstanceStatus, VersionStatus
+
+            kms_app_id = int(KMS_APP_ID or 0)
+            if kms_app_id <= 0:
+                raise ValueError("KMS_APP_ID not configured")
+
+            app = self.nova_registry.get_app(kms_app_id)
+            latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
+
             peers: List[dict] = []
-            for operator in operators:
+            seen_wallets: set[str] = set()
+
+            for version_id in range(1, latest_version_id + 1):
                 try:
-                    instance = self.nova_registry.get_instance_by_wallet(operator)
+                    ver = self.nova_registry.get_version(kms_app_id, version_id)
+                except Exception:
+                    continue
+
+                if getattr(ver, "status", None) != VersionStatus.ENROLLED:
+                    continue
+
+                try:
+                    instance_ids = self.nova_registry.get_instances_for_version(kms_app_id, version_id) or []
+                except Exception as exc:
+                    logger.debug(f"Instances lookup failed for version {version_id}: {exc}")
+                    continue
+
+                for instance_id in instance_ids:
+                    try:
+                        instance = self.nova_registry.get_instance(int(instance_id))
+                    except Exception as exc:
+                        logger.debug(f"Instance lookup failed for id {instance_id}: {exc}")
+                        continue
+
+                    if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
+                        continue
+
+                    wallet = (getattr(instance, "tee_wallet_address", "") or "").lower()
+                    if not wallet or wallet in seen_wallets:
+                        continue
+
                     # Validate peer URL before adding to cache
                     try:
                         validate_peer_url(instance.instance_url)
                     except URLValidationError as url_err:
                         logger.warning(
-                            f"Skipping peer {operator}: invalid URL "
+                            f"Skipping peer {wallet}: invalid URL "
                             f"'{instance.instance_url}': {url_err}"
                         )
                         continue
-                    peers.append({
-                        "tee_wallet_address": instance.tee_wallet_address,
-                        "node_url": instance.instance_url,
-                        "operator": instance.operator,
-                        "status": instance.status,
-                    })
-                except Exception as exc:
-                    logger.debug(f"Instance lookup failed for operator {operator}: {exc}")
+
+                    peers.append(
+                        {
+                            "tee_wallet_address": instance.tee_wallet_address,
+                            "node_url": instance.instance_url,
+                            "operator": instance.operator,
+                            "status": instance.status,
+                            "version_id": instance.version_id,
+                            "instance_id": instance.instance_id,
+                        }
+                    )
+                    seen_wallets.add(wallet)
             self._peers = peers
             self._last_refresh = time.time()
-            logger.info(f"Peer cache refreshed: {len(self._peers)} operators")
+            logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
         except Exception as exc:
             logger.warning(f"Failed to refresh peer cache: {exc}")
 
@@ -187,6 +230,10 @@ class SyncManager:
         self.peer_cache = peer_cache
         self.odyn = odyn
         self.http_timeout = http_timeout
+
+        # Periodic node-tick state
+        self._seed_stable_rounds: int = 0
+        self._last_push_deltas_at: float = 0.0
         self._last_push_ms: int = 0
         self._sync_key: Optional[bytes] = None
 
@@ -304,6 +351,9 @@ class SyncManager:
                 logger.warning(f"Operator check failed for self {self.node_wallet}: {exc}")
                 return False
 
+        stable_required = int(getattr(config_module, "MASTER_SECRET_SEED_STABLE_ROUNDS", 3))
+        stable_rounds = 0
+
         # Hard safety rule: a non-operator node must not participate in master secret
         # initialization at all (no generate, no sync). Leave it uninitialized.
         if not _self_is_operator():
@@ -321,51 +371,265 @@ class SyncManager:
                     # No registry client means PeerCache may not be able to discover peers.
                     # Avoid generating a secret in this unknown state.
                     all_peers = []
+                    operators = []
                 else:
                     self.peer_cache.refresh()
                     all_peers = self.peer_cache.get_peers()
-                
-                # Filter for "others"
-                others = [p for p in all_peers if p["tee_wallet_address"].lower() != self.node_wallet.lower()]
-                
-                if not others:
-                    # 2. Only self (or no peers discovered)
-                    logger.info("No other operators found in registry. Initializing as seed node.")
-                    if not self.odyn:
-                        raise RuntimeError("Cannot generate master secret: Odyn RNG not available")
-                    master_secret_mgr.initialize_from_random(self.odyn)
-                    break
 
-                # 3. Check status of other operators
-                active_others = [p for p in others if p["status"] == InstanceStatus.ACTIVE]
-                
-                if not active_others:
-                    # 4. All others are non-active
-                    logger.info("Found other operators, but none are ACTIVE. Initializing as seed node.")
-                    if not self.odyn:
-                        raise RuntimeError("Cannot generate master secret: Odyn RNG not available")
-                    master_secret_mgr.initialize_from_random(self.odyn)
-                    break
+                    # Fetch operator set directly from chain to avoid relying solely on
+                    # instance discovery. This is also used to prevent seed generation
+                    # when the operator set is empty/partial.
+                    try:
+                        operators = kms_registry.get_operators() or []
+                    except Exception as exc:
+                        logger.warning(f"Failed to fetch operators list from registry: {exc}")
+                        operators = []
 
-                # 5. Active others exist, attempt to sync
-                logger.info(f"Found {len(active_others)} active peers. Attempting to sync master secret...")
-                for peer in active_others:
-                    peer_url = peer["node_url"]
-                    if self._sync_master_secret_from_peer(peer_url, master_secret_mgr):
-                        logger.info(f"Successfully synced master secret from {peer_url}")
-                        break
+                # Safety: if we cannot confirm that *self* appears in the operator list,
+                # treat the operator set as unstable/unknown and do not seed-generate.
+                if kms_registry is not None:
+                    if not operators:
+                        stable_rounds = 0
+                        logger.info("Operators list empty; waiting for on-chain operator set")
+                        time.sleep(retry_interval)
+                        continue
+                    else:
+                        op_lowers = {o.lower() for o in operators}
+                        if self.node_wallet.lower() not in op_lowers:
+                            logger.warning(
+                                "Self isOperator() is true, but self is missing from getOperators(). "
+                                "Treating operator set as unstable; refusing to seed-generate master secret yet."
+                            )
+                            stable_rounds = 0
+                            time.sleep(retry_interval)
+                            continue
+
+                        # If the registry reports other operators, but we couldn't resolve them
+                        # into peers (Nova registry lookup failures / URL validation), do NOT
+                        # generate a new master secret. Wait until discovery catches up.
+                        # NOTE: Per current design, "ACTIVE" is the only truth.
+                        # We do not use reachability to decide whether an instance is active.
+
+                # Determine ACTIVE set from on-chain instance status (truth source)
+                active_set = {
+                    p["tee_wallet_address"].lower()
+                    for p in all_peers
+                    if p.get("status") == InstanceStatus.ACTIVE
+                }
+
+                # If multiple ACTIVE instances exist and master secret is uninitialized,
+                # require manual intervention (do not seed, do not sync).
+                if len(active_set) > 1:
+                    stable_rounds = 0
+                    logger.critical(
+                        f"Multiple ACTIVE KMS instances detected on-chain ({len(active_set)}). "
+                        "Master secret is uninitialized; refusing to generate or sync. "
+                        "Manual intervention required: reduce to a single ACTIVE instance."
+                    )
+                    time.sleep(retry_interval)
+                    continue
+
+                # If no ACTIVE instances, wait.
+                if len(active_set) == 0:
+                    stable_rounds = 0
+                    logger.warning("No ACTIVE KMS instances on-chain; waiting")
+                    time.sleep(retry_interval)
+                    continue
+
+                # Exactly one ACTIVE instance exists.
+                sole_active = next(iter(active_set))
+                if sole_active != self.node_wallet.lower():
+                    stable_rounds = 0
+                    logger.info(
+                        "Another KMS instance is the sole ACTIVE operator on-chain; "
+                        "waiting for it to initialize master secret."
+                    )
+                    time.sleep(retry_interval)
+                    continue
+
+                # Self is the sole ACTIVE instance; require stability for K rounds.
+                stable_rounds += 1
+                logger.info(
+                    f"Self is sole ACTIVE instance on-chain (stable_rounds={stable_rounds}/{stable_required})."
+                )
+                if stable_rounds < stable_required:
+                    time.sleep(retry_interval)
+                    continue
                 
-                if master_secret_mgr.is_initialized:
-                    break
-                
-                logger.warning("Could not connect to any active peers for master secret sync.")
+                # Seed-generate master secret (single ACTIVE instance rule satisfied).
+                logger.info("ACTIVE set stable and only self is ACTIVE. Initializing as seed node.")
+                if not self.odyn:
+                    raise RuntimeError("Cannot generate master secret: Odyn RNG not available")
+                master_secret_mgr.initialize_from_random(self.odyn)
+                break
                 
             except Exception as exc:
                 logger.error(f"Error during master secret initialization: {exc}")
+                stable_rounds = 0
 
             # 6. Wait and retry from step 1
             logger.info(f"Retrying master secret initialization in {retry_interval} seconds...")
             time.sleep(retry_interval)
+
+    # ------------------------------------------------------------------
+    # Single periodic node tick (operator + ACTIVE gating, init, sync)
+    # ------------------------------------------------------------------
+
+    def node_tick(self, master_secret_mgr) -> None:
+        """Single periodic task implementing the KMS node lifecycle.
+
+                Rules:
+                    1) Discover KMS node list from NovaAppRegistry (ENROLLED versions, ACTIVE instances).
+                         If self is not in this list -> offline (503) and do nothing.
+                    2) Read on-chain KMSRegistry masterSecretHash.
+                         - If hash == 0: ensure local master secret exists, compute hash, attempt to set on-chain.
+                             If set fails -> offline.
+                         - If hash != 0: if local secret missing or hash mismatch -> sync master secret from peers.
+                             If synced secret hash still mismatches -> offline.
+                    3) If online: sync data with other KMS nodes.
+        """
+
+        import routes as routes_module
+
+        def _set_unavailable(reason: str) -> None:
+            try:
+                routes_module.set_service_availability(False, reason=reason)
+            except Exception:
+                # If routes isn't initialized yet, just proceed silently.
+                pass
+
+        def _set_available() -> None:
+            try:
+                routes_module.set_service_availability(True, reason="")
+            except Exception:
+                pass
+
+        # Always refresh KMS node list from chain each tick
+        try:
+            self.peer_cache.refresh()
+        except Exception as exc:
+            logger.warning(f"Peer cache refresh failed: {exc}")
+
+        peers = self.peer_cache.get_peers()
+        self_wallet = self.node_wallet.lower()
+        kms_wallets = {
+            (p.get("tee_wallet_address") or "").lower() for p in peers if p.get("tee_wallet_address")
+        }
+
+        # 1) If self not in kms node list -> offline and do nothing.
+        if self_wallet not in kms_wallets:
+            _set_unavailable("self not in KMS node list")
+            return
+
+        # 2) Read on-chain master secret hash
+        kms_reg = self.peer_cache.kms_registry
+        try:
+            chain_hash = kms_reg.get_master_secret_hash()
+        except Exception as exc:
+            logger.warning(f"Failed to read masterSecretHash: {exc}")
+            _set_unavailable("cannot read master secret hash")
+            return
+
+        chain_hash_is_zero = (chain_hash == b"\x00" * 32)
+
+        def _local_secret_hash() -> Optional[bytes]:
+            if not master_secret_mgr.is_initialized:
+                return None
+            # master secret bytes are stored on the manager
+            secret = getattr(master_secret_mgr, "secret", None)
+            if not isinstance(secret, (bytes, bytearray)):
+                return None
+            return keccak(bytes(secret))
+
+        # 3.1 If chain hash is 0: generate (if needed) and attempt to set
+        if chain_hash_is_zero:
+            if not master_secret_mgr.is_initialized:
+                if not self.odyn:
+                    _set_unavailable("cannot generate master secret (no Odyn RNG)")
+                    return
+                try:
+                    master_secret_mgr.initialize_from_random(self.odyn)
+                except Exception as exc:
+                    logger.warning(f"Master secret generation failed: {exc}")
+                    _set_unavailable("master secret generation failed")
+                    return
+
+            local_hash = _local_secret_hash()
+            if not local_hash or len(local_hash) != 32:
+                _set_unavailable("local master secret hash unavailable")
+                return
+
+            # Attempt to set on-chain (one try per tick)
+            try:
+                if not self.odyn:
+                    raise RuntimeError("Odyn unavailable for tx signing")
+                tx_hash = kms_reg.set_master_secret_hash(
+                    self.odyn,
+                    setter_wallet=self.node_wallet,
+                    secret_hash32=local_hash,
+                )
+                logger.info(f"Submitted setMasterSecretHash tx: {tx_hash}")
+            except Exception as exc:
+                logger.warning(f"Failed to set masterSecretHash on-chain: {exc}")
+                _set_unavailable("failed to set master secret hash")
+                return
+
+            # Stay offline until the chain hash is non-zero and matches our local hash.
+            _set_unavailable("awaiting on-chain master secret hash")
+            return
+        else:
+            # 3.2 chain hash non-zero: ensure local secret matches, else sync
+            local_hash = _local_secret_hash()
+            if local_hash != chain_hash:
+                # Need to sync master secret from peers
+                if master_secret_mgr.is_initialized:
+                    logger.warning("Local master secret hash mismatch; attempting to resync from peers")
+                else:
+                    logger.info("Local master secret missing; attempting sync from peers")
+
+                synced = False
+                for peer in peers:
+                    peer_wallet = (peer.get("tee_wallet_address") or "").lower()
+                    if not peer_wallet or peer_wallet == self_wallet:
+                        continue
+                    peer_url = peer.get("node_url")
+                    if not peer_url:
+                        continue
+                    try:
+                        if self._sync_master_secret_from_peer(peer_url, master_secret_mgr):
+                            synced = True
+                            break
+                    except Exception as exc:
+                        logger.warning(f"Master secret sync attempt from {peer_url} failed: {exc}")
+
+                if not synced:
+                    _set_unavailable("master secret sync failed")
+                    return
+
+                # Validate synced hash against chain
+                local_hash = _local_secret_hash()
+                if local_hash != chain_hash:
+                    _set_unavailable("synced master secret hash mismatch")
+                    return
+
+                # sync_key set below (outside the if block)
+
+            # Always (re-)derive and set sync key before going online
+            try:
+                self.set_sync_key(master_secret_mgr.get_sync_key())
+            except Exception as exc:
+                logger.warning(f"Failed to set sync key: {exc}")
+
+            _set_available()
+
+        # 4) If online: sync data with peers (paced)
+        now = time.time()
+        interval = int(getattr(config_module, "SYNC_INTERVAL_SECONDS", 60))
+        if now - self._last_push_deltas_at >= interval:
+            try:
+                self.push_deltas()
+            finally:
+                self._last_push_deltas_at = now
 
     def _sync_master_secret_from_peer(self, peer_url: str, master_secret_mgr) -> bool:
         """
@@ -673,8 +937,12 @@ class SyncManager:
 
         logger.debug(f"KMS PoP verified for {p_wallet}")
 
-        # 2. Verify HMAC signature if sync key is set
-        if self._sync_key:
+        sync_type = body.get("type", "")
+
+        # 2. Verify HMAC signature if sync key is set.
+        # Bootstrap exception: allow master_secret_request without HMAC so a
+        # new ACTIVE operator can pull the master secret before it has a sync key.
+        if self._sync_key and sync_type != "master_secret_request":
             if not signature:
                 logger.warning("Sync message rejected: HMAC signature required but not provided")
                 return {"status": "error", "reason": "Missing HMAC signature"}
@@ -682,8 +950,6 @@ class SyncManager:
             if not _verify_hmac(self._sync_key, payload_json.encode("utf-8"), signature):
                 logger.warning("Sync message HMAC verification failed")
                 return {"status": "error", "reason": "Invalid HMAC signature"}
-
-        sync_type = body.get("type", "")
         result: dict = {"status": "ok"}
 
         if sync_type == "delta":

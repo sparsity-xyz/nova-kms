@@ -57,6 +57,27 @@ _KMS_REGISTRY_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [],
+        "name": "masterSecretHash",
+        "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"internalType": "bytes32", "name": "newHash", "type": "bytes32"}],
+        "name": "setMasterSecretHash",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "resetMasterSecretHash",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 
@@ -107,6 +128,58 @@ class KMSRegistryClient:
         )
 
     # ------------------------------------------------------------------
+    # Transaction helpers (signed by Odyn)
+    # ------------------------------------------------------------------
+
+    def _build_eip1559_tx(self, *, from_addr: str, to_addr: str, data: str) -> dict:
+        """Build a minimal EIP-1559 transaction dict for Odyn signing."""
+        priority_fee, max_fee = self.chain.estimate_fees()
+        nonce = self.chain.get_nonce(from_addr)
+        return {
+            "chainId": self.chain.w3.eth.chain_id,
+            "type": 2,
+            "from": Web3.to_checksum_address(from_addr),
+            "to": Web3.to_checksum_address(to_addr),
+            "nonce": nonce,
+            "data": data,
+            "value": 0,
+            "maxPriorityFeePerGas": int(priority_fee),
+            "maxFeePerGas": int(max_fee),
+            # Conservative gas; Odyn may not expose estimateGas inside enclave.
+            "gas": 300000,
+        }
+
+    @staticmethod
+    def _extract_raw_tx(sign_res: dict) -> Optional[str]:
+        """Best-effort extraction of raw signed tx hex from Odyn response."""
+        if not isinstance(sign_res, dict):
+            return None
+        for key in (
+            "raw_transaction",
+            "rawTransaction",
+            "signed_tx",
+            "signedTx",
+            "tx",
+            "transaction",
+        ):
+            v = sign_res.get(key)
+            if isinstance(v, str) and v.startswith("0x"):
+                return v
+        payload = sign_res.get("payload")
+        if isinstance(payload, dict):
+            for key in ("raw_transaction", "rawTransaction", "signed_tx", "signedTx"):
+                v = payload.get(key)
+                if isinstance(v, str) and v.startswith("0x"):
+                    return v
+        return None
+
+    def _send_signed_tx(self, raw_tx_hex: str) -> str:
+        tx_hash = self.chain.w3.eth.send_raw_transaction(raw_tx_hex)
+        if hasattr(tx_hash, "hex"):
+            return tx_hash.hex()
+        return Web3.to_hex(tx_hash)
+
+    # ------------------------------------------------------------------
     # Low-level RPC
     # ------------------------------------------------------------------
 
@@ -152,3 +225,43 @@ class KMSRegistryClient:
     def operator_at(self, index: int) -> str:
         """Return the operator address at *index*."""
         return self._call("operatorAt", [index])
+
+    def get_master_secret_hash(self) -> bytes:
+        """Return on-chain masterSecretHash as raw bytes32."""
+        v = self._call("masterSecretHash", [])
+        if isinstance(v, (bytes, bytearray)):
+            return bytes(v)
+        if isinstance(v, str) and v.startswith("0x"):
+            return bytes.fromhex(v[2:])
+        # web3 can return HexBytes
+        try:
+            return bytes(v)
+        except Exception:
+            raise ValueError("Unexpected masterSecretHash type")
+
+    def set_master_secret_hash(self, odyn, *, setter_wallet: str, secret_hash32: bytes) -> str:
+        """Submit tx to set masterSecretHash (allowed once when unset)."""
+        if len(secret_hash32) != 32:
+            raise ValueError("secret_hash32 must be 32 bytes")
+
+        fn = self.contract.get_function_by_name("setMasterSecretHash")(secret_hash32)
+        data = fn._encode_transaction_data()
+        tx = self._build_eip1559_tx(from_addr=setter_wallet, to_addr=self.address, data=data)
+
+        sign_res = odyn.sign_tx(tx)
+        raw_tx = self._extract_raw_tx(sign_res)
+        if not raw_tx:
+            raise RuntimeError(f"Odyn sign_tx returned unexpected payload: {sign_res}")
+        return self._send_signed_tx(raw_tx)
+
+    def reset_master_secret_hash(self, odyn, *, owner_wallet: str) -> str:
+        """Owner-only tx to reset masterSecretHash to 0."""
+        fn = self.contract.get_function_by_name("resetMasterSecretHash")()
+        data = fn._encode_transaction_data()
+        tx = self._build_eip1559_tx(from_addr=owner_wallet, to_addr=self.address, data=data)
+
+        sign_res = odyn.sign_tx(tx)
+        raw_tx = self._extract_raw_tx(sign_res)
+        if not raw_tx:
+            raise RuntimeError(f"Odyn sign_tx returned unexpected payload: {sign_res}")
+        return self._send_signed_tx(raw_tx)

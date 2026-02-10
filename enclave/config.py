@@ -39,6 +39,11 @@ CHAIN_ID: int = 84532  # Base Sepolia
 # Protects against reorgs that could change on-chain operator sets.
 CONFIRMATION_DEPTH: int = 6
 
+# Master secret initialization safety:
+# Require the on-chain ACTIVE set to be stable for K consecutive refresh rounds
+# before allowing seed generation when this node is the only ACTIVE instance.
+MASTER_SECRET_SEED_STABLE_ROUNDS: int = 3
+
 # =============================================================================
 # On-chain Contract Addresses
 # =============================================================================
@@ -148,6 +153,17 @@ SYNC_BATCH_SIZE: int = 500
 
 # Peer cache TTL in seconds
 PEER_CACHE_TTL_SECONDS: int = 120
+
+# Single periodic node tick interval (seconds). This job is responsible for:
+# - refreshing operators and instance status from chain
+# - master secret initialization/sync
+# - periodic data sync
+KMS_NODE_TICK_SECONDS: int = 15
+
+# How often the node should refresh its own operator status from chain.
+# This makes `/status` accurate even if operator registration becomes visible
+# shortly after startup.
+SELF_OPERATOR_REFRESH_SECONDS: int = 15
 
 # =============================================================================
 # Nova Registry Cache

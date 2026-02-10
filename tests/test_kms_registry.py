@@ -17,13 +17,13 @@ import sys
 # Helpers
 # =============================================================================
 
-def _make_client(
-    *,
-    address="0x" + "11" * 20,
-    eth_call_return=b"raw_bytes",
-    decode_return=None,
-):
-    """Create a KMSRegistryClient with fully mocked chain."""
+def _make_client(*, address="0x" + "11" * 20):
+    """Create a KMSRegistryClient with fully mocked chain.
+    
+    Returns (client, mock_contract, mock_chain, kms_module).
+    The kms_module reference is needed for _mock_decode to patch
+    _decode_outputs on the correct module object.
+    """
     with patch.dict(sys.modules, {"config": MagicMock(), "chain": MagicMock()}):
         sys.modules["config"].KMS_REGISTRY_ADDRESS = address
         mock_chain = MagicMock()
@@ -32,20 +32,23 @@ def _make_client(
         sys.modules["chain"].get_chain.return_value = mock_chain
         mock_chain.w3 = mock_w3
         mock_w3.eth.contract.return_value = mock_contract
+        mock_chain.eth_call_finalized.return_value = b"\x00"
 
-        mock_chain.eth_call_finalized.return_value = eth_call_return
-        if decode_return is not None:
-            mock_fn = MagicMock()
-            mock_fn.decode_output.return_value = decode_return
-            mock_contract.get_function_by_name.return_value = mock_fn
+        # Make fn.abi an empty dict so the unwrap logic doesn't trip on MagicMock
+        mock_contract.get_function_by_name.return_value.return_value.abi = {}
 
         # Force fresh import
         if "kms_registry" in sys.modules:
             del sys.modules["kms_registry"]
-        from kms_registry import KMSRegistryClient
+        import kms_registry as kms_mod
 
-        client = KMSRegistryClient()
-        return client, mock_contract, mock_chain
+        client = kms_mod.KMSRegistryClient()
+        return client, mock_contract, mock_chain, kms_mod
+
+
+def _mock_decode(kms_mod, decode_return):
+    """Patch _decode_outputs on the exact kms_registry module object."""
+    return patch.object(kms_mod, "_decode_outputs", return_value=decode_return)
 
 
 # =============================================================================
@@ -56,13 +59,13 @@ def _make_client(
 class TestKMSRegistryInit:
     def test_init_creates_contract_with_abi(self):
         """Verify KMSRegistryClient stores a contract with the expected ABI methods."""
-        client, mock_contract, _ = _make_client()
-        # The client's contract attribute is the mock that w3.eth.contract() returned
+        client, mock_contract, _, kms_mod = _make_client()
         assert client.contract is mock_contract
-        # Verify the ABI has all 4 view functions by checking the imported module-level constant
-        from kms_registry import _KMS_REGISTRY_ABI
-        fn_names = {item["name"] for item in _KMS_REGISTRY_ABI}
-        assert fn_names == {"getOperators", "isOperator", "operatorCount", "operatorAt"}
+        fn_names = {item["name"] for item in kms_mod._KMS_REGISTRY_ABI}
+        assert fn_names == {
+            "getOperators", "isOperator", "operatorCount", "operatorAt",
+            "masterSecretHash", "setMasterSecretHash", "resetMasterSecretHash",
+        }
 
     def test_init_missing_address_raises(self):
         with patch.dict(sys.modules, {"config": MagicMock(), "chain": MagicMock()}):
@@ -82,25 +85,26 @@ class TestKMSRegistryInit:
 class TestCallUnwrap:
     def test_unwraps_single_return_value(self):
         """Single-output functions decode to a 1-tuple and should be unwrapped."""
-        client, mock_contract, mock_chain = _make_client(decode_return=(42,))
-        result = client._call("operatorCount", [])
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (42,)):
+            result = client._call("operatorCount", [])
         assert result == 42
 
     def test_passes_through_list_in_single_tuple(self):
         """A list inside a 1-tuple should be unwrapped to the list."""
-        client, mock_contract, _ = _make_client(decode_return=(["0xAA", "0xBB"],))
-        result = client._call("getOperators", [])
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (["0xAA", "0xBB"],)):
+            result = client._call("getOperators", [])
         assert result == ["0xAA", "0xBB"]
 
     def test_encodes_and_calls_finalized(self):
-        """_call should use encodeABI + eth_call_finalized + decode."""
-        client, mock_contract, mock_chain = _make_client(decode_return=(["0xAA"],))
-        mock_contract.encodeABI.return_value = "0xdeadbeef"
-        client._call("getOperators", [])
-        mock_contract.encodeABI.assert_called_with(fn_name="getOperators", args=[])
-        mock_chain.eth_call_finalized.assert_called_once()
+        """_call should use get_function_by_name + _encode_transaction_data + eth_call_finalized."""
+        client, mock_contract, mock_chain, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (["0xAA"],)):
+            client._call("getOperators", [])
         mock_contract.get_function_by_name.assert_called_with("getOperators")
-        mock_contract.get_function_by_name.return_value.decode_output.assert_called_once()
+        mock_contract.get_function_by_name.return_value.return_value._encode_transaction_data.assert_called_once()
+        mock_chain.eth_call_finalized.assert_called_once()
 
 
 # =============================================================================
@@ -111,50 +115,58 @@ class TestCallUnwrap:
 class TestGetOperators:
     def test_returns_operator_list(self):
         ops = ["0x" + "aa" * 20, "0x" + "bb" * 20]
-        client, mock_contract, _ = _make_client(decode_return=(ops,))
-        result = client.get_operators()
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (ops,)):
+            result = client.get_operators()
         assert result == ops
-        mock_contract.encodeABI.assert_called_with(fn_name="getOperators", args=[])
 
     def test_empty_list(self):
-        client, _, _ = _make_client(decode_return=([],))
-        assert client.get_operators() == []
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, ([],)):
+            assert client.get_operators() == []
 
 
 class TestIsOperator:
     def test_returns_true(self):
-        client, _, _ = _make_client(decode_return=(True,))
-        assert client.is_operator("0x" + "aa" * 20) is True
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (True,)):
+            assert client.is_operator("0x" + "aa" * 20) is True
 
     def test_returns_false(self):
-        client, _, _ = _make_client(decode_return=(False,))
-        assert client.is_operator("0x" + "bb" * 20) is False
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (False,)):
+            assert client.is_operator("0x" + "bb" * 20) is False
 
     def test_encodes_fn_name(self):
-        client, mock_contract, _ = _make_client(decode_return=(True,))
-        client.is_operator("0x" + "aa" * 20)
-        mock_contract.encodeABI.assert_called_once()
-        assert mock_contract.encodeABI.call_args[1]["fn_name"] == "isOperator"
+        client, mock_contract, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (True,)):
+            client.is_operator("0x" + "aa" * 20)
+        mock_contract.get_function_by_name.assert_called_with("isOperator")
 
 
 class TestOperatorCount:
     def test_returns_count(self):
-        client, _, _ = _make_client(decode_return=(5,))
-        assert client.operator_count() == 5
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (5,)):
+            assert client.operator_count() == 5
 
     def test_zero(self):
-        client, _, _ = _make_client(decode_return=(0,))
-        assert client.operator_count() == 0
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (0,)):
+            assert client.operator_count() == 0
 
 
 class TestOperatorAt:
     def test_returns_address(self):
         addr = "0x" + "cc" * 20
-        client, _, _ = _make_client(decode_return=(addr,))
-        assert client.operator_at(0) == addr
+        client, _, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, (addr,)):
+            assert client.operator_at(0) == addr
 
     def test_encodes_index(self):
-        client, mock_contract, _ = _make_client(decode_return=("0xAA",))
-        client.operator_at(3)
-        mock_contract.encodeABI.assert_called_with(fn_name="operatorAt", args=[3])
+        client, mock_contract, _, kms_mod = _make_client()
+        with _mock_decode(kms_mod, ("0xAA",)):
+            client.operator_at(3)
+        mock_contract.get_function_by_name.assert_called_with("operatorAt")
+        mock_contract.get_function_by_name.return_value.assert_called_with(3)
 
