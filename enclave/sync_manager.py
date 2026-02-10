@@ -295,19 +295,44 @@ class SyncManager:
         """
         from nova_registry import InstanceStatus
 
+        def _self_is_operator() -> bool:
+            if kms_registry is None:
+                return False
+            try:
+                return bool(kms_registry.is_operator(self.node_wallet))
+            except Exception as exc:
+                logger.warning(f"Operator check failed for self {self.node_wallet}: {exc}")
+                return False
+
+        # Hard safety rule: a non-operator node must not participate in master secret
+        # initialization at all (no generate, no sync). Leave it uninitialized.
+        if not _self_is_operator():
+            logger.warning(
+                "This node is not a registered KMS operator (or cannot verify membership). "
+                "Skipping master secret initialization (no peer sync, no seed generation)."
+            )
+            return
+
         while not master_secret_mgr.is_initialized:
             logger.info("Starting master secret initialization loop...")
             try:
                 # 1. Fetch all operators from KMSRegistry
-                self.peer_cache.refresh()
-                all_peers = self.peer_cache.get_peers()
+                if kms_registry is None:
+                    # No registry client means PeerCache may not be able to discover peers.
+                    # Avoid generating a secret in this unknown state.
+                    all_peers = []
+                else:
+                    self.peer_cache.refresh()
+                    all_peers = self.peer_cache.get_peers()
                 
                 # Filter for "others"
                 others = [p for p in all_peers if p["tee_wallet_address"].lower() != self.node_wallet.lower()]
                 
                 if not others:
-                    # 2. Only self in the registry
+                    # 2. Only self (or no peers discovered)
                     logger.info("No other operators found in registry. Initializing as seed node.")
+                    if not self.odyn:
+                        raise RuntimeError("Cannot generate master secret: Odyn RNG not available")
                     master_secret_mgr.initialize_from_random(self.odyn)
                     break
 
@@ -317,6 +342,8 @@ class SyncManager:
                 if not active_others:
                     # 4. All others are non-active
                     logger.info("Found other operators, but none are ACTIVE. Initializing as seed node.")
+                    if not self.odyn:
+                        raise RuntimeError("Cannot generate master secret: Odyn RNG not available")
                     master_secret_mgr.initialize_from_random(self.odyn)
                     break
 

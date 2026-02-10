@@ -214,10 +214,16 @@ def _startup_production() -> dict:
 
     # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
     # Uses strict initialization logic with mutual PoP auth to prevent split-brain.
-    sync_manager.wait_for_master_secret(
-        kms_registry=kms_registry if kms_registry else None,
-        master_secret_mgr=master_secret_mgr,
-    )
+    if is_operator:
+        sync_manager.wait_for_master_secret(
+            kms_registry=kms_registry if kms_registry else None,
+            master_secret_mgr=master_secret_mgr,
+        )
+    else:
+        logger.warning(
+            "This node is not a registered KMS operator; skipping master secret initialization. "
+            "KMS key endpoints will remain unavailable (503) until a valid operator starts this node."
+        )
 
     # 7. CA & auth
 
