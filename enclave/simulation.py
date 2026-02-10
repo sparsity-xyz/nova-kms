@@ -31,7 +31,10 @@ import hashlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nova_registry import App, AppVersion, RuntimeInstance
 
 logger = logging.getLogger("nova-kms.simulation")
 
@@ -305,7 +308,7 @@ def is_simulation_mode() -> bool:
 
 
 def get_sim_port() -> int:
-    """Return the port for this simulation node (default 8000)."""
+    """Return the port for this simulation node (default 4000)."""
     return int(os.getenv("SIM_PORT", "4000"))
 
 

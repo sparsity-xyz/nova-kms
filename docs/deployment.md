@@ -248,9 +248,18 @@ Operators are managed by NovaAppRegistry. To remove an operator, stop or deregis
 ### Transfer Admin
 
 ```bash
+# KMSRegistry uses Ownable2StepUpgradeable (UUPS). Ownership transfer is two-step.
+
+# 1) Current owner nominates the new owner
 cast send <KMS_REGISTRY_ADDRESS> \
-  "setAdmin(address)" <NEW_ADMIN> \
-  --private-key <CURRENT_ADMIN_KEY> \
+  "transferOwnership(address)" <NEW_OWNER> \
+  --private-key <CURRENT_OWNER_KEY> \
+  --rpc-url https://sepolia.base.org
+
+# 2) New owner accepts
+cast send <KMS_REGISTRY_ADDRESS> \
+  "acceptOwnership()" \
+  --private-key <NEW_OWNER_KEY> \
   --rpc-url https://sepolia.base.org
 ```
 

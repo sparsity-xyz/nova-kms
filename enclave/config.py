@@ -1,7 +1,12 @@
-"""
+"""enclave/config.py
+
 Centralized configuration for the Nova KMS enclave application.
 
-Edit these constants directly. Environment variables are NOT used in the Enclave environment.
+Production deployments typically bake these values into the enclave image.
+
+For local development and simulation, a small set of values (notably
+`IN_ENCLAVE`) may be overridden via environment variables by the helper
+scripts under `scripts/`.
 """
 
 from __future__ import annotations
@@ -12,8 +17,17 @@ import os
 # Environment Detection
 # =============================================================================
 
-# Hardcoded to True for Nitro Enclave environment
-IN_ENCLAVE: bool = True
+# Treat Nitro Enclave as the safe default.
+#
+# Local simulation scripts override this with `IN_ENCLAVE=false` so that
+# simulation mode can be enabled (see simulation.is_simulation_mode()).
+_in_enclave_env = os.getenv("IN_ENCLAVE", "").strip().lower()
+if _in_enclave_env in ("1", "true", "yes"):
+    IN_ENCLAVE: bool = True
+elif _in_enclave_env in ("0", "false", "no"):
+    IN_ENCLAVE = False
+else:
+    IN_ENCLAVE = True
 
 # =============================================================================
 # Chain / RPC

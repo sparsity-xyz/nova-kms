@@ -54,8 +54,8 @@ class TestSimKMSRegistryClient:
     @pytest.fixture()
     def peers(self):
         return [
-            SimPeer(tee_wallet="0xA1", node_url="http://localhost:8000"),
-            SimPeer(tee_wallet="0xB2", node_url="http://localhost:8001"),
+            SimPeer(tee_wallet="0xA1", node_url="http://localhost:4000"),
+            SimPeer(tee_wallet="0xB2", node_url="http://localhost:4001"),
         ]
 
     @pytest.fixture()
@@ -107,8 +107,8 @@ class TestSimNovaRegistry:
     @pytest.fixture()
     def peers(self):
         return [
-            SimPeer(tee_wallet="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", node_url="http://localhost:8000"),
-            SimPeer(tee_wallet="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", node_url="http://localhost:8001"),
+            SimPeer(tee_wallet="0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", node_url="http://localhost:4000"),
+            SimPeer(tee_wallet="0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", node_url="http://localhost:4001"),
         ]
 
     @pytest.fixture()

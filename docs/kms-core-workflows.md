@@ -151,8 +151,13 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
     - `X-KMS-Nonce`: the base64 nonce string returned by `/nonce`
     - `X-KMS-Timestamp`: unix epoch seconds (integer)
     - `X-KMS-Wallet`: optional hint (server recovers wallet from signature)
+    - `X-Sync-Signature`: hex HMAC-SHA256 of the canonical JSON body (required once the cluster sync key is initialized)
 - Node B → Node A response:
     - `X-KMS-Peer-Signature`: $Sig_B$ where $Sig_B$ signs `NovaKMS:Response:<Sig_A>:<Wallet_B>`
+
+> Notes:
+> - Header names are case-insensitive; examples use `X-*` for readability.
+> - `X-Sync-Signature` defends against cross-operator amplification and accidental/buggy peers once nodes share a master secret.
 
 ### Diagram: Inter-Node Mutual PoP
 ```mermaid

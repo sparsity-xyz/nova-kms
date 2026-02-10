@@ -7,20 +7,41 @@ Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro 
 | Feature | Description |
 |---------|-------------|
 | **Key Derivation (KDF)** | HKDF-SHA256 from a shared cluster master secret, partitioned by app ID |
-
-| **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction |
+| **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction; values are stored encrypted-at-rest (AES-GCM) |
 | **Distributed Sync** | Delta + snapshot sync across KMS nodes (eventual consistency, LWW) |
 | **PoP Auth** | Proof-of-Possession signatures; app identity verified via NovaAppRegistry |
 | **On-Chain Membership** | KMSRegistry contract tracks nodes; client probes determine health |
 
 ## Architecture
 
+```mermaid
+graph LR
+  subgraph Apps["Nova Apps"]
+    A1["App Instance (TEE wallet)"]
+  end
+
+  subgraph KMS["Nova KMS Cluster (Nitro Enclave)"]
+    N1["KMS Node"]
+    N2["KMS Node"]
+  end
+
+  subgraph Chain["Blockchain"]
+    R["NovaAppRegistry\n(app → version → instance)"]
+    K["KMSRegistry\n(operator set)"]
+  end
+
+  A1 -->|"PoP-signed requests"| N1
+  N1 <-->|"PoP + HMAC sync"| N2
+  N1 -->|"Read-only eth_call (finalized)"| R
+  N1 -->|"Read-only eth_call (finalized)"| K
+  R -->|"addOperator/removeOperator callbacks"| K
 ```
-Nova Apps ──PoP Sig──▶ KMS Cluster ──sync──▶ KMS Cluster
-                         │                      │
-                    KMSRegistry ◀──── NovaAppRegistry
-                    (membership)       (app identity)
-```
+
+Key points:
+- **Read-only on-chain access**: KMS nodes do not submit transactions; they only query `NovaAppRegistry` and `KMSRegistry`.
+- **App identity is derived, not trusted**: the KMS maps the caller's PoP-recovered TEE wallet to `appId` via `NovaAppRegistry`.
+- **Cluster secret + per-app derivation**: keys are derived from a shared master secret; KV values are stored encrypted-at-rest using a per-app data key.
+- **Two modes**: production runs inside an enclave; simulation mode is for local development and cannot run when `IN_ENCLAVE=true`.
 
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
@@ -38,11 +59,11 @@ pip install -r enclave/requirements.txt
 
 # 3. Run
 make simulation
-# Server at http://localhost:8000
+# Server at http://localhost:4000
 
 # 4. Test
-curl http://localhost:8000/health
-curl http://localhost:8000/status
+curl http://localhost:4000/health
+curl http://localhost:4000/status
 ```
 
 ### Run Tests
@@ -79,9 +100,8 @@ make set-app-id
 | `/health` | GET | None | Health check |
 | `/status` | GET | None | Node + cluster status |
 | `/nonce` | GET | None | Issue one-time PoP nonce |
-| `/nodes` | GET | None | Paginated KMS node list |
+| `/nodes` | GET | None | List KMS operators |
 | `/kms/derive` | POST | App PoP | Derive application key |
-
 | `/kms/data` | GET/PUT/DELETE | App PoP | App-scoped KV store |
 | `/sync` | POST | Peer PoP + HMAC | Inter-node synchronization |
 

@@ -369,8 +369,8 @@ Operational risk:
 
 ## Mismatches / doc bugs
 
-- [docs/deployment.md](deployment.md) suggests `setAdmin(address)` for emergency operations; contract uses Ownable2Step (`transferOwnership` + `acceptOwnership`) and has no `setAdmin`.
-- README describes `/nodes` as paginated; implementation returns the full operator list without pagination.
+- (Resolved) [docs/deployment.md](deployment.md) now uses Ownable2Step (`transferOwnership` + `acceptOwnership`) and does not reference `setAdmin`.
+- (Resolved) README no longer describes `/nodes` as paginated.
 
 ---
 

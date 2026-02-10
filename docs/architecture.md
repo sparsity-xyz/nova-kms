@@ -43,7 +43,7 @@ graph TB
 
 ### 1.1 KMS Enclave Application
 
-A Python/Flask application running inside AWS Nitro Enclave, packaged and deployed on the Nova Platform. It serves other Nova apps and enforces access control using on-chain app registration data.
+A Python/FastAPI application running inside AWS Nitro Enclave, packaged and deployed on the Nova Platform. It serves other Nova apps and enforces access control using on-chain app registration data.
 
 **Core Features:**
 
@@ -51,7 +51,6 @@ A Python/Flask application running inside AWS Nitro Enclave, packaged and deploy
 |---------|-------------|
 | In-memory KV Store | `dict[AppId, dict]` - partitioned by application identity, **non-persistent** |
 | **Key Derivation (KDF)** | Derive application-specific keys from cluster-wide master secret |
-
 | Request Verification | Verify App identity via NovaAppRegistry (App -> Version -> Instance) |
 | Authentication | PoP signatures bound to on-chain identities |
 | Health Probing | Client-side probes determine liveness |
@@ -266,7 +265,6 @@ See [KMS Core Workflows & Security Architecture - Section 4: Inter-Node Mutual A
 | `/status` | GET | KMS node + cluster view | None |
 | `/nonce` | GET | Issue one-time PoP nonce | None |
 | `/kms/derive` | POST | **Derive application key** (KDF) | App PoP + NovaAppRegistry verification |
-
 | `/kms/data` | GET/PUT/DELETE | KV data operations | App PoP + NovaAppRegistry verification |
 | `/sync` | POST | Receive sync event from other KMS nodes | KMS peer PoP + KMSRegistry operator verification |
 | `/nodes` | GET | Get list of KMS operators | None |
@@ -397,9 +395,7 @@ class DataRecord:
 - **Non-persistent**: no filesystem writes; no local database.
 - **Rehydration**: on startup, node performs sync and/or snapshot to rebuild state.
 - **Limits**: per-app size quota + LRU eviction; TTL expiration for stale records.
-- **Security**: current implementation keeps values in plaintext within enclave
-  memory. A helper `derive_data_key(master_secret, app_id, "data_key")` exists
-  for future in-memory encryption, but is not yet wired into the data path.
+- **Security**: values are stored encrypted-at-rest using a per-app data key (AES-GCM). In production (`IN_ENCLAVE=true`), plaintext fallback is disabled; in dev/simulation, plaintext fallback may be enabled for convenience.
 
 ---
 
@@ -469,9 +465,9 @@ See [KMS Core Workflows & Security Architecture - Section 1: KMS Registry Deploy
 
 ---
 
-## Next Steps
+## Implementation Status
 
-1. Implement KMSRegistry smart contract
-2. Implement KMS enclave application core logic (PoP auth + KDF)
-3. Implement data synchronization protocol with PoP-secured requests
-4. Deploy to test environment for verification
+This document describes the architecture of the current implementation. For operational details and security workflows, see:
+- [KMS Core Workflows & Security Architecture](./kms-core-workflows.md)
+- [Development](./development.md)
+- [Testing](./testing.md)

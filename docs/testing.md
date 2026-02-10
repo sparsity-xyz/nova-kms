@@ -39,11 +39,18 @@ pip install pytest httpx
 
 | File | Module Under Test | Coverage |
 |------|-------------------|----------|
-| `test_data_store.py` | `data_store.py` | VectorClock, DataRecord, DataStore CRUD, merge, snapshot |
-| `test_kdf.py` | `kdf.py` | HKDF derivation, MasterSecretManager |
-| `test_auth.py` | `auth.py` | AppAuthorizer (auth/authorization paths), dev header identity |
-| `test_sync.py` | `sync_manager.py` | SyncManager delta/snapshot handling, PeerCache |
+| `test_auth.py` | `auth.py` | PoP helpers, nonce store, AppAuthorizer, dev header identity |
+| `test_data_store.py` | `data_store.py` | CRUD, namespace isolation, merge, deltas, snapshots, TTL/LRU |
+| `test_encryption.py` | `data_store.py` | AES-GCM at-rest behavior and fail-closed semantics |
+| `test_integration_pop.py` | routes + auth | End-to-end PoP flows through the API |
+| `test_kdf.py` | `kdf.py` | HKDF derivation, master secret lifecycle, sealed exchange helpers |
+| `test_kms_registry.py` | `kms_registry.py` | ABI alignment and read-only registry views |
+| `test_nova_registry.py` | `nova_registry.py` | Registry reads and cache behavior |
+| `test_registry_abi.py` | ABI helpers | Selector/type alignment with artifacts (when present) |
 | `test_routes.py` | `routes.py` + `app.py` | Full API integration via FastAPI TestClient |
+| `test_security.py` | helpers | SSRF URL validation, rate limiting, finalized eth_call behavior |
+| `test_simulation.py` | `simulation.py` | Simulation-mode bootstrapping and safety guardrails |
+| `test_sync.py` | `sync_manager.py` | PeerCache, delta/snapshot sync, mutual PoP + HMAC verification |
 
 ### Running Tests
 
@@ -124,7 +131,7 @@ assert resp.status_code == 200
 #### Routes (Integration)
 - `/health` → 200
 - `/status` → node and cluster info
-- `/nodes` → paginated list
+- `/nodes` → operator list
 - `/kms/derive` → returns base64 key
 - `/kms/data` PUT + GET → round-trip
 - `/kms/data` DELETE → removes key

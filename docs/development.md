@@ -47,11 +47,17 @@ nova-kms/
 │   ├── run_dev.sh                # Single-node simulation launcher
 │   └── run_multi_node.sh         # Multi-node simulation launcher
 ├── tests/                        # Python unit & integration tests
-│   ├── test_simulation.py        # Simulation mode tests (45 tests)
 │   ├── test_auth.py
 │   ├── test_data_store.py
+│   ├── test_encryption.py
+│   ├── test_integration_pop.py
 │   ├── test_kdf.py
+│   ├── test_kms_registry.py
+│   ├── test_nova_registry.py
+│   ├── test_registry_abi.py
 │   ├── test_routes.py
+│   ├── test_security.py
+│   ├── test_simulation.py
 │   └── test_sync.py
 ├── docs/
 │   ├── architecture.md           # Design document
@@ -146,7 +152,7 @@ Simulation mode lets you run one or more KMS nodes locally **without any blockch
 make simulation
 ```
 
-The server starts on `http://localhost:8000` with:
+The server starts on `http://localhost:4000` with:
 - 3 default simulated peers (deterministic wallets derived from seeds)
 - Deterministic master secret (`SHA256("nova-kms-simulation-master-secret")`)
 - Open auth mode: any `x-tee-wallet` header is accepted
@@ -162,9 +168,9 @@ make stop-simulation
 Or manually:
 
 ```bash
-SIMULATION_MODE=1 SIM_NODE_INDEX=0 python app.py &  # port 8000
-SIMULATION_MODE=1 SIM_NODE_INDEX=1 SIM_PORT=8001 python app.py &  # port 8001
-SIMULATION_MODE=1 SIM_NODE_INDEX=2 SIM_PORT=8002 python app.py &  # port 8002
+SIMULATION_MODE=1 SIM_NODE_INDEX=0 SIM_PORT=4000 python app.py &
+SIMULATION_MODE=1 SIM_NODE_INDEX=1 SIM_PORT=4001 python app.py &
+SIMULATION_MODE=1 SIM_NODE_INDEX=2 SIM_PORT=4002 python app.py &
 ```
 
 ### How It Works
@@ -186,7 +192,7 @@ The toggle is controlled by `SIMULATION_MODE` environment variable (takes preced
 |----------|-------------|---------|
 | `SIMULATION_MODE` | Enable simulation mode (`1`, `true`, `yes`) | off |
 | `SIM_NODE_INDEX` | Index in peer list for this node's identity | `0` |
-| `SIM_PORT` | Override the listening port | `8000` |
+| `SIM_PORT` | Override the listening port | `4000` |
 | `SIM_PEERS_CSV` | Override peer list: `wallet\|url,wallet\|url,...` | use defaults |
 | `SIM_MASTER_SECRET` | Hex-encoded 32-byte master secret | deterministic |
 
@@ -207,19 +213,19 @@ SIM_MASTER_SECRET_HEX: str  # Hex-encoded master secret override
 SIMULATION_MODE=1 SIM_NODE_INDEX=0 python enclave/app.py
 
 # Terminal 2: Derive a key
-curl -X POST http://localhost:8000/kms/derive \
+curl -X POST http://localhost:4000/kms/derive \
   -H "Content-Type: application/json" \
   -H "x-tee-wallet: 0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
   -d '{"path": "app/secrets/api_key"}'
 
 # Terminal 2: Store data
-curl -X PUT http://localhost:8000/kms/data \
+curl -X PUT http://localhost:4000/kms/data \
   -H "Content-Type: application/json" \
   -H "x-tee-wallet: 0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
   -d '{"key": "config", "value": "eyJrZXkiOiAidmFsdWUifQ=="}'
 
 # Terminal 2: Read data
-curl http://localhost:8000/kms/data/config \
+curl http://localhost:4000/kms/data/config \
   -H "x-tee-wallet: 0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 ```
 
@@ -323,13 +329,15 @@ Per-app namespace isolation. LRU eviction when quota exceeded.
 
 ## Environment Variables
 
+> Note: simulation mode is guarded by `IN_ENCLAVE`. For local development, the
+> helper scripts set `IN_ENCLAVE=false` so `SIMULATION_MODE=1` is allowed.
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `IN_ENCLAVE` | Whether running inside Nitro Enclave | `False` |
 | `NODE_URL` | Public URL of this KMS node | (empty) |
 | `CORS_ORIGINS` | Allowed CORS origins | `*` |
 | `SIMULATION_MODE` | Enable simulation mode (`1`/`true`/`yes`) | off |
 | `SIM_NODE_INDEX` | Peer index for this node's identity | `0` |
-| `SIM_PORT` | Override listening port in sim mode | `8000` |
+| `SIM_PORT` | Override listening port in sim mode | `4000` |
 | `SIM_PEERS_CSV` | Peer list override: `wallet\|url,wallet\|url` | default 3 peers |
 | `SIM_MASTER_SECRET` | Hex-encoded 32-byte master secret | deterministic |
