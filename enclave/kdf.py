@@ -25,23 +25,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.x509 import (
-    CertificateBuilder,
-    CertificateSigningRequest,
-    Name,
-    NameAttribute,
-    load_pem_x509_csr,
-    random_serial_number,
-)
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-from cryptography import x509
-import datetime
+
 
 logger = logging.getLogger("nova-kms.kdf")
 
-# The order of the SECP256R1 curve (number of points on the curve).
-# Used to ensure derived EC private key scalars are valid.
-_SECP256R1_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
 
 
 # =============================================================================
@@ -260,94 +248,3 @@ def unseal_master_secret(sealed: dict, my_private_key: ec.EllipticCurvePrivateKe
     return master_secret, epoch
 
 
-# =============================================================================
-# CA / Certificate Signing
-# =============================================================================
-
-class CertificateAuthority:
-    """
-    Lightweight CA that issues X.509 certificates signed by a KMS-derived
-    EC private key.  The CA key is derived from the master secret so all
-    KMS nodes produce identical certificates for the same input.
-    """
-
-    def __init__(self, master_secret_mgr: MasterSecretManager):
-        self._mgr = master_secret_mgr
-        self._ca_key: Optional[ec.EllipticCurvePrivateKey] = None
-        self._ca_cert: Optional[x509.Certificate] = None
-
-    def _ensure_ca(self):
-        """Lazily derive the CA key pair from master secret."""
-        if self._ca_key is not None:
-            return
-        seed = derive_app_key(self._mgr.secret, 0, "kms_ca_root", length=32)
-
-        # Derive a valid EC private key scalar in [1, n-1] where n is the
-        # SECP256R1 curve order.  Raw int.from_bytes could exceed n or be 0,
-        # so we reduce modulo (n - 1) and add 1 to ensure the result is in
-        # the valid range [1, n-1].
-        raw_int = int.from_bytes(seed, "big")
-        private_scalar = (raw_int % (_SECP256R1_ORDER - 1)) + 1
-
-        self._ca_key = ec.derive_private_key(private_scalar, ec.SECP256R1())
-
-        # Self-signed CA cert
-        subject = issuer = Name([
-            NameAttribute(NameOID.ORGANIZATION_NAME, "Nova KMS"),
-            NameAttribute(NameOID.COMMON_NAME, "Nova KMS CA"),
-        ])
-        now = datetime.datetime.now(datetime.timezone.utc)
-        self._ca_cert = (
-            CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(self._ca_key.public_key())
-            .serial_number(random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + datetime.timedelta(days=3650))
-            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-            .sign(self._ca_key, hashes.SHA256())
-        )
-
-    def sign_csr(self, csr_pem: bytes, validity_days: int = 365) -> bytes:
-        """
-        Sign a PEM-encoded CSR and return the issued certificate as PEM.
-
-        Parameters
-        ----------
-        csr_pem : bytes
-            PEM-encoded Certificate Signing Request.
-        validity_days : int
-            Certificate validity period in days.
-
-        Returns
-        -------
-        bytes
-            PEM-encoded signed certificate.
-        """
-        self._ensure_ca()
-        csr = load_pem_x509_csr(csr_pem)
-        if not csr.is_signature_valid:
-            raise ValueError("CSR signature is invalid")
-
-        now = datetime.datetime.now(datetime.timezone.utc)
-        cert = (
-            CertificateBuilder()
-            .subject_name(csr.subject)
-            .issuer_name(self._ca_cert.subject)
-            .public_key(csr.public_key())
-            .serial_number(random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + datetime.timedelta(days=validity_days))
-            .add_extension(
-                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
-                critical=False,
-            )
-            .sign(self._ca_key, hashes.SHA256())
-        )
-        return cert.public_bytes(serialization.Encoding.PEM)
-
-    def get_ca_cert_pem(self) -> bytes:
-        """Return the self-signed CA certificate as PEM."""
-        self._ensure_ca()
-        return self._ca_cert.public_bytes(serialization.Encoding.PEM)

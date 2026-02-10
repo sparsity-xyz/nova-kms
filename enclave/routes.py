@@ -10,7 +10,7 @@ Endpoints (see architecture.md §3):
     /status          GET   – node + cluster status (no auth)
     /nodes           GET   – list KMS operators (no auth)
     /kms/derive      POST  – derive application key (App PoP + App Registry)
-    /kms/sign_cert   POST  – sign CSR with KMS CA  (App PoP + App Registry)
+
     /kms/data        GET   – read KV data           (App PoP + App Registry)
     /kms/data        PUT   – write KV data          (App PoP + App Registry)
     /kms/data        DELETE– delete KV data          (App PoP + App Registry)
@@ -37,7 +37,7 @@ from rate_limiter import TokenBucket
 if TYPE_CHECKING:
     from auth import AppAuthorizer
     from data_store import DataStore
-    from kdf import CertificateAuthority, MasterSecretManager
+    from kdf import MasterSecretManager
     from kms_registry import KMSRegistryClient
     from odyn import Odyn
     from sync_manager import SyncManager
@@ -51,7 +51,7 @@ logger = logging.getLogger("nova-kms.routes")
 _odyn: Optional["Odyn"] = None
 _data_store: Optional["DataStore"] = None
 _master_secret_mgr: Optional["MasterSecretManager"] = None
-_ca: Optional["CertificateAuthority"] = None
+
 _authorizer: Optional["AppAuthorizer"] = None
 _kms_registry: Optional["KMSRegistryClient"] = None
 _sync_manager: Optional["SyncManager"] = None
@@ -63,18 +63,17 @@ def init(
     odyn,
     data_store,
     master_secret_mgr,
-    ca,
+
     authorizer,
     kms_registry,
     sync_manager,
     node_info: dict,
 ):
-    global _odyn, _data_store, _master_secret_mgr, _ca
+    global _odyn, _data_store, _master_secret_mgr
     global _authorizer, _kms_registry, _sync_manager, _node_info
     _odyn = odyn
     _data_store = data_store
     _master_secret_mgr = master_secret_mgr
-    _ca = ca
     _authorizer = authorizer
     _kms_registry = kms_registry
     _sync_manager = sync_manager
@@ -101,9 +100,6 @@ class DeriveRequest(BaseModel):
     length: int = 32
 
 
-class SignCertRequest(BaseModel):
-    csr: str  # Base64-encoded PEM
-    validity_days: int = 365
 
 
 class DataPutRequest(BaseModel):
@@ -268,32 +264,6 @@ def derive_key(body: DeriveRequest, request: Request, response: Response):
     }
 
 
-# =============================================================================
-# /kms/sign_cert  (CA)
-# =============================================================================
-
-@router.post("/kms/sign_cert")
-def sign_cert(body: SignCertRequest, request: Request, response: Response):
-    """Sign a CSR with the KMS CA."""
-    auth_info = _authorize_app(request)
-    _add_mutual_signature(response, auth_info.get("client_sig"))
-
-    if not _ca:
-        raise HTTPException(status_code=503, detail="CA not available")
-
-    try:
-        csr_pem = base64.b64decode(body.csr)
-        cert_pem = _ca.sign_csr(csr_pem, validity_days=body.validity_days)
-        ca_cert_pem = _ca.get_ca_cert_pem()
-        return {
-            "certificate": base64.b64encode(cert_pem).decode(),
-            "ca_certificate": base64.b64encode(ca_cert_pem).decode(),
-        }
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as exc:
-        logger.error(f"CSR signing failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # =============================================================================

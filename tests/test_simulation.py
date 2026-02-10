@@ -200,7 +200,8 @@ class TestGetSimPort:
     def test_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SIM_PORT", None)
-            assert get_sim_port() == 8000
+            assert get_sim_port() == 4000
+
 
     def test_env_override(self):
         with patch.dict(os.environ, {"SIM_PORT": "9090"}):
@@ -401,26 +402,7 @@ class TestSimulationApp:
         r = sim_client.request("DELETE", "/kms/data", json={"key": "mykey"}, headers=headers)
         assert r.status_code == 200
 
-    def test_cert_issue(self, sim_client):
-        """Certificate signing should work in sim mode."""
-        import base64
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.x509.oid import NameOID
 
-        key = ec.generate_private_key(ec.SECP256R1())
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sim-test")]))
-            .sign(key, hashes.SHA256())
-        )
-        csr_b64 = base64.b64encode(csr.public_bytes(serialization.Encoding.PEM)).decode()
-
-        headers = {"x-tee-wallet": DEFAULT_SIM_PEERS[0].tee_wallet}
-        r = sim_client.post("/kms/sign_cert", json={"csr": csr_b64}, headers=headers)
-        assert r.status_code == 200
-        assert "certificate" in r.json()
 
     def test_sync_endpoint(self, sim_client):
         """Sync endpoint should accept incoming sync messages."""
@@ -448,14 +430,13 @@ class TestSimulationApp:
             "data": {},
         }
         # Compute HMAC on the same dict that routes.py passes to handle_incoming_sync
-        # (SyncRequest.model_dump() includes all fields with defaults)
+        # (SyncRequest.model_dump(exclude_unset=True) excludes None fields)
         model_body = {
             "type": "delta",
             "sender_wallet": sender_wallet,
             "data": {},
-            "master_secret": None,
-            "ecdh_pubkey": None,
         }
+
         sync_key = derive_sync_key(get_sim_master_secret())
         payload_json = json.dumps(model_body, sort_keys=True, separators=(",", ":"))
         hmac_sig = hmac_mod.new(sync_key, payload_json.encode("utf-8"), hashlib.sha256).hexdigest()

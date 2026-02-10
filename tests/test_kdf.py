@@ -4,7 +4,7 @@ Tests for kdf.py — Key Derivation and Certificate Authority.
 
 import pytest
 
-from kdf import CertificateAuthority, MasterSecretManager, derive_app_key, derive_data_key
+from kdf import MasterSecretManager, derive_app_key, derive_data_key
 
 
 class TestDeriveAppKey:
@@ -72,58 +72,4 @@ class TestMasterSecretManager:
         assert len(key) == 32
 
 
-class TestCertificateAuthority:
-    def _make_csr(self) -> bytes:
-        """Generate a self-signed CSR for testing."""
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.x509 import CertificateSigningRequestBuilder, Name, NameAttribute
-        from cryptography.x509.oid import NameOID
 
-        key = ec.generate_private_key(ec.SECP256R1())
-        csr = (
-            CertificateSigningRequestBuilder()
-            .subject_name(Name([NameAttribute(NameOID.COMMON_NAME, "test.app")]))
-            .sign(key, hashes.SHA256())
-        )
-        from cryptography.hazmat.primitives.serialization import Encoding
-        return csr.public_bytes(Encoding.PEM)
-
-    def test_sign_csr(self):
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\xcc" * 32)
-        ca = CertificateAuthority(mgr)
-
-        csr_pem = self._make_csr()
-        cert_pem = ca.sign_csr(csr_pem)
-        assert b"BEGIN CERTIFICATE" in cert_pem
-
-    def test_ca_cert(self):
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\xdd" * 32)
-        ca = CertificateAuthority(mgr)
-
-        ca_pem = ca.get_ca_cert_pem()
-        assert b"BEGIN CERTIFICATE" in ca_pem
-
-    def test_deterministic_ca(self):
-        """Two CAs created with the same secret produce the same CA cert."""
-        secret = b"\xee" * 32
-
-        mgr1 = MasterSecretManager()
-        mgr1.initialize_from_peer(secret)
-        ca1 = CertificateAuthority(mgr1)
-
-        mgr2 = MasterSecretManager()
-        mgr2.initialize_from_peer(secret)
-        ca2 = CertificateAuthority(mgr2)
-
-        # CA public keys should be identical (derived from same secret)
-        from cryptography.x509 import load_pem_x509_certificate
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
-        cert1 = load_pem_x509_certificate(ca1.get_ca_cert_pem())
-        cert2 = load_pem_x509_certificate(ca2.get_ca_cert_pem())
-        pub1 = cert1.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        pub2 = cert2.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        assert pub1 == pub2

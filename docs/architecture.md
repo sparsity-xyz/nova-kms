@@ -51,7 +51,7 @@ A Python/Flask application running inside AWS Nitro Enclave, packaged and deploy
 |---------|-------------|
 | In-memory KV Store | `dict[AppId, dict]` - partitioned by application identity, **non-persistent** |
 | **Key Derivation (KDF)** | Derive application-specific keys from cluster-wide master secret |
-| **CA / Cert Signing** | Issue TLS certificates for apps rooted in KMS trust anchor |
+
 | Request Verification | Verify App identity via NovaAppRegistry (App -> Version -> Instance) |
 | Authentication | PoP signatures bound to on-chain identities |
 | Health Probing | Client-side probes determine liveness |
@@ -266,7 +266,7 @@ See [KMS Core Workflows & Security Architecture - Section 4: Inter-Node Mutual A
 | `/status` | GET | KMS node + cluster view | None |
 | `/nonce` | GET | Issue one-time PoP nonce | None |
 | `/kms/derive` | POST | **Derive application key** (KDF) | App PoP + NovaAppRegistry verification |
-| `/kms/sign_cert`| POST | **Sign certificate** (CA) | App PoP + NovaAppRegistry verification |
+
 | `/kms/data` | GET/PUT/DELETE | KV data operations | App PoP + NovaAppRegistry verification |
 | `/sync` | POST | Receive sync event from other KMS nodes | KMS peer PoP + KMSRegistry operator verification |
 | `/nodes` | GET | Get list of KMS operators | None |
@@ -312,13 +312,7 @@ Payload format is simple JSON.
 }
 ```
 
-**POST /kms/sign_cert**
-```json
-{
-  "csr": "base64_encoded_csr",
-  "usage": "https_server"
-}
-```
+
 
 ### 3.4 Key Derivation (KDF) Implementation
 
@@ -423,11 +417,11 @@ class DataRecord:
 
 ### 5.2 Access Control Matrix (Instance Based)
 
-| Actor | Derive Key | GET/PUT Data | SIGN CERT | SYNC |
-|-------|-----|-----|--------|------|
-| Authorized App Instance (zkVerified + ACTIVE) | ✅ | ✅ | ✅ | ❌ |
-| Unregistered / Inactive Instance | ❌ | ❌ | ❌ | ❌ |
-| Registered KMS node | ❌ | ❌ | ❌ | ✅ |
+| Actor | Derive Key | GET/PUT Data | SYNC |
+|-------|-----|-----|------|
+| Authorized App Instance (zkVerified + ACTIVE) | ✅ | ✅ | ❌ |
+| Unregistered / Inactive Instance | ❌ | ❌ | ❌ |
+| Registered KMS node | ❌ | ❌ | ✅ |
 
 ### 5.3 Sync Request Verification
 

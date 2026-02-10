@@ -310,7 +310,7 @@ use `NovaRegistry.get_instance_by_wallet(operator)`.
 
 ### `kdf.py` — Key Derivation
 Uses HKDF-SHA256. `MasterSecretManager` holds the cluster secret.
-`CertificateAuthority` signs CSRs using a CA key derived from the master secret.
+
 
 ### `data_store.py` — KV Store
 In-memory only. `VectorClock` for causal ordering. `DataRecord` with TTL and tombstone support.

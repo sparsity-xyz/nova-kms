@@ -40,7 +40,7 @@ pip install pytest httpx
 | File | Module Under Test | Coverage |
 |------|-------------------|----------|
 | `test_data_store.py` | `data_store.py` | VectorClock, DataRecord, DataStore CRUD, merge, snapshot |
-| `test_kdf.py` | `kdf.py` | HKDF derivation, MasterSecretManager, CertificateAuthority |
+| `test_kdf.py` | `kdf.py` | HKDF derivation, MasterSecretManager |
 | `test_auth.py` | `auth.py` | AppAuthorizer (auth/authorization paths), dev header identity |
 | `test_sync.py` | `sync_manager.py` | SyncManager delta/snapshot handling, PeerCache |
 | `test_routes.py` | `routes.py` + `app.py` | Full API integration via FastAPI TestClient |
@@ -101,7 +101,7 @@ assert resp.status_code == 200
 - Deterministic key derivation (same inputs → same key)
 - Different paths / app_ids / secrets → different keys
 - MasterSecretManager lifecycle (uninitialized → error, initialized → works)
-- CA certificate signing and determinism
+
 
 #### Auth
 - Full success path (ACTIVE instance + zkVerified + ACTIVE app + ENROLLED version)

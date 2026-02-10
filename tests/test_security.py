@@ -7,7 +7,7 @@ Covers:
   - Data store eviction bug fix
   - Data store clock skew rejection
   - KDF epoch rotation and sealed key exchange
-  - CA key derivation fix (scalar in valid range)
+  - KDF epoch rotation and sealed key exchange
   - Auth measurement enforcement in production mode
   - Sync manager HMAC signing
   - Simulation mode safety guard
@@ -338,39 +338,7 @@ class TestSealedKeyExchange:
 # =============================================================================
 
 
-class TestCAKeyDerivation:
-    def test_ca_key_scalar_valid_range(self):
-        """CA key derivation must produce a scalar in [1, n-1]."""
-        from kdf import CertificateAuthority, MasterSecretManager, _SECP256R1_ORDER
 
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\xff" * 32)
-        ca = CertificateAuthority(mgr)
-        ca._ensure_ca()
-
-        # The private key must be valid (no crash)
-        assert ca._ca_key is not None
-        # Get the private number
-        private_num = ca._ca_key.private_numbers().private_value
-        assert 1 <= private_num < _SECP256R1_ORDER
-
-    def test_deterministic_across_instances(self):
-        """Same secret → same CA public key across instances."""
-        from kdf import CertificateAuthority, MasterSecretManager
-        from cryptography.x509 import load_pem_x509_certificate
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
-        secret = b"\xab" * 32
-        ca1 = CertificateAuthority(MasterSecretManager())
-        ca1._mgr.initialize_from_peer(secret)
-        ca2 = CertificateAuthority(MasterSecretManager())
-        ca2._mgr.initialize_from_peer(secret)
-
-        cert1 = load_pem_x509_certificate(ca1.get_ca_cert_pem())
-        cert2 = load_pem_x509_certificate(ca2.get_ca_cert_pem())
-        pub1 = cert1.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        pub2 = cert2.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
-        assert pub1 == pub2
 
 
 # =============================================================================

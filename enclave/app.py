@@ -42,7 +42,7 @@ import config
 import routes
 from auth import AppAuthorizer
 from data_store import DataStore
-from kdf import CertificateAuthority, MasterSecretManager
+from kdf import MasterSecretManager
 from probe import find_healthy_peer
 from rate_limiter import RateLimitMiddleware
 from sync_manager import PeerCache, SyncManager
@@ -120,12 +120,12 @@ def _startup_simulation() -> dict:
         master_secret_mgr.initialize_from_peer(sim["master_secret"])
         logger.info("[SIM] Master secret initialized from simulation config")
 
-    ca = CertificateAuthority(master_secret_mgr)
+
 
     return {
         "odyn": odyn,
         "data_store": data_store,
-        "ca": ca,
+
         "authorizer": authorizer,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,
@@ -210,14 +210,14 @@ def _startup_production() -> dict:
     )
 
     # 7. CA & auth
-    ca = CertificateAuthority(master_secret_mgr)
+
     authorizer = AppAuthorizer(registry=nova_registry)
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
     return {
         "odyn": odyn,
         "data_store": data_store,
-        "ca": ca,
+
         "authorizer": authorizer,
         "kms_registry": kms_registry,
         "sync_manager": sync_manager,
@@ -259,7 +259,7 @@ async def lifespan(app: FastAPI):
         odyn=components.get("odyn"),
         data_store=components["data_store"],
         master_secret_mgr=master_secret_mgr,
-        ca=components["ca"],
+
         authorizer=components["authorizer"],
         kms_registry=components["kms_registry"],
         sync_manager=components["sync_manager"],

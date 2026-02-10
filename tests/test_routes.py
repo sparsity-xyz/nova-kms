@@ -43,7 +43,7 @@ def _setup_routes():
     import routes
     from auth import AppAuthorizer, AuthResult, ClientAttestation
     from data_store import DataStore
-    from kdf import CertificateAuthority, MasterSecretManager
+    from kdf import MasterSecretManager
     from sync_manager import SyncManager, PeerCache
 
     odyn = MagicMock()
@@ -54,7 +54,7 @@ def _setup_routes():
     mgr = MasterSecretManager()
     mgr.initialize_from_peer(b"\x01" * 32)
 
-    ca = CertificateAuthority(mgr)
+
 
     # Mock authorizer that always succeeds with app_id=42
     authorizer = MagicMock(spec=AppAuthorizer)
@@ -75,7 +75,7 @@ def _setup_routes():
         odyn=odyn,
         data_store=ds,
         master_secret_mgr=mgr,
-        ca=ca,
+
         authorizer=authorizer,
         kms_registry=kms_reg,
         sync_manager=sync_mgr,

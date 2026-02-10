@@ -7,7 +7,7 @@ Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro 
 | Feature | Description |
 |---------|-------------|
 | **Key Derivation (KDF)** | HKDF-SHA256 from a shared cluster master secret, partitioned by app ID |
-| **Certificate Authority** | Sign CSRs with a deterministic CA rooted in the master secret |
+
 | **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction |
 | **Distributed Sync** | Delta + snapshot sync across KMS nodes (eventual consistency, LWW) |
 | **PoP Auth** | Proof-of-Possession signatures; app identity verified via NovaAppRegistry |
@@ -81,7 +81,7 @@ make set-app-id
 | `/nonce` | GET | None | Issue one-time PoP nonce |
 | `/nodes` | GET | None | Paginated KMS node list |
 | `/kms/derive` | POST | App PoP | Derive application key |
-| `/kms/sign_cert` | POST | App PoP | Sign CSR with KMS CA |
+
 | `/kms/data` | GET/PUT/DELETE | App PoP | App-scoped KV store |
 | `/sync` | POST | Peer PoP + HMAC | Inter-node synchronization |
 
