@@ -35,7 +35,9 @@ def _make_client(
 
         mock_chain.eth_call_finalized.return_value = eth_call_return
         if decode_return is not None:
-            mock_contract.decode_function_result.return_value = decode_return
+            mock_fn = MagicMock()
+            mock_fn.decode_output.return_value = decode_return
+            mock_contract.get_function_by_name.return_value = mock_fn
 
         # Force fresh import
         if "kms_registry" in sys.modules:
@@ -79,7 +81,7 @@ class TestKMSRegistryInit:
 
 class TestCallUnwrap:
     def test_unwraps_single_return_value(self):
-        """decode_function_result returns (value,) for single-output funcs."""
+        """Single-output functions decode to a 1-tuple and should be unwrapped."""
         client, mock_contract, mock_chain = _make_client(decode_return=(42,))
         result = client._call("operatorCount", [])
         assert result == 42
@@ -97,7 +99,8 @@ class TestCallUnwrap:
         client._call("getOperators", [])
         mock_contract.encodeABI.assert_called_with(fn_name="getOperators", args=[])
         mock_chain.eth_call_finalized.assert_called_once()
-        mock_contract.decode_function_result.assert_called_once()
+        mock_contract.get_function_by_name.assert_called_with("getOperators")
+        mock_contract.get_function_by_name.return_value.decode_output.assert_called_once()
 
 
 # =============================================================================

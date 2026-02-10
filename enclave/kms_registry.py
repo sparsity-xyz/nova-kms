@@ -60,6 +60,29 @@ _KMS_REGISTRY_ABI = [
 ]
 
 
+def _abi_type_to_eth_abi_str(abi_item: dict) -> str:
+    abi_type = abi_item["type"]
+    if not abi_type.startswith("tuple"):
+        return abi_type
+
+    # Supports tuple and tuple[]
+    suffix = abi_type[len("tuple"):]
+    components = abi_item.get("components") or []
+    inner = ",".join(_abi_type_to_eth_abi_str(c) for c in components)
+    return f"({inner}){suffix}"
+
+
+def _decode_outputs(fn_abi: dict, raw_result: Any):
+    from eth_abi import decode as abi_decode
+    from hexbytes import HexBytes
+
+    outputs = fn_abi.get("outputs") or []
+    if not outputs:
+        return tuple()
+    output_types = [_abi_type_to_eth_abi_str(o) for o in outputs]
+    return abi_decode(output_types, HexBytes(raw_result))
+
+
 # =============================================================================
 # Public API
 # =============================================================================
@@ -91,18 +114,23 @@ class KMSRegistryClient:
         """
         Execute a read-only registry call using eth_call_finalized via ABI.
         """
-        # 1. Encode calldata
-        calldata = self.contract.encodeABI(fn_name=fn_name, args=args)
+        # 1. Encode calldata (web3 7.x)
+        fn = self.contract.get_function_by_name(fn_name)(*args)
+        calldata = fn._encode_transaction_data()
         
         # 2. Perform finalized call (raw bytes)
         raw_result = self.chain.eth_call_finalized(self.address, calldata)
 
-        # 3. Decode result
-        decoded = self.contract.decode_function_result(fn_name, raw_result)
+        # 3. Decode result (web3 7.x: decode via ABI)
+        decoded = _decode_outputs(getattr(fn, "abi", {}), raw_result)
         
         # Unwrap single return values
         if isinstance(decoded, (list, tuple)) and len(decoded) == 1:
-            return decoded[0]
+            value = decoded[0]
+            outputs = (getattr(fn, "abi", {}) or {}).get("outputs") or []
+            if outputs and outputs[0].get("type", "").endswith("[]") and isinstance(value, tuple):
+                return list(value)
+            return value
         return decoded
 
     # ------------------------------------------------------------------

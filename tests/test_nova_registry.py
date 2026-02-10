@@ -39,6 +39,8 @@ def _make_registry():
     reg.chain.eth_call_finalized.return_value = b"\x00"
     reg.contract = MagicMock()
     reg.contract.encodeABI.return_value = "0xdeadbeef"
+    # Registry wrappers decode outputs via the function ABI (web3 7.x)
+    reg.contract.get_function_by_name.return_value.decode_output.return_value = (None,)
     return reg
 
 
@@ -95,7 +97,7 @@ class TestCallUnwrap:
         """Regression: _call correctly unwraps 1-tuple from web3.py."""
         reg = _make_registry()
         mock_struct = (1, 2, 3)
-        reg.contract.decode_function_result.return_value = (mock_struct,)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (mock_struct,)
 
         out = reg._call("getApp", [123])
         assert out == mock_struct
@@ -104,13 +106,13 @@ class TestCallUnwrap:
     def test_passes_through_multi_output(self):
         """Multi-value outputs should not be unwrapped."""
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = ("a", "b")
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = ("a", "b")
         out = reg._call("someFunc", [])
         assert out == ("a", "b")
 
     def test_encodes_and_calls_finalized(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (42,)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (42,)
         reg._call("func", [1, 2])
         reg.contract.encodeABI.assert_called_with(fn_name="func", args=[1, 2])
         reg.chain.eth_call_finalized.assert_called_once()
@@ -124,7 +126,7 @@ class TestCallUnwrap:
 class TestGetApp:
     def test_returns_app_dataclass(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_app_tuple(app_id=42),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_app_tuple(app_id=42),)
         app = reg.get_app(42)
         assert isinstance(app, App)
         assert app.app_id == 42
@@ -132,7 +134,7 @@ class TestGetApp:
 
     def test_revoked_status(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_app_tuple(status=2),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_app_tuple(status=2),)
         app = reg.get_app(1)
         assert app.status == AppStatus.REVOKED
 
@@ -140,7 +142,7 @@ class TestGetApp:
 class TestGetVersion:
     def test_returns_version_dataclass(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_version_tuple(version_id=3),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_version_tuple(version_id=3),)
         ver = reg.get_version(1, 3)
         assert isinstance(ver, AppVersion)
         assert ver.version_id == 3
@@ -149,7 +151,7 @@ class TestGetVersion:
 
     def test_deprecated_status(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_version_tuple(status=1),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_version_tuple(status=1),)
         ver = reg.get_version(1, 1)
         assert ver.status == VersionStatus.DEPRECATED
 
@@ -157,7 +159,7 @@ class TestGetVersion:
 class TestGetInstance:
     def test_returns_instance_dataclass(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_instance_tuple(instance_id=5, app_id=42),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(instance_id=5, app_id=42),)
         inst = reg.get_instance(5)
         assert isinstance(inst, RuntimeInstance)
         assert inst.instance_id == 5
@@ -167,7 +169,7 @@ class TestGetInstance:
 
     def test_stopped_instance(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_instance_tuple(status=1),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(status=1),)
         inst = reg.get_instance(1)
         assert inst.status == InstanceStatus.STOPPED
 
@@ -175,14 +177,14 @@ class TestGetInstance:
 class TestGetInstanceByWallet:
     def test_returns_instance(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_instance_tuple(instance_id=7),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(instance_id=7),)
         inst = reg.get_instance_by_wallet("0x" + "ee" * 20)
         assert inst.instance_id == 7
 
     def test_checksum_is_applied(self):
         """get_instance_by_wallet should checksum the address before ABI encoding."""
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = (_instance_tuple(),)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = (_instance_tuple(),)
         wallet_lower = "0x" + "aa" * 20
         reg.get_instance_by_wallet(wallet_lower)
         call_args = reg.contract.encodeABI.call_args
@@ -193,13 +195,13 @@ class TestGetInstanceByWallet:
 class TestGetInstancesForVersion:
     def test_returns_list_of_ids(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = ([10, 20, 30],)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = ([10, 20, 30],)
         ids = reg.get_instances_for_version(1, 1)
         assert ids == [10, 20, 30]
 
     def test_empty_list(self):
         reg = _make_registry()
-        reg.contract.decode_function_result.return_value = ([],)
+        reg.contract.get_function_by_name.return_value.decode_output.return_value = ([],)
         ids = reg.get_instances_for_version(1, 1)
         assert ids == []
 
