@@ -165,6 +165,42 @@ def _add_mutual_signature(response: Response, client_sig: Optional[str]):
 # /health
 # =============================================================================
 
+@router.get("/")
+def api_overview():
+    """Return a human-friendly API overview.
+
+    This endpoint is meant as a lightweight, machine-readable landing page.
+    """
+    return {
+        "service": "Nova KMS",
+        "docs": {
+            "openapi_json": "/openapi.json",
+            "swagger_ui": "/docs",
+            "redoc": "/redoc",
+        },
+        "auth": {
+            "app_pop_headers": [
+                "x-app-signature",
+                "x-app-nonce",
+                "x-app-timestamp",
+                "x-app-wallet (optional)",
+            ],
+            "dev_identity_headers": ["x-tee-wallet"],
+            "mutual_response_header": "X-KMS-Response-Signature (optional)",
+        },
+        "endpoints": [
+            {"method": "GET", "path": "/health", "auth": "none", "description": "Health check"},
+            {"method": "GET", "path": "/status", "auth": "none", "description": "Node + cluster status"},
+            {"method": "GET", "path": "/nonce", "auth": "none", "description": "Issue one-time PoP nonce"},
+            {"method": "GET", "path": "/nodes", "auth": "none", "description": "List KMS operators"},
+            {"method": "POST", "path": "/kms/derive", "auth": "app PoP", "description": "Derive per-app key"},
+            {"method": "GET", "path": "/kms/data/{key}", "auth": "app PoP", "description": "Read app-scoped KV"},
+            {"method": "PUT", "path": "/kms/data", "auth": "app PoP", "description": "Write app-scoped KV"},
+            {"method": "DELETE", "path": "/kms/data", "auth": "app PoP", "description": "Delete app-scoped KV"},
+            {"method": "POST", "path": "/sync", "auth": "peer PoP + HMAC", "description": "Inter-node sync"},
+        ],
+    }
+
 @router.get("/health")
 def health_check():
     return {"status": "healthy"}
@@ -213,6 +249,15 @@ def get_status():
             "tee_wallet": _node_info.get("tee_wallet"),
             "node_url": _node_info.get("node_url"),
             "is_operator": _node_info.get("is_operator", False),
+            "master_secret": (
+                {
+                    "state": getattr(_master_secret_mgr, "init_state", "uninitialized")
+                    if _master_secret_mgr and _master_secret_mgr.is_initialized
+                    else "uninitialized",
+                    "epoch": _master_secret_mgr.epoch if _master_secret_mgr and _master_secret_mgr.is_initialized else 0,
+                    "synced_from": getattr(_master_secret_mgr, "synced_from", None) if _master_secret_mgr else None,
+                }
+            ),
             "master_secret_initialized": _master_secret_mgr.is_initialized if _master_secret_mgr else False,
         },
         "cluster": cluster_info,
@@ -226,14 +271,64 @@ def get_status():
 
 @router.get("/nodes")
 def list_operators():
-    """List KMS operators from on-chain registry."""
+    """List KMS operators from on-chain registry with instance + connectivity info."""
     if not _kms_registry:
         raise HTTPException(status_code=503, detail="KMS registry not available")
+
+    # Use the same NovaRegistry instance that PeerCache uses.
+    nova_registry = None
+    if _sync_manager and getattr(_sync_manager, "peer_cache", None):
+        nova_registry = _sync_manager.peer_cache.nova_registry
+
+    def _probe(node_url: str, *, timeout: int = 2) -> dict:
+        import time as _time
+        import requests as _requests
+
+        if not node_url:
+            return {"connected": False, "probe_ms": None}
+        url = f"{node_url.rstrip('/')}/health"
+        start = _time.time()
+        try:
+            r = _requests.get(url, timeout=timeout)
+            return {"connected": r.status_code == 200, "probe_ms": int((_time.time() - start) * 1000)}
+        except Exception:
+            return {"connected": False, "probe_ms": int((_time.time() - start) * 1000)}
+
     try:
         operators = _kms_registry.get_operators()
+        enriched = []
+        for op in operators:
+            instance_info: dict = {}
+            if nova_registry:
+                try:
+                    inst = nova_registry.get_instance_by_wallet(op)
+                    status_val = getattr(inst.status, "value", inst.status)
+                    status_name = getattr(inst.status, "name", str(inst.status))
+                    instance_info = {
+                        "instance_id": inst.instance_id,
+                        "app_id": inst.app_id,
+                        "version_id": inst.version_id,
+                        "operator": inst.operator,
+                        "instance_url": inst.instance_url,
+                        "tee_wallet": inst.tee_wallet_address,
+                        "zk_verified": inst.zk_verified,
+                        "instance_status": {"value": status_val, "name": status_name},
+                        "registered_at": inst.registered_at,
+                    }
+                except Exception as exc:
+                    instance_info = {"error": str(exc)}
+
+            node_url = instance_info.get("instance_url", "")
+            probe = _probe(node_url)
+            enriched.append({
+                "operator": op,
+                "instance": instance_info,
+                "connection": probe,
+            })
+
         return {
-            "operators": operators,
-            "count": len(operators),
+            "operators": enriched,
+            "count": len(enriched),
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

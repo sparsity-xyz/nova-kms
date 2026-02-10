@@ -357,13 +357,13 @@ class SyncManager:
 
         if result and isinstance(result, dict):
             secret, epoch = unseal_master_secret(result, ecdh_key)
-            master_secret_mgr.initialize_from_peer(secret, epoch=epoch)
+            master_secret_mgr.initialize_from_peer(secret, epoch=epoch, peer_url=peer_url)
             self.request_snapshot(peer_url)
             logger.info(f"Master secret received via sealed ECDH from {peer_url}")
             return True
         elif result and isinstance(result, bytes):
             # Legacy plaintext fallback (dev/sim only)
-            master_secret_mgr.initialize_from_peer(result)
+            master_secret_mgr.initialize_from_peer(result, peer_url=peer_url)
             self.request_snapshot(peer_url)
             return True
 
@@ -670,8 +670,6 @@ class SyncManager:
 
         # 3. Add own signature to response if requested / for mutual auth
         if self.odyn and kms_pop:
-            p_wallet = kms_pop.get("wallet")
-            p_sig = kms_pop.get("signature")
             # Sign the client's signature to prove we processed this specific request
             resp_msg = f"NovaKMS:Response:{p_sig}:{self.node_wallet}"
             sig_res = self.odyn.sign_message(resp_msg)

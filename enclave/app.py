@@ -100,7 +100,8 @@ def _startup_simulation() -> dict:
 
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
+    # scheduler=False: the lifespan creates the single background scheduler
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
 
     # Master secret: try peers first, fall back to deterministic sim secret
     peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
@@ -111,9 +112,18 @@ def _startup_simulation() -> dict:
     )
     if healthy_peer:
         logger.info(f"[SIM] Requesting master secret from peer {healthy_peer['node_url']}")
-        secret = sync_manager.request_master_secret(healthy_peer["node_url"])
-        if secret:
-            master_secret_mgr.initialize_from_peer(secret)
+        result = sync_manager.request_master_secret(healthy_peer["node_url"])
+        if result:
+            if isinstance(result, dict):
+                # Sealed ECDH envelope — decrypt it
+                from cryptography.hazmat.primitives.asymmetric import ec as _ec
+                from cryptography.hazmat.primitives import serialization as _ser
+                from kdf import unseal_master_secret
+                ecdh_key = _ec.generate_private_key(_ec.SECP256R1())
+                secret, epoch = unseal_master_secret(result, ecdh_key)
+                master_secret_mgr.initialize_from_peer(secret, epoch=epoch, peer_url=healthy_peer["node_url"])
+            else:
+                master_secret_mgr.initialize_from_peer(result, peer_url=healthy_peer["node_url"])
             sync_manager.request_snapshot(healthy_peer["node_url"])
 
     if not master_secret_mgr.is_initialized:
@@ -199,7 +209,8 @@ def _startup_production() -> dict:
     # 5. Initialize data store & sync
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
+    # scheduler=False: the lifespan creates the single background scheduler
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
 
     # 6. Master secret: verify peers and sync (workflow steps 4.1–4.5)
     # Uses strict initialization logic with mutual PoP auth to prevent split-brain.

@@ -108,6 +108,17 @@ def client():
 
 
 class TestHealth:
+    def test_root_overview(self, client):
+        resp = client.get("/")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["service"] == "Nova KMS"
+        assert data["docs"]["openapi_json"] == "/openapi.json"
+        # Should advertise key endpoints
+        advertised = {(e["method"], e["path"]) for e in data["endpoints"]}
+        assert ("GET", "/health") in advertised
+        assert ("POST", "/kms/derive") in advertised
+
     def test_health(self, client):
         resp = client.get("/health")
         assert resp.status_code == 200
@@ -126,6 +137,7 @@ class TestHealth:
         data = resp.json()
         assert data["node"]["tee_wallet"] == "0xTestNode"
         assert data["node"]["master_secret_initialized"] is True
+        assert data["node"]["master_secret"]["state"] in ("generated", "synced")
 
 
 # =============================================================================
@@ -160,6 +172,10 @@ class TestNodes:
         data = resp.json()
         assert len(data["operators"]) == 2
         assert data["count"] == 2
+        item = data["operators"][0]
+        assert "operator" in item
+        assert "instance" in item
+        assert "connection" in item
 
 
 # =============================================================================

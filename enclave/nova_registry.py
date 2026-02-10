@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from web3 import Web3
 
-from chain import function_selector, encode_uint256, encode_address, get_chain
+from chain import get_chain
 from config import NOVA_APP_REGISTRY_ADDRESS, REGISTRY_CACHE_TTL_SECONDS
 
 logger = logging.getLogger("nova-kms.nova_registry")

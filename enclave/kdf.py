@@ -104,10 +104,25 @@ class MasterSecretManager:
     def __init__(self):
         self._secret: Optional[bytes] = None
         self._epoch: int = 0
+        self._init_state: str = "uninitialized"  # uninitialized | generated | synced
+        self._synced_from: Optional[str] = None
 
     @property
     def is_initialized(self) -> bool:
         return self._secret is not None
+
+    @property
+    def init_state(self) -> str:
+        """Return how the master secret was initialized.
+
+        Values: uninitialized | generated | synced
+        """
+        return self._init_state
+
+    @property
+    def synced_from(self) -> Optional[str]:
+        """If init_state==synced, optionally record which peer URL provided it."""
+        return self._synced_from
 
     @property
     def secret(self) -> bytes:
@@ -127,15 +142,22 @@ class MasterSecretManager:
             self._secret += odyn.get_random_bytes()
         self._secret = self._secret[:32]
         self._epoch = 0
+        self._init_state = "generated"
+        self._synced_from = None
         logger.info("Master secret initialized from hardware RNG (epoch 0)")
 
-    def initialize_from_peer(self, secret: bytes, epoch: int = 0) -> None:
+    def initialize_from_peer(self, secret: bytes, epoch: int = 0, peer_url: Optional[str] = None) -> None:
         """Set the master secret received from a peer during sync."""
         if len(secret) < 32:
             raise ValueError("Master secret must be at least 32 bytes")
         self._secret = secret[:32]
         self._epoch = epoch
-        logger.info(f"Master secret initialized from peer sync (epoch {epoch})")
+        self._init_state = "synced"
+        self._synced_from = peer_url
+        logger.info(
+            f"Master secret initialized from peer sync (epoch {epoch})"
+            + (f" from {peer_url}" if peer_url else "")
+        )
 
     def rotate(self) -> int:
         """
