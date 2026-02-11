@@ -763,6 +763,7 @@ class SyncManager:
         body: dict,
         *,
         signature: Optional[str] = None,
+        signature_payload: Optional[dict] = None,
         kms_pop: Optional[dict] = None,
     ) -> dict:
         """
@@ -875,7 +876,11 @@ class SyncManager:
             if not signature:
                 logger.warning("Sync message rejected: HMAC signature required but not provided")
                 return {"status": "error", "reason": "Missing HMAC signature"}
-            payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
+            # Verify over the *on-the-wire* JSON payload when available.
+            # For encrypted sync requests, senders sign the canonical JSON of the
+            # E2E envelope dict, not the decrypted inner message.
+            payload_obj = signature_payload if signature_payload is not None else body
+            payload_json = json.dumps(payload_obj, sort_keys=True, separators=(",", ":"))
             if not _verify_hmac(self._sync_key, payload_json.encode("utf-8"), signature):
                 logger.warning("Sync message HMAC verification failed")
                 return {"status": "error", "reason": "Invalid HMAC signature"}

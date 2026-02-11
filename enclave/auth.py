@@ -9,7 +9,7 @@ Security modes:
     - Production (IN_ENCLAVE=True, SIMULATION_MODE=False): require lightweight
         Proof-of-Possession (PoP) signatures (EIP-191) for app requests.
     - Dev / Sim (IN_ENCLAVE=False or SIMULATION_MODE=True): allow convenience
-        headers (x-tee-wallet / x-tee-measurement) to stand in for identity.
+        header (x-tee-wallet) to stand in for identity.
 
 Authorization is always enforced via NovaAppRegistry lookups in AppAuthorizer.
 """

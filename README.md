@@ -1,8 +1,8 @@
 # Nova KMS
 
-Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclaves and provides **key derivation**, **certificate signing**, and an **in-memory KV store** to other Nova applications.
+Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclaves and provides **key derivation** and an **in-memory KV store** to other Nova applications.
 
-It is designed with a **Zero-Trust** architecture where no single node is trusted by default. Trust is established via on-chain registries, cryptographic proofs, and strict consensus mechanisms.
+It is designed with a **Zero-Trust** architecture where no single node is trusted by default. Trust is established via on-chain registries, cryptographic proofs, and **strict initialization protocols**.
 
 ## Features
 
@@ -12,22 +12,25 @@ It is designed with a **Zero-Trust** architecture where no single node is truste
 | **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction. Values are encrypted-at-rest (AES-GCM). |
 | **Distributed Sync** | Delta + snapshot sync across KMS nodes (Eventual Consistency, Last-Writer-Wins). |
 | **Dual Keypairs** | Separated keys for Identity (secp256k1) and Encryption (P-384/secp384r1). |
-| **Anti-Split-Brain** | Strict initialization logic using an immutable on-chain Master Secret Hash. |
+| **Anti-Split-Brain** | Strict initialization logic using the on-chain `masterSecretHash` coordination value. |
 
 ## Security Architecture
 
 The system implements a **Defense in Depth** strategy with four layers of security:
 
 ### 1. On-Chain Identity & Authorization (The "Who")
-*   **Nodes**: Must be registered as `ACTIVE` instances in `NovaAppRegistry` and recognized as operators in `KMSRegistry`.
-*   **Apps**: Clients must be registered `ACTIVE` apps in `NovaAppRegistry`.
-*   **Verification**: All access (App-to-KMS, KMS-to-KMS) validates the caller's wallet address against these registries.
+*   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID` with an `ENROLLED` version.
+*   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE` and version is `ENROLLED`.
+*   **KMSRegistry**: Not used for runtime peer discovery; it is used for cluster coordination via `masterSecretHash` (and may be used for optional audits/ops checks).
+*   **Verification**: All access gates on `NovaAppRegistry` lookups (instance/app/version status + `zkVerified`).
 
 ### 2. Mutual Authentication (The "Handshake")
 *   **Mechanism**: Lightweight Proof-of-Possession (PoP) signatures (EIP-191).
 *   **Flow**:
     1.  Caller requests a `nonce`.
-    2.  Caller signs: `NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>`.
+  2.  Caller signs a recipient-bound message:
+    - **App→KMS**: `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
+    - **KMS↔KMS**: `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
     3.  Recipient verifies signature and checks registry status.
     4.  Recipient returns a signed response: `NovaKMS:Response:<Caller_Sig>:<My_Wallet>`.
 
@@ -37,9 +40,9 @@ The system implements a **Defense in Depth** strategy with four layers of securi
 *   **Benefit**: Ensures confidentiality even if TLS is terminated at a load balancer.
 
 ### 4. Data Integrity (The "Guard")
-*   **Mechanism**: HMAC-SHA256 Sync Signatures.
-*   **Purpose**: Prevents "Split-Brain" or "Confused Deputy" attacks.
-*   **Details**: All sync traffic is signed with a key derived from the Master Secret. Nodes **instantly reject** peers that don't share the same cluster secret, even if they are valid operators.
+*   **Mechanism**: HMAC-SHA256 signatures for `/sync`.
+*   **Purpose**: Defense-in-depth for inter-node sync; rejects peers that don’t share the cluster sync key.
+*   **Details**: When a sync key is configured, nodes require `X-Sync-Signature` on `/sync` (except `master_secret_request` bootstrap). The signature is computed over the canonical JSON of the **on-the-wire request body** (the E2E envelope when encryption is used).
 
 ## Architecture Diagram
 
@@ -63,7 +66,7 @@ graph LR
   N1 <-->|"PoP + HMAC + Sealed ECDH"| N2
   N1 -->|"Read-only eth_call"| R
   N1 -->|"Read-only eth_call"| K
-  R -->|"addOperator/removeOperator callbacks"| K
+  K -->|"masterSecretHash coordination"| N1
 ```
 
 ## Anti-Split-Brain Initialization

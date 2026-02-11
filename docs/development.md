@@ -110,9 +110,9 @@ python app.py
 ```
 
 The server starts on `http://localhost:8000`. In dev mode:
-- Odyn SDK connects to mock endpoint (`odyn.sparsity.cloud:18000`)
-- Chain helper connects to mock RPC (`odyn.sparsity.cloud:8545`)
-- KMS nodes do NOT submit on-chain transactions (operator management is handled by NovaAppRegistry callbacks)
+
+- If you want **dev/sim identity headers** (`x-tee-wallet`) to work, set `IN_ENCLAVE=false` (header-based identity is blocked when `IN_ENCLAVE=true` and `SIMULATION_MODE=false`).
+- When `IN_ENCLAVE=false`, peer HTTPS enforcement is relaxed and plaintext fallbacks can be enabled for local testing.
 
 ### 4. Test API Endpoints
 
@@ -140,7 +140,7 @@ curl http://localhost:8000/kms/data/test \
   -H "x-tee-wallet: 0x1234567890abcdef1234567890abcdef12345678"
 ```
 
-> **Note:** In development mode, auth headers (`x-tee-wallet`, `x-tee-measurement`) are accepted as a convenience identity shim. In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`).
+> **Note:** In development mode, the auth header `x-tee-wallet` is accepted as a convenience identity shim. In production (inside enclave), header-based identity is disabled and the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`).
 
 ---
 
@@ -304,17 +304,15 @@ Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 1. `getInstanceByWallet(teeWallet)` → instance
 2. Check `ACTIVE` + `zkVerified`
 3. `getApp(appId)` → `ACTIVE`
-4. `getVersion(appId, versionId)` → `ENROLLED` or `DEPRECATED`
-5. Match `codeMeasurement`
+4. `getVersion(appId, versionId)` → `ENROLLED`
 
-### `kms_registry.py` — KMSRegistry (read-only)
-Queries operator list from the simplified KMSRegistry contract:
-- `get_operators()` — list of operator addresses
-- `is_operator(wallet)` — check if wallet is a KMS operator
-- `operator_count()` / `operator_at(index)` — enumeration helpers
+### `kms_registry.py` — KMSRegistry (contract wrapper)
+Wraps the on-chain `KMSRegistry` contract for:
 
-KMS nodes do NOT submit on-chain transactions. For full instance details,
-use `NovaRegistry.get_instance_by_wallet(operator)`.
+- reads: operator set (optional for external tooling) and `masterSecretHash`
+- writes (bootstrap/maintenance): `setMasterSecretHash` and owner-only `resetMasterSecretHash`
+
+In the current implementation, the KMS node lifecycle is **mostly** read-only on-chain, but during bootstrap (when `masterSecretHash == 0x0`) an eligible node will submit a single `setMasterSecretHash` transaction.
 
 ### `kdf.py` — Key Derivation
 Uses HKDF-SHA256. `MasterSecretManager` holds the cluster secret.

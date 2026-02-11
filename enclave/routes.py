@@ -18,7 +18,7 @@ Endpoints (see architecture.md §3):
 
 Security:
     - In production: app calls authenticate via PoP signatures.
-    - In dev/sim: can fall back to x-tee-wallet / x-tee-measurement headers.
+    - In dev/sim: can fall back to x-tee-wallet header.
     - Rate limiting and request body size limits enforced by middleware.
 """
 
@@ -725,9 +725,10 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     signature = request.headers.get("x-sync-signature")
     
     result = _sync_manager.handle_incoming_sync(
-        decrypted_body, 
+        decrypted_body,
         signature=signature,
-        kms_pop=kms_pop
+        signature_payload=body,
+        kms_pop=kms_pop,
     )
 
     if result.get("status") == "error":

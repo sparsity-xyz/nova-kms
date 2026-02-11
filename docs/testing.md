@@ -119,10 +119,7 @@ assert resp.status_code == 200
 - Instance STOPPED → rejected
 - Instance not zkVerified → rejected
 - App not ACTIVE → rejected
-- Version REVOKED → rejected
-- Measurement mismatch → rejected
-- DEPRECATED version → accepted
-- Missing measurement → check skipped
+- Version not ENROLLED → rejected
 
 #### Sync
 - Delta merge incoming records
@@ -135,7 +132,7 @@ assert resp.status_code == 200
 - `/status` → node and cluster info
 - `/nodes` → operator list
 - `/kms/derive` → returns base64 key
-- `/kms/data` PUT + GET → round-trip
+- `/kms/data` PUT + `/kms/data/{key}` GET → round-trip
 - `/kms/data` DELETE → removes key
 - `/sync` delta + snapshot_request
 

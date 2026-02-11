@@ -1,153 +1,89 @@
-# Nova KMS — Consolidated Security Audit Report
+# Nova KMS — Security Notes (Code-Aligned)
 
-**Date**: 2026-02-11
-**Scope**: Full codebase (Python enclave application, Solidity contracts, documentation)
-**Status**: Consolidated from two independent reviews and verified against the current codebase.
+This document is a **living, code-aligned security review note**, not an independent third‑party audit.
 
----
-
-## Executive Summary
-
-A comprehensive security review of the `nova-kms` codebase was conducted, consolidating findings from two independent audits. The architecture is conceptually sound, leveraging on-chain trust anchoring, robust enclave isolation, and a strong anti-split-brain design. However, several **critical** and **high-severity** issues were identified that pose significant risks to key security, data integrity, and system availability.
-
-These findings must be addressed before production deployment. The most critical issues involve the master secret generation lifecycle, potential for race conditions during startup, and transport layer security gaps.
-
-### Summary of Findings
-
-| Severity | Count | Description |
-| :--- | :--- | :--- |
-| 🔴 **Critical** | 2 | Issues leading to key compromise or service failure. |
-| 🟠 **High** | 2 | Significant risks to integrity, availability, or confidentiality. |
-| 🟡 **Medium** | 3 | Defense-in-depth weaknesses or logical errors. |
-| 🔵 **Low/Info** | 10+ | Code hygiene, documentation mismatches, or minor observations. |
+It summarizes the **security-relevant behaviors that are implemented in this repo**, plus **explicitly-known boundaries/assumptions**.
 
 ---
 
-## 🔴 Critical Findings
+## Scope
 
-### C1. Client-Side Accepts Plaintext Master Secret in Production
-**File**: `enclave/sync_manager.py` (Lines 636–641)
-**Source**: Report 1 (H4), Report 2 (C-SYNC-3).
-
-While the server-side `handle_incoming_sync` correctly enforces `IN_ENCLAVE` checks to prevent sending plaintext master secrets, the **client-side** `_sync_master_secret_from_peer` method accepts a plaintext response (`isinstance(result, bytes)`) without any environment check.
-
-**Impact**: A malicious or compromised peer could downgrade the sync process and inject a known/malicious master secret by sending it in plaintext, which the victim node would accept and use.
-
-**Recommendation**: Wrap the plaintext fallback block in `if not config.IN_ENCLAVE:` to ensure production nodes only accept sealed (ECDH) master secrets.
-
-### C2. `PEER_CACHE_TTL_SECONDS` NameError / Redundant Scheduler
-**File**: `enclave/sync_manager.py` (Line 260)
-**Source**: Report 1 (C1), Report 2 (C-SYNC-1).
-
-The `_start_scheduler` method tries to register a job using `seconds=PEER_CACHE_TTL_SECONDS` (which is not imported). More importantly, this background task is **redundant** because the main `node_tick` loop already calls `self.peer_cache.refresh()` on every tick.
-
-**Impact**: If `scheduler=True` were passed to `SyncManager`, the application would crash. As it stands, it is dead, broken code that creates confusion.
-
-**Recommendation**: Remove the `_start_scheduler` method and the `scheduler` argument from `SyncManager.__init__` entirely. Rely solely on `node_tick` for peer discovery.
+- KMS service: FastAPI app under `nova-kms/enclave/`
+- On-chain trust roots: `NovaAppRegistry` and `KMSRegistry` clients
+- App↔KMS and KMS↔KMS request authentication, authorization, encryption, and sync integrity
 
 ---
 
-## 🟠 High Findings
+## Trust & Threat Model (What the code assumes)
 
-### H1. Missing Enclave-to-Enclave TLS with `teePubkey` Verification
-**File**: `enclave/routes.py`, `enclave/sync_manager.py`, `enclave/secure_channel.py`
-**Source**: User Feedback / Verified Codebase.
-**Status**: ✅ **FIXED** — P-384 ECDH via `secure_channel.py`
-
-The current implementation relies on standard HTTP(S) via `requests` and `FastAPI` without enforcing a custom trust root based on the `teePubkey` registered in the `NovaAppRegistry`. This applies to **both**:
-1.  **KMS-to-KMS Sync:** Synchronization of master secrets and data between nodes.
-2.  **App-to-KMS Operations:** Key derivation (`/kms/derive`) and data access (`/kms/data`) by Nova Apps.
-
-**Vulnerability**: KMS nodes and Nova Apps run in Nitro Enclaves where the intermediate network is untrusted. Standard CA-based TLS is valid only for the external domain, not the internal enclave identity. Without verifying the server's identity against the on-chain `teePubkey`, the connection is vulnerable to Man-in-the-Middle (MitM) attacks by the host or network provider.
-
-**Impact**: Total breach of confidentiality. An attacker could intercept the master secret during sync or the derived app keys during `/kms/derive` by terminating the TLS connection at the host level.
-
-**Resolution (Implemented)**:
-
-The fix introduces the **`secure_channel.py`** module which provides P-384 ECDH-based identity verification and encryption:
-
-1.  **Dual-Keypair Architecture**: Each enclave now has two independent keypairs:
-    - **ETH wallet (secp256k1)**: `tee_wallet_address` for PoP message signing (EIP-191)
-    - **teePubkey (P-384/secp384r1)**: DER-encoded SPKI key for ECDH encryption
-
-    These keypairs are **completely independent** — the wallet is NOT derived from teePubkey.
-
-2.  **P-384 teePubkey Validation**: `verify_peer_identity()` validates:
-    - Instance is ACTIVE in NovaAppRegistry
-    - `tee_wallet_address` matches the peer
-    - `teePubkey` is a well-formed P-384 public key
-
-3.  **Sealed Master Secret Exchange**: Master secrets are encrypted using:
-    - Ephemeral P-384 ECDH key exchange
-    - HKDF-SHA256 key derivation
-    - AES-256-GCM authenticated encryption
-
-    See `kdf.py:seal_master_secret()` / `unseal_master_secret()`.
-
-4.  **Implementation Files**:
-    - `enclave/secure_channel.py` — P-384 validation, ECDH helpers
-    - `enclave/kdf.py` — Sealed master secret exchange
-    - `enclave/sync_manager.py` — Uses sealed exchange for sync
-
-### H2. Rate Limiter Relies on `Content-Length` Header
-**File**: `enclave/rate_limiter.py` (Lines 106–120)
-**Source**: Report 1 (H2), Report 2 (H3).
-
-The middleware checks `Content-Length` to enforce `MAX_REQUEST_BODY_BYTES`. It does not verify the actual body size read from the stream.
-
-**Impact**: An attacker can bypass the limit by using `Transfer-Encoding: chunked` or by lying about the content length, potentially causing DoS via memory exhaustion.
-
-**Recommendation**: Use a streaming reader that counts bytes and aborts if the limit is exceeded, regardless of headers.
-
+- The host and network are treated as **untrusted**.
+- **Authorization** decisions are made via on-chain state (queried via `NovaAppRegistry`).
+- **Confidentiality** of request/response bodies is provided by teePubkey-based **E2E encryption envelopes** (P‑384 ECDH + AES‑256‑GCM via Odyn), not by assuming TLS is always end-to-end.
 
 ---
 
-## 🟡 Medium Findings
+## Implemented Controls (What exists today)
 
-### M1. Unused `epoch` Complexity
-**File**: `enclave/kdf.py`
-**Source**: Report 1 (M2), Report 2 (M1).
-**Status**: ✅ **FIXED** — Epoch removed from key derivation
+### 1) On-chain authorization (NovaAppRegistry)
 
-The codebase included logic for an `epoch` counter in key derivation and master secret management, intended for key rotation. However, there is no mechanism to rotate the master secret or increment the epoch in the current design.
+- **App→KMS** requests are authenticated (PoP) and then authorized via `AppAuthorizer.verify()`:
+  - instance must be `ACTIVE`
+  - instance must be `zkVerified`
+  - app must be `ACTIVE`
+  - version must be `ENROLLED`
+- **KMS↔KMS** sync uses the same authorizer, additionally requiring `require_app_id=KMS_APP_ID`.
 
-**Resolution**: Removed `epoch` from `MasterSecretManager` and `derive_app_key`. The `epoch` property now always returns 0 for backward-compatible status reporting.
+### 2) Mutual PoP authentication (EIP-191)
 
+- Nonce + timestamp freshness checks are enforced.
+- Recipient wallet binding is enforced in the signed message:
+  - App→KMS: `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<ts>`
+  - KMS↔KMS: `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<ts>`
+- Responses include a recipient signature over `NovaKMS:Response:<caller_sig>:<recipient_wallet>`.
 
+### 3) E2E encryption envelopes + sender teePubkey binding
 
-### M2. Synchronous Outbound Probes in `/nodes`
-**File**: `enclave/routes.py`
-**Source**: Report 1 (M1), Report 2 (M4).
+- Sensitive payloads are carried in an envelope:
+  - `sender_tee_pubkey`, `nonce`, `ciphertext`
+- Before decrypting an encrypted envelope, the server verifies:
+  - `envelope.sender_tee_pubkey` matches the **on-chain** teePubkey for the authenticated wallet
 
-The `/nodes` endpoint probes all peers sequentially and synchronously. This makes the endpoint slow and potentially vulnerable to DoS if many operators are unresponsive.
+This prevents a class of MitM “re-encryption” attacks where an attacker substitutes their own teePubkey.
 
-**Recommendation**: The `PeerCache` refresh logic (in `node_tick`) should probe node health and store the results. The `/nodes` endpoint should simply return this cached data.
+### 4) Sync integrity via HMAC (when configured)
 
-### M3. CORS Defaults to Wildcard in Production
-**File**: `enclave/app.py`
-**Source**: Report 2 (M7).
+- When the node has a sync key configured, `/sync` requires `X-Sync-Signature`.
+- The HMAC is computed over the canonical JSON of the **on-the-wire request body**.
+  - For encrypted sync, this is the canonical JSON of the E2E envelope.
+- Bootstrap exception: `master_secret_request` is accepted without HMAC so a new node can obtain the initial sync key.
 
-`CORS_ORIGINS` defaults to `*` if not set, which is overly permissive for a security-critical service.
+### 5) Sealed master secret exchange
 
-**Recommendation**: Enforce explicit CORS origins in production or default to empty.
+- Master secret transfer supports a sealed ECDH exchange (ephemeral P‑384 + HKDF + AES‑GCM) via `kdf.py`.
+- Plaintext master secret exchange is rejected in production (`IN_ENCLAVE=true`).
+
+### 6) SSRF and network hardening for peer URLs
+
+- Peer URLs are validated to reduce SSRF risk and block private/reserved IP ranges in production.
+- In production, peer URLs are restricted to `https` schemes.
+
+### 7) DoS protection (rate limiting + body size limits)
+
+- Global per-IP rate limiting middleware.
+- Request body size limits enforce actual bytes read from the stream (not just `Content-Length`).
+- `/nonce` additionally uses a token bucket limiter.
 
 ---
 
-## 🔵 Low / Informational Findings
+## Known Boundaries / Non-goals (As implemented)
 
-| Finding | File | Notes |
-| :--- | :--- | :--- |
-| **Transaction Methods in Client** | `kms_registry.py` | Client includes tx submission methods despite "read-only" doc claims. |
-| **Dead Code: `wait_for_master_secret`** | `sync_manager.py` | Unused method; logic replaced by `node_tick`. |
-| **Duplicate `get_sync_key`** | `kdf.py` | Method defined twice in `MasterSecretManager`. |
-| **Nonce Store Unbounded** | `auth.py` | Cleanup only runs on issuance; attack vectors exist. |
-| **`__UUPSUpgradeable_init` Missing** | `KMSRegistry.sol` | Conventional init missing (harmless in current OZ, but bad practice). |
-| **`kmsAppId` Mutable** | `KMSRegistry.sol` | Owner can change App ID post-deployment. |
-| **Storage Gap Undocumented** | `KMSRegistry.sol` | `_gap` exists but calculation not explained. |
-| **Duplicate ABI Helpers** | `kms_registry.py` / `nova_registry.py` | Code duplication. |
-| **DataStore.get` Silent Failure** | `data_store.py` | Returns `None` on decryption failure instead of error. |
-| **Auth Cache Latency (60s)** | `nova_registry.py` | Accepted risk: revocation takes up to 60s to propagate. |
-| **Last-Writer-Wins** | `data_store.py` | Accepted risk: concurrent writes may be dropped. |
-| **Doc Mismatch: Code Measure** | `auth.py` | Check done in Registry; update docs to reflect this. |
-| **Deferred: Upgrade Check** | `KMSRegistry.sol` | Upgrade checks temporarily deferred. |
-| **Last-Writer-Wins** | `data_store.py` | Accepted risk: concurrent writes may be dropped. |
+- **Eventual consistency** for KV sync: last-writer-wins semantics can drop concurrent writes.
+- **Registry cache TTL** means authorization changes (revocations) may take up to the cache window to fully propagate.
+- **Dev/simulation shortcuts** exist (e.g., header-based identity), but are blocked when running in production enclave mode.
+
+---
+
+## How to use this doc
+
+- Treat it as the “security contract” for what the repo actually enforces.
+- If you change auth, envelope formats, or sync signing, update this doc together with `docs/architecture.md` and `docs/kms-core-workflows.md`.

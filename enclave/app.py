@@ -12,8 +12,8 @@ Supports two modes:
 **Production** (default):
   1. Wait for Helios light-client RPC
   2. Initialize Odyn SDK → get TEE wallet address
-  3. Discover peers via KMSRegistry operators + NovaAppRegistry instance lookup
-  4. Initialize or receive master secret (via sealed ECDH key exchange)
+    3. Discover peers via NovaAppRegistry (KMS_APP_ID → ENROLLED versions → ACTIVE instances)
+    4. Initialize or receive master secret (via sealed ECDH key exchange)
   5. Start background sync scheduler
   6. Mount API routes with rate limiting and body size limits
 
@@ -22,8 +22,8 @@ Supports two modes:
   master secret.  Suitable for local development and multi-node testing.
   **Cannot be activated when running inside an enclave** (IN_ENCLAVE=true).
 
-KMS nodes do NOT submit any on-chain transactions.  Operator registration
-is managed entirely through NovaAppRegistry → KMSRegistry callbacks.
+KMS nodes may submit a one-time on-chain transaction during bootstrap to set
+`KMSRegistry.masterSecretHash` when it is currently zero (cluster coordination).
 """
 
 from __future__ import annotations

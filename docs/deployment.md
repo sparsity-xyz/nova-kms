@@ -145,13 +145,18 @@ On boot, the KMS node:
 2. Gets its TEE wallet address from Odyn
 3. ZKP service verifies the enclave and registers the instance in NovaAppRegistry
 4. NovaAppRegistry calls `KMSRegistry.addOperator()` → node is discoverable
-5. KMS node queries `getOperators()` + `getInstanceByWallet()` to discover peers
-6. Attempts to receive master secret from an existing peer
-7. If no peers exist, generates a new master secret from hardware RNG
-8. Starts the sync scheduler
-9. Begins serving API requests
+5. KMS node discovers peers by enumerating `ACTIVE` KMS instances from `NovaAppRegistry` (scoped by `KMS_APP_ID`, across `ENROLLED` versions)
+6. Reads `masterSecretHash` from `KMSRegistry`
+7. If `masterSecretHash == 0x0` (bootstrap):
+  - generates a fresh master secret from Odyn hardware RNG (if needed)
+  - computes `keccak256(master_secret)` and submits **one** `setMasterSecretHash` transaction (eligible callers are enforced by `KMSRegistry` via NovaAppRegistry checks)
+  - stays `503 Unavailable` until the on-chain hash becomes non-zero and matches
+8. If `masterSecretHash != 0x0` (running):
+  - ensures the local master secret hash matches the on-chain hash
+  - if missing/mismatched, syncs the master secret from a verified peer via sealed ECDH over `/sync`
+9. Starts periodic `node_tick` scheduling and begins serving API requests once the node is marked available
 
-> **Note:** KMS nodes do NOT submit any on-chain transactions. Operator management is fully handled by NovaAppRegistry callbacks to KMSRegistry.
+> **Note:** KMS nodes are *mostly* read-only on-chain. The only routine write in the current implementation is the one-time `setMasterSecretHash` during cluster bootstrap when the hash is unset.
 
 ## Step 5: Verify Deployment
 
@@ -168,7 +173,7 @@ curl https://<kms-node-url>/health
 curl https://<kms-node-url>/status
 # {
 #   "node": {"tee_wallet": "0x...", "is_operator": true, ...},
-#   "cluster": {"total_operators": 3, ...},
+#   "cluster": {"total_instances": 3, ...},
 #   "data_store": {"namespaces": 0, "total_keys": 0, "total_bytes": 0}
 # }
 ```
@@ -176,14 +181,23 @@ curl https://<kms-node-url>/status
 ### 5.3 Verify On-Chain Registration
 
 ```bash
-# Check if the node's wallet is a registered operator
+# Optional: Inspect KMSRegistry on-chain state.
+# Note: the KMS service's runtime peer discovery uses NovaAppRegistry (via PeerCache),
+# not the operator list in KMSRegistry. These calls are useful for auditing.
+
+# Check if the node's wallet is present in the KMSRegistry operator set
 cast call <KMS_REGISTRY_ADDRESS> \
   "isOperator(address)" <TEE_WALLET_ADDRESS> \
   --rpc-url https://sepolia.base.org
 
-# List all operators
+# List all operator wallets tracked by KMSRegistry
 cast call <KMS_REGISTRY_ADDRESS> \
   "getOperators()" \
+  --rpc-url https://sepolia.base.org
+
+# Read the current master secret hash coordination value
+cast call <KMS_REGISTRY_ADDRESS> \
+  "masterSecretHash()" \
   --rpc-url https://sepolia.base.org
 ```
 
@@ -201,7 +215,7 @@ KMS Node 1  ←→  KMS Node 2  ←→  KMS Node 3
 
 ### Node Discovery
 
-Nodes discover each other via `KMSRegistry.getOperators()` → `NovaAppRegistry.getInstanceByWallet()`. No external service discovery needed.
+Nodes discover each other via `NovaAppRegistry` (scoped by `KMS_APP_ID` → `ENROLLED` versions → `ACTIVE` instances). No external service discovery is required.
 
 ### Master Secret Propagation
 
@@ -223,7 +237,7 @@ Nodes discover each other via `KMSRegistry.getOperators()` → `NovaAppRegistry.
 | Metric | Source | Alert Threshold |
 |--------|--------|-----------------|
 | `/health` response | HTTP probe | Non-200 for >30s |
-| `cluster.total_operators` | `/status` | Below expected count |
+| `cluster.total_instances` | `/status` | Below expected count |
 | `data_store.total_bytes` | `/status` | Approaching `MAX_APP_STORAGE` |
 | Sync success rate | Application logs | <50% peer sync success |
 | On-chain `isOperator` | KMSRegistry | Unexpected removal |

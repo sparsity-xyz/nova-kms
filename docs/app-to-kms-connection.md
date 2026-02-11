@@ -34,7 +34,7 @@ Server implementation: `/nodes` in `nova-kms/enclave/routes.py`.
 
 Notes:
 - The node list is sourced **only** from NovaAppRegistry (via PeerCache: `KMS_APP_ID → ACTIVE instances`)
-- It does not depend on the KMSRegistry operator list
+- It iterates through enrolled versions and their instances to find active nodes
 - It does not synchronously probe every peer inside this handler (uses cached status)
 
 Response shape is roughly:
@@ -381,10 +381,11 @@ The current implementation provides a **unified authorization model** for both A
 
 ### Transport Layer Assumption
 
-The security model assumes **plaintext HTTP** transport. All confidentiality is provided by teePubkey-based E2E encryption, not TLS. This design choice is intentional:
-- Enclave services may terminate at non-enclave load balancers
-- The E2E encryption provides post-compromise security even if TLS is terminated outside the enclave
-- PoP signatures prevent replay/tampering at the application layer
+The security model does **not rely on TLS** for confidentiality. Sensitive payloads are protected by teePubkey-based E2E encryption and PoP.
+
+Practical notes from the current code:
+- **KMS↔KMS outbound peer URLs** are validated and, in production (`IN_ENCLAVE=true`), restricted to `https` schemes.
+- **App→KMS** can be deployed behind HTTPS (recommended), but the application-layer security is provided by PoP + E2E envelopes.
 
 ### Authorization Checks
 
@@ -428,7 +429,7 @@ This ensures:
 - **KMS↔KMS**:
   - PoP (secp256k1 EIP-191 signatures) for peer authentication
   - On-chain authorization via `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
-  - HMAC-signed sync messages (additional integrity layer)
+  - HMAC-signed sync messages (additional integrity layer; enforced when the node has a sync key, except bootstrap `master_secret_request`)
   - **E2E encryption** of all sync payloads using teePubkey
   - **sender_tee_pubkey verification** against on-chain registry
   - Sealed ECDH exchange for master secret transfer (additional encryption layer)
