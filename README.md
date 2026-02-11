@@ -21,16 +21,16 @@ The system implements a **Defense in Depth** strategy with four layers of securi
 ### 1. On-Chain Identity & Authorization (The "Who")
 *   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID` with an `ENROLLED` version.
 *   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE` and version is `ENROLLED`.
-*   **KMSRegistry**: Not used for runtime peer discovery; it is used for cluster coordination via `masterSecretHash` (and may be used for optional audits/ops checks).
+*   **KMSRegistry**: Not used for runtime peer discovery; it is used for cluster coordination via `masterSecretHash`.
 *   **Verification**: All access gates on `NovaAppRegistry` lookups (instance/app/version status + `zkVerified`).
 
 ### 2. Mutual Authentication (The "Handshake")
 *   **Mechanism**: Lightweight Proof-of-Possession (PoP) signatures (EIP-191).
 *   **Flow**:
     1.  Caller requests a `nonce`.
-  2.  Caller signs a recipient-bound message:
-    - **App→KMS**: `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
-    - **KMS↔KMS**: `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
+    2.  Caller signs a recipient-bound message:
+        - **App→KMS**: `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
+        - **KMS↔KMS**: `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
     3.  Recipient verifies signature and checks registry status.
     4.  Recipient returns a signed response: `NovaKMS:Response:<Caller_Sig>:<My_Wallet>`.
 
@@ -42,7 +42,7 @@ The system implements a **Defense in Depth** strategy with four layers of securi
 ### 4. Data Integrity (The "Guard")
 *   **Mechanism**: HMAC-SHA256 signatures for `/sync`.
 *   **Purpose**: Defense-in-depth for inter-node sync; rejects peers that don’t share the cluster sync key.
-*   **Details**: When a sync key is configured, nodes require `X-Sync-Signature` on `/sync` (except `master_secret_request` bootstrap). The signature is computed over the canonical JSON of the **on-the-wire request body** (the E2E envelope when encryption is used).
+*   **Details**: When a sync key is configured, nodes require `X-Sync-Signature` on `/sync`.
 
 ## Architecture Diagram
 
@@ -63,6 +63,7 @@ graph LR
   end
 
   A1 -->|"PoP + E2E (P-384)"| N1
+  A1 -.->|"Discover / Verify"| R
   N1 <-->|"PoP + HMAC + Sealed ECDH"| N2
   N1 -->|"Read-only eth_call"| R
   N1 -->|"Read-only eth_call"| K
@@ -74,16 +75,16 @@ graph LR
 To prevent cluster fragmentation, nodes follow a strict startup protocol:
 
 1.  **Check Chain**: Read `masterSecretHash` from `KMSRegistry`.
-2.  **If Hash == 0**:
-    *   **Optimistic Init**: Generate new secret & attempt to set hash on-chain.
-    *   **Defense**: Implementation uses `masterSecretHash` as a mutex—first successful transaction wins.
-    *   **Retry**: If tx fails (race lost), loop back to step 1.
-3.  **If Hash != 0**:
-    *   **Verify**: Does my local secret match the hash?
-        *   **Yes**: Node Ready.
-        *   **No**: **Attempt Sync** from a verified peer.
-            *   **Success** (Hash matches): Node Ready.
-            *   **Failure** (Network error or Hash mismatch): Stay Offline (Retry Loop).
+2.  **If `masterSecretHash == 0` (Bootstrap)**:
+    *   **Optimistic Init**: Node generates a new random secret and attempts to set the hash on-chain.
+    *   **Defense**: The contract acts as a mutex—only the first transaction succeeds. Others fail/revert.
+    *   If the transaction fails (race lost), the node retries from Step 1.
+3.  **If `masterSecretHash != 0` (Running)**:
+    *   **Verify**: Does the local secret match the hash?
+        *   **Yes**: Node becomes **Ready**.
+        *   **No**: Node attempts to **Sync** from a verified peer.
+            *   If sync succeeds and hash matches: Node becomes **Ready**.
+            *   If sync fails or hash mismatches: Node stays **Offline** (Retry Loop).
 
 ## Project Structure
 
