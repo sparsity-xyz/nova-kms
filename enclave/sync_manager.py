@@ -912,12 +912,27 @@ class SyncManager:
 
         # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
         message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
-        recovered = recover_wallet_from_signature(message, p_sig)
+        try:
+            recovered = recover_wallet_from_signature(message, p_sig)
+        except Exception as exc:
+            logger.warning(f"Peer PoP signature recovery crashed: {exc}")
+            return {"status": "error", "reason": "Signature recovery failed"}
+
         if not recovered:
+            logger.warning(
+                f"Peer PoP signature invalid | "
+                f"Message='{message}' | "
+                f"Sig='{p_sig}'"
+            )
             return {"status": "error", "reason": "Invalid KMS signature"}
 
         # Optional explicit wallet header must match recovered signer.
         if p_wallet and recovered.lower() != p_wallet.lower():
+            logger.warning(
+                f"Peer PoP wallet mismatch | "
+                f"Header='{p_wallet}' | "
+                f"Recovered='{recovered}'"
+            )
             return {"status": "error", "reason": "KMS wallet header does not match signature"}
 
         p_wallet = recovered

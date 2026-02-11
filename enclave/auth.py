@@ -36,7 +36,8 @@ _node_wallet: Optional[str] = None
 def set_node_wallet(wallet: str):
     """Set the local node wallet for PoP recipient binding."""
     global _node_wallet
-    _node_wallet = wallet.lower()
+    _node_wallet = wallet
+
 
 def is_production_mode() -> bool:
     """Return True when running in an enclave (non-simulation)."""
@@ -171,6 +172,9 @@ def app_identity_from_signature(request) -> Optional[ClientIdentity]:
     if not all([sig, ts, nonce_b64]):
         return None
 
+    recovered = None
+    message = None
+
     try:
         import base64
         nonce_bytes = base64.b64decode(nonce_b64)
@@ -196,7 +200,13 @@ def app_identity_from_signature(request) -> Optional[ClientIdentity]:
             signature=sig
         )
     except Exception as exc:
-        logger.warning(f"App PoP verification failed: {exc}")
+        logger.warning(
+            f"App PoP verification failed: {exc} | "
+            f"Message='{message}' | "
+            f"Recovered='{recovered}' | "
+            f"HeaderWallet='{wallet}' | "
+            f"NodeWallet='{_node_wallet}'"
+        )
         raise RuntimeError(f"App PoP authentication failed: {exc}")
 
 
