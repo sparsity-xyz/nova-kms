@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple
 
+from abi_helpers import abi_type_to_eth_abi_str as _abi_type_to_eth_abi_str
+from abi_helpers import decode_outputs as _decode_outputs
+
 from web3 import Web3
 
 from chain import get_chain
@@ -212,27 +215,7 @@ _NOVA_REGISTRY_ABI = [
 ]
 
 
-def _abi_type_to_eth_abi_str(abi_item: dict) -> str:
-    abi_type = abi_item["type"]
-    if not abi_type.startswith("tuple"):
-        return abi_type
-
-    # Supports tuple and tuple[]
-    suffix = abi_type[len("tuple"):]
-    components = abi_item.get("components") or []
-    inner = ",".join(_abi_type_to_eth_abi_str(c) for c in components)
-    return f"({inner}){suffix}"
-
-
-def _decode_outputs(fn_abi: dict, raw_result: Any):
-    from eth_abi import decode as abi_decode
-    from hexbytes import HexBytes
-
-    outputs = fn_abi.get("outputs") or []
-    if not outputs:
-        return tuple()
-    output_types = [_abi_type_to_eth_abi_str(o) for o in outputs]
-    return abi_decode(output_types, HexBytes(raw_result))
+# _abi_type_to_eth_abi_str and _decode_outputs imported from abi_helpers above.
 
 
 # =============================================================================

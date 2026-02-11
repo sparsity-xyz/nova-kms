@@ -61,6 +61,35 @@ def get_sim_private_key_hex(wallet: str) -> Optional[str]:
     return _SIM_PRIV_BY_WALLET.get(wallet.lower())
 
 
+def _derive_tee_pubkey(wallet: str) -> bytes:
+    """Derive a deterministic P-384 (secp384r1) teePubkey for a sim wallet.
+
+    In production, the teePubkey is the enclave's P-384 public key
+    (from Odyn ``/v1/encryption/public_key``).  It is **independent**
+    from the secp256k1 wallet key — they live on different curves.
+
+    For simulation, we derive a deterministic P-384 keypair from the
+    wallet address so that tests are reproducible and
+    ``verify_peer_identity`` (P-384 validation) passes.
+
+    Returns the public key in DER/SPKI format.
+    """
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization as _ser
+
+    # Use wallet as seed for a deterministic P-384 private key
+    seed = hashlib.sha256(f"sim-tee-p384|{wallet}".encode()).digest()
+    # Convert seed to a valid P-384 private value
+    # P-384 order is ~2^384, but we can derive from 48 bytes
+    seed_48 = hashlib.sha384(seed).digest()  # 48 bytes
+    p384_order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973
+    private_value = int.from_bytes(seed_48, "big") % (p384_order - 1) + 1
+    private_key = ec.derive_private_key(private_value, ec.SECP384R1())
+    return private_key.public_key().public_bytes(
+        _ser.Encoding.DER, _ser.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
 def get_sim_odyn_for_wallet(wallet: str) -> Optional["SimOdyn"]:
     """Return a SimOdyn signer whose address is `wallet` (simulation only)."""
     pk = get_sim_private_key_hex(wallet)
@@ -224,13 +253,17 @@ class SimNovaRegistry:
         # Pre-build lookup by lower-case wallet
         self._instances: Dict[str, RuntimeInstance] = {}
         for idx, p in enumerate(self._peers, start=1):
+            # Derive proper tee_pubkey from sim private key so that
+            # verify_peer_identity (H1) can successfully derive the wallet
+            # from the public key.
+            tee_pubkey = _derive_tee_pubkey(p.tee_wallet)
             self._instances[p.tee_wallet.lower()] = RuntimeInstance(
                 instance_id=idx,
                 app_id=kms_app_id,
                 version_id=version_id,
                 operator=p.operator,
                 instance_url=p.node_url,
-                tee_pubkey=b"\x04" + hashlib.sha256(p.tee_wallet.encode()).digest(),
+                tee_pubkey=tee_pubkey,
                 tee_wallet_address=p.tee_wallet,
                 zk_verified=True,
                 status=InstanceStatus.ACTIVE,
@@ -378,7 +411,6 @@ def build_sim_components(
     peers: Optional[List[SimPeer]] = None,
     *,
     kms_app_id: Optional[int] = None,
-    scheduler: Optional[Any] = None,  # Pass False to disable
 ) -> dict:
     """
     Factory that assembles all simulation-mode components.
@@ -436,7 +468,6 @@ def build_sim_components(
         node_wallet=this_node.tee_wallet,
         peer_cache=peer_cache,
         odyn=odyn,
-        scheduler=scheduler,
     )
     sync_manager.set_sync_key(master_mgr.derive(0, "sync_key"))
 

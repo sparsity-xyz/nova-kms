@@ -49,10 +49,12 @@ def _setup_routes(monkeypatch):
     from auth import AppAuthorizer, AuthResult, ClientIdentity
     from data_store import DataStore
     from kdf import MasterSecretManager
+    from nova_registry import InstanceStatus, VersionStatus
     from sync_manager import PeerCache, SyncManager
 
     monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    monkeypatch.setattr(config, "KMS_APP_ID", 43)
 
     odyn = MagicMock()
     odyn.eth_address.return_value = "0x" + "aa" * 20
@@ -69,10 +71,62 @@ def _setup_routes(monkeypatch):
     kms_reg.is_operator.return_value = True
     kms_reg.get_operators.return_value = ["0x" + "AA" * 20, "0x" + "BB" * 20]
 
+    # NovaAppRegistry mock for PeerCache (used by /nodes and sync verification)
+    from dataclasses import dataclass
+
+    @dataclass
+    class _FakeApp:
+        app_id: int = 43
+        latest_version_id: int = 1
+
+    @dataclass
+    class _FakeVersion:
+        version_id: int = 1
+        status: object = VersionStatus.ENROLLED
+
+    @dataclass
+    class _FakeInstance:
+        instance_id: int = 0
+        app_id: int = 43
+        version_id: int = 1
+        operator: str = ""
+        instance_url: str = ""
+        tee_pubkey: bytes = b""
+        tee_wallet_address: str = ""
+        zk_verified: bool = True
+        status: object = InstanceStatus.ACTIVE
+        registered_at: int = 0
+
+    _instances = {
+        1: _FakeInstance(instance_id=1, tee_wallet_address="0x" + "AA" * 20,
+                         instance_url="http://localhost:5001", operator="0x" + "AA" * 20),
+        2: _FakeInstance(instance_id=2, tee_wallet_address="0x" + "BB" * 20,
+                         instance_url="http://localhost:5002", operator="0x" + "BB" * 20),
+    }
+
+    nova_reg = MagicMock()
+    nova_reg.get_app.return_value = _FakeApp()
+    nova_reg.get_version.return_value = _FakeVersion()
+    nova_reg.get_instances_for_version.return_value = list(_instances.keys())
+    nova_reg.get_instance.side_effect = lambda iid: _instances[iid]
+    nova_reg.get_instance_by_wallet.side_effect = lambda w: next(
+        (inst for inst in _instances.values() if inst.tee_wallet_address.lower() == w.lower()),
+        _FakeInstance(tee_wallet_address=w),
+    )
+
+    # Allow http URLs and localhost in tests
+    monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+
+    # Auto-pass H1 peer identity verification in route-level tests
+    monkeypatch.setattr("secure_channel.verify_peer_in_kms_operator_set", lambda *a, **kw: True)
+    monkeypatch.setattr("secure_channel.verify_peer_identity", lambda *a, **kw: True)
+
+    peer_cache = PeerCache(kms_registry_client=kms_reg, nova_registry=nova_reg)
+    peer_cache.refresh()
+
     sync_mgr = SyncManager(
         ds, "0xTestNode",
-        PeerCache(kms_registry_client=kms_reg),
-        scheduler=False,
+        peer_cache,
     )
 
     routes.init(
@@ -86,7 +140,7 @@ def _setup_routes(monkeypatch):
             "tee_wallet": "0xTestNode",
             "node_url": "https://test.kms.example.com",
             "is_operator": True,
-            "kms_app_id": 9001,
+            "kms_app_id": 43,
             "kms_registry_address": "0xREG",
         },
     )

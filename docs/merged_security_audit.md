@@ -50,8 +50,9 @@ The `_start_scheduler` method tries to register a job using `seconds=PEER_CACHE_
 ## 🟠 High Findings
 
 ### H1. Missing Enclave-to-Enclave TLS with `teePubkey` Verification
-**File**: `enclave/routes.py`, `enclave/sync_manager.py`
+**File**: `enclave/routes.py`, `enclave/sync_manager.py`, `enclave/secure_channel.py`
 **Source**: User Feedback / Verified Codebase.
+**Status**: ✅ **FIXED** — P-384 ECDH via `secure_channel.py`
 
 The current implementation relies on standard HTTP(S) via `requests` and `FastAPI` without enforcing a custom trust root based on the `teePubkey` registered in the `NovaAppRegistry`. This applies to **both**:
 1.  **KMS-to-KMS Sync:** Synchronization of master secrets and data between nodes.
@@ -61,13 +62,32 @@ The current implementation relies on standard HTTP(S) via `requests` and `FastAP
 
 **Impact**: Total breach of confidentiality. An attacker could intercept the master secret during sync or the derived app keys during `/kms/derive` by terminating the TLS connection at the host level.
 
-**Recommendation**:
-1.  **Mutual Authentication (mTLS/ECDH)**: Establish the secure channel using the **`teePubkey` of both parties**.
-2.  **Handshake**: The client and server must perform an ECDH key exchange (or TLS handshake) where:
-    *   The **Server** proves possession of the private key corresponding to its `teePubkey`.
-    *   The **Client** proves possession of the private key corresponding to its `teePubkey`.
-    *   The resulting session keys (ECDH shared secret) are secure and mutually authenticated.
-3.  **Verification**: Both sides must validate the counterparty's `teePubkey` against the on-chain registry before establishing the connection.
+**Resolution (Implemented)**:
+
+The fix introduces the **`secure_channel.py`** module which provides P-384 ECDH-based identity verification and encryption:
+
+1.  **Dual-Keypair Architecture**: Each enclave now has two independent keypairs:
+    - **ETH wallet (secp256k1)**: `tee_wallet_address` for PoP message signing (EIP-191)
+    - **teePubkey (P-384/secp384r1)**: DER-encoded SPKI key for ECDH encryption
+
+    These keypairs are **completely independent** — the wallet is NOT derived from teePubkey.
+
+2.  **P-384 teePubkey Validation**: `verify_peer_identity()` validates:
+    - Instance is ACTIVE in NovaAppRegistry
+    - `tee_wallet_address` matches the peer
+    - `teePubkey` is a well-formed P-384 public key
+
+3.  **Sealed Master Secret Exchange**: Master secrets are encrypted using:
+    - Ephemeral P-384 ECDH key exchange
+    - HKDF-SHA256 key derivation
+    - AES-256-GCM authenticated encryption
+
+    See `kdf.py:seal_master_secret()` / `unseal_master_secret()`.
+
+4.  **Implementation Files**:
+    - `enclave/secure_channel.py` — P-384 validation, ECDH helpers
+    - `enclave/kdf.py` — Sealed master secret exchange
+    - `enclave/sync_manager.py` — Uses sealed exchange for sync
 
 ### H2. Rate Limiter Relies on `Content-Length` Header
 **File**: `enclave/rate_limiter.py` (Lines 106–120)
@@ -87,10 +107,11 @@ The middleware checks `Content-Length` to enforce `MAX_REQUEST_BODY_BYTES`. It d
 ### M1. Unused `epoch` Complexity
 **File**: `enclave/kdf.py`
 **Source**: Report 1 (M2), Report 2 (M1).
+**Status**: ✅ **FIXED** — Epoch removed from key derivation
 
-The codebase includes logic for an `epoch` counter in key derivation and master secret management, intended for key rotation. However, there is no mechanism to rotate the master secret or increment the epoch in the current design. This adds unnecessary complexity and potential confusion.
+The codebase included logic for an `epoch` counter in key derivation and master secret management, intended for key rotation. However, there is no mechanism to rotate the master secret or increment the epoch in the current design.
 
-**Recommendation**: Remove `epoch` from `MasterSecretManager`, `derive_app_key`, and the sync protocol to simplify the design.
+**Resolution**: Removed `epoch` from `MasterSecretManager` and `derive_app_key`. The `epoch` property now always returns 0 for backward-compatible status reporting.
 
 
 
@@ -130,22 +151,3 @@ The `/nodes` endpoint probes all peers sequentially and synchronously. This make
 | **Doc Mismatch: Code Measure** | `auth.py` | Check done in Registry; update docs to reflect this. |
 | **Deferred: Upgrade Check** | `KMSRegistry.sol` | Upgrade checks temporarily deferred. |
 | **Last-Writer-Wins** | `data_store.py` | Accepted risk: concurrent writes may be dropped. |
-
----
-
-## Consolidated Recommendations
-
-### Priority 0 (Must Fix Before Production)
-1.  **Secure Master Secret Sync**: Add `if not config.IN_ENCLAVE` guard to client-side plaintext fallback.
-2.  **Remove Redundant Scheduler**: Delete `_start_scheduler` in `sync_manager.py`; `node_tick` handles peer refresh.
-3.  **Fix Rate Limiter**: Enforce body limits via stream counting, not just `Content-Length`.
-
-### Priority 1 (Strongly Recommended)
-4.  **Implement teePubkey TLS**: Enforce TLS with `teePubkey` verification for all enclave-to-enclave connections.
-
-### Priority 2 (Hygiene & Defense-in-Depth)
-5.  **Clean Up Dead Code**: Remove `wait_for_master_secret`, duplicates, and unused imports.
-6.  **Remove Unused Epoch**: Simplify KDF and sync logic by removing the unused `epoch` parameter.
-7.  Secure `/nodes` endpoint (serve cached status).
-8.  Correct documentation regarding "read-only" nature of KMS nodes.
-9.  Enforce strict CORS origins.

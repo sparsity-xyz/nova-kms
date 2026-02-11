@@ -121,6 +121,57 @@ flowchart TD
     Wait --> Discovery
 ```
 
+### Sealed Master Secret Exchange (P-384 ECDH)
+
+When syncing the master secret from a peer, the secret is **sealed** using ECDH + AES-256-GCM
+to ensure confidentiality even if the network is untrusted.
+
+**Enclave Key Architecture:**
+
+Every enclave has two independent keypairs:
+
+| Keypair | Curve | Purpose |
+|---------|-------|---------|
+| **ETH wallet** | secp256k1 | PoP message signing (EIP-191) via `tee_wallet_address` |
+| **teePubkey** | P-384 (secp384r1) | ECDH encryption, stored on-chain in DER/SPKI format |
+
+These keypairs are **completely independent**. The wallet is NOT derived from teePubkey.
+
+**Sealed Exchange Protocol:**
+
+1. **Request**: Node A sends `master_secret_request` with its ephemeral P-384 public key:
+   ```json
+   {
+     "type": "master_secret_request",
+     "sender_wallet": "0xA...",
+     "ecdh_pubkey": "<P-384 DER hex>"
+   }
+   ```
+
+2. **Seal**: Node B (holder of master secret) performs:
+   - Generate ephemeral P-384 keypair
+   - ECDH: `shared_secret = ECDH(ephemeral_private, requester_pubkey)`
+   - HKDF: `aes_key = HKDF-SHA256(shared_secret, salt="nova-kms:sealed-master-secret", info="aes-gcm-key")`
+   - Encrypt: `ciphertext = AES-256-GCM(aes_key, master_secret)`
+
+3. **Response**: Sealed envelope returned:
+   ```json
+   {
+     "status": "ok",
+     "sealed": {
+       "ephemeral_pubkey": "<P-384 DER hex>",
+       "ciphertext": "<hex>",
+       "nonce": "<hex>"
+     }
+   }
+   ```
+
+4. **Unseal**: Node A performs reverse ECDH using its ephemeral private key and the
+   returned `ephemeral_pubkey` to derive the same AES key and decrypt.
+
+**Security Note**: The ephemeral keypairs ensure forward secrecy. Even if the on-chain
+teePubkey is compromised later, past sealed exchanges remain confidential.
+
 ---
 
 ## 4. Inter-Node Mutual Authentication (Lightweight PoP)

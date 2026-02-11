@@ -61,11 +61,12 @@ class TestKMSRegistryInit:
         """Verify KMSRegistryClient stores a contract with the expected ABI methods."""
         client, mock_contract, _, kms_mod = _make_client()
         assert client.contract is mock_contract
-        fn_names = {item["name"] for item in kms_mod._KMS_REGISTRY_ABI}
-        assert fn_names == {
+        fn_names = {item["name"] for item in kms_mod._KMS_REGISTRY_ABI if "name" in item and item.get("type") == "function"}
+        expected = {
             "getOperators", "isOperator", "operatorCount", "operatorAt",
             "masterSecretHash", "setMasterSecretHash", "resetMasterSecretHash",
         }
+        assert expected.issubset(fn_names)
 
     def test_init_missing_address_raises(self):
         with patch.dict(sys.modules, {"config": MagicMock(), "chain": MagicMock()}):

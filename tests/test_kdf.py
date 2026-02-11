@@ -2,10 +2,10 @@
 Tests for kdf.py — Key Derivation, Master Secret, Sealed Exchange.
 
 Covers:
-  - derive_app_key: determinism, isolation, context, length, epoch
+  - derive_app_key: determinism, isolation, context, length
   - derive_data_key
   - derive_sync_key
-  - MasterSecretManager: lifecycle, rotation, derivation
+  - MasterSecretManager: lifecycle, derivation
   - seal_master_secret / unseal_master_secret: ECDH round-trip, wrong key
 """
 
@@ -62,12 +62,6 @@ class TestDeriveAppKey:
         k2 = derive_app_key(b"x" * 32, 1, "p", context="v2")
         assert k1 != k2
 
-    def test_different_epochs_produce_different_keys(self):
-        secret = b"a" * 32
-        k0 = derive_app_key(secret, 42, "path", epoch=0)
-        k1 = derive_app_key(secret, 42, "path", epoch=1)
-        assert k0 != k1
-
     def test_default_length_is_32(self):
         key = derive_app_key(b"a" * 32, 1, "p")
         assert len(key) == 32
@@ -88,11 +82,6 @@ class TestDeriveDataKey:
         k2 = derive_data_key(b"s" * 32, 2)
         assert k1 != k2
 
-    def test_epoch_changes_key(self):
-        k0 = derive_data_key(b"s" * 32, 1, epoch=0)
-        k1 = derive_data_key(b"s" * 32, 1, epoch=1)
-        assert k0 != k1
-
 
 # =============================================================================
 # derive_sync_key
@@ -104,14 +93,9 @@ class TestDeriveSyncKey:
         key = derive_sync_key(b"s" * 32)
         assert len(key) == 32
 
-    def test_epoch_changes_key(self):
-        k0 = derive_sync_key(b"s" * 32, epoch=0)
-        k1 = derive_sync_key(b"s" * 32, epoch=1)
-        assert k0 != k1
-
     def test_deterministic(self):
-        k1 = derive_sync_key(b"s" * 32, epoch=0)
-        k2 = derive_sync_key(b"s" * 32, epoch=0)
+        k1 = derive_sync_key(b"s" * 32)
+        k2 = derive_sync_key(b"s" * 32)
         assert k1 == k2
 
 
@@ -154,26 +138,6 @@ class TestMasterSecretManager:
         mgr.initialize_from_peer(b"\x01" * 32)
         assert mgr.epoch == 0
 
-    def test_rotate_increments_epoch(self):
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        new_epoch = mgr.rotate()
-        assert new_epoch == 1
-        assert mgr.epoch == 1
-
-    def test_rotate_changes_derived_keys(self):
-        mgr = MasterSecretManager()
-        mgr.initialize_from_peer(b"\x01" * 32)
-        k0 = mgr.derive(42, "test")
-        mgr.rotate()
-        k1 = mgr.derive(42, "test")
-        assert k0 != k1
-
-    def test_rotate_without_init_raises(self):
-        mgr = MasterSecretManager()
-        with pytest.raises(RuntimeError, match="not initialized"):
-            mgr.rotate()
-
     def test_get_sync_key(self):
         mgr = MasterSecretManager()
         mgr.initialize_from_peer(b"\x01" * 32)
@@ -195,41 +159,52 @@ class TestMasterSecretManager:
 
 
 class TestSealedKeyExchange:
+    """Sealed key exchange now uses P-384 (secp384r1) to match teePubkey curve."""
+
     def test_seal_and_unseal(self):
-        receiver_key = ec.generate_private_key(ec.SECP256R1())
+        receiver_key = ec.generate_private_key(ec.SECP384R1())
         receiver_pub = receiver_key.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo
         )
 
         secret = b"\xab" * 32
-        epoch = 7
 
-        sealed = seal_master_secret(secret, epoch, receiver_pub)
+        sealed = seal_master_secret(secret, receiver_pub)
         assert "ephemeral_pubkey" in sealed
         assert "ciphertext" in sealed
         assert "nonce" in sealed
-        assert sealed["epoch"] == 7
 
-        recovered_secret, recovered_epoch = unseal_master_secret(sealed, receiver_key)
+        recovered_secret = unseal_master_secret(sealed, receiver_key)
         assert recovered_secret == secret
-        assert recovered_epoch == epoch
 
     def test_different_key_fails(self):
-        receiver_key = ec.generate_private_key(ec.SECP256R1())
-        wrong_key = ec.generate_private_key(ec.SECP256R1())
+        receiver_key = ec.generate_private_key(ec.SECP384R1())
+        wrong_key = ec.generate_private_key(ec.SECP384R1())
         receiver_pub = receiver_key.public_key().public_bytes(
-            Encoding.X962, PublicFormat.UncompressedPoint
+            Encoding.DER, PublicFormat.SubjectPublicKeyInfo
         )
 
-        sealed = seal_master_secret(b"\xcc" * 32, 0, receiver_pub)
+        sealed = seal_master_secret(b"\xcc" * 32, receiver_pub)
         with pytest.raises(Exception):
             unseal_master_secret(sealed, wrong_key)
 
-    def test_different_epoch_values(self):
-        """Epoch is preserved through seal/unseal."""
-        for epoch in [0, 1, 100, 65535]:
-            key = ec.generate_private_key(ec.SECP256R1())
-            pub = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-            sealed = seal_master_secret(b"\xdd" * 32, epoch, pub)
-            _, recovered_epoch = unseal_master_secret(sealed, key)
-            assert recovered_epoch == epoch
+    def test_round_trip_multiple_secrets(self):
+        """Multiple secrets survive the seal/unseal cycle."""
+        for secret_byte in [b"\x00", b"\xdd", b"\xff"]:
+            key = ec.generate_private_key(ec.SECP384R1())
+            pub = key.public_key().public_bytes(
+                Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+            )
+            sealed = seal_master_secret(secret_byte * 32, pub)
+            recovered = unseal_master_secret(sealed, key)
+            assert recovered == secret_byte * 32
+
+    def test_sec1_format_accepted(self):
+        """Uncompressed SEC1 point format should also work for peer key."""
+        key = ec.generate_private_key(ec.SECP384R1())
+        pub = key.public_key().public_bytes(
+            Encoding.X962, PublicFormat.UncompressedPoint
+        )
+        sealed = seal_master_secret(b"\xee" * 32, pub)
+        recovered = unseal_master_secret(sealed, key)
+        assert recovered == b"\xee" * 32

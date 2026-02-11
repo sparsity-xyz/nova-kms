@@ -45,7 +45,7 @@ class TestKMSRegistryABI:
     def test_get_operators_selector(self):
         from kms_registry import _KMS_REGISTRY_ABI
 
-        abi_entry = next(e for e in _KMS_REGISTRY_ABI if e["name"] == "getOperators")
+        abi_entry = next(e for e in _KMS_REGISTRY_ABI if e.get("name") == "getOperators")
         sig = "getOperators()"
         assert keccak(sig.encode())[:4] == _EXPECTED_SELECTORS[sig]
 
@@ -69,26 +69,28 @@ class TestKMSRegistryABI:
         from kms_registry import _KMS_REGISTRY_ABI
 
         for entry in _KMS_REGISTRY_ABI:
-            if entry["name"] == "isOperator":
+            name = entry.get("name")
+            if name == "isOperator":
                 assert entry["inputs"][0]["type"] == "address"
-            elif entry["name"] == "operatorAt":
+            elif name == "operatorAt":
                 assert entry["inputs"][0]["type"] == "uint256"
-            elif entry["name"] == "getOperators":
+            elif name == "getOperators":
                 assert entry["inputs"] == []
-            elif entry["name"] == "operatorCount":
+            elif name == "operatorCount":
                 assert entry["inputs"] == []
 
     def test_abi_output_types_match_solidity(self):
         from kms_registry import _KMS_REGISTRY_ABI
 
         for entry in _KMS_REGISTRY_ABI:
-            if entry["name"] == "getOperators":
+            name = entry.get("name")
+            if name == "getOperators":
                 assert entry["outputs"][0]["type"] == "address[]"
-            elif entry["name"] == "isOperator":
+            elif name == "isOperator":
                 assert entry["outputs"][0]["type"] == "bool"
-            elif entry["name"] == "operatorCount":
+            elif name == "operatorCount":
                 assert entry["outputs"][0]["type"] == "uint256"
-            elif entry["name"] == "operatorAt":
+            elif name == "operatorAt":
                 assert entry["outputs"][0]["type"] == "address"
 
     def test_foundry_artifact_exists(self):

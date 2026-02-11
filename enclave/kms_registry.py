@@ -3,10 +3,18 @@
 KMSRegistry Python Wrapper (kms_registry.py)
 =============================================================================
 
-Read-only helpers for querying the KMSRegistry smart contract.
+Helpers for querying and interacting with the KMSRegistry smart contract.
 
-The simplified KMSRegistry only maintains an operator set managed by
-NovaAppRegistry callbacks.  KMS nodes do NOT submit on-chain transactions.
+Read-only methods:
+  - ``get_operators()``  – enumerate registered KMS operators
+  - ``is_operator()``    – check operator membership
+  - ``get_master_secret_hash()`` – read on-chain secret hash
+
+Write methods (enclave-only, used during first-node initialisation):
+  - ``set_master_secret_hash()``   – publish initial secret hash
+  - ``reset_master_secret_hash()`` – owner-only hash reset
+
+KMS nodes do NOT submit routine on-chain transactions.
 Clients / KMS nodes call ``get_operators()`` here, then look up each
 operator's instance details via ``NovaRegistry.get_instance_by_wallet()``.
 """
@@ -17,6 +25,9 @@ import logging
 from typing import List, Optional, Any
 
 from web3 import Web3
+
+from abi_helpers import abi_type_to_eth_abi_str as _abi_type_to_eth_abi_str
+from abi_helpers import decode_outputs as _decode_outputs
 
 from chain import get_chain
 from config import KMS_REGISTRY_ADDRESS
@@ -281,27 +292,7 @@ _KMS_REGISTRY_ABI = [   {'inputs': [], 'stateMutability': 'nonpayable', 'type': 
 
 
 
-def _abi_type_to_eth_abi_str(abi_item: dict) -> str:
-    abi_type = abi_item["type"]
-    if not abi_type.startswith("tuple"):
-        return abi_type
-
-    # Supports tuple and tuple[]
-    suffix = abi_type[len("tuple"):]
-    components = abi_item.get("components") or []
-    inner = ",".join(_abi_type_to_eth_abi_str(c) for c in components)
-    return f"({inner}){suffix}"
-
-
-def _decode_outputs(fn_abi: dict, raw_result: Any):
-    from eth_abi import decode as abi_decode
-    from hexbytes import HexBytes
-
-    outputs = fn_abi.get("outputs") or []
-    if not outputs:
-        return tuple()
-    output_types = [_abi_type_to_eth_abi_str(o) for o in outputs]
-    return abi_decode(output_types, HexBytes(raw_result))
+# _abi_type_to_eth_abi_str and _decode_outputs imported from abi_helpers above.
 
 
 # =============================================================================

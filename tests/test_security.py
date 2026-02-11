@@ -161,7 +161,8 @@ class TestChainFinality:
         call_args = mock_w3.eth.call.call_args
         # call_args is ((tx_dict, block_id), {}) — positional args
         confirmed_block = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("block_identifier")
-        assert confirmed_block == max(0, 100 - config.CONFIRMATION_DEPTH)
+        from chain import CONFIRMATION_DEPTH
+        assert confirmed_block == max(0, 100 - CONFIRMATION_DEPTH)
 
     def test_eth_call_finalized_fallback_on_error(self):
         from chain import Chain

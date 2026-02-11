@@ -61,7 +61,7 @@ def _setup_pop_routes(monkeypatch):
     ds = DataStore(node_id=tee_wallet)
 
     peer_cache = PeerCache(kms_registry_client=kms_reg, nova_registry=nova_reg)
-    sync_mgr = SyncManager(ds, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
+    sync_mgr = SyncManager(ds, tee_wallet, peer_cache, odyn=odyn)
 
     routes.init(
         odyn=odyn,

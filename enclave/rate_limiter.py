@@ -102,22 +102,56 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Rate limit exceeded. Try again later."},
             )
 
-        # 2. Request body size limit (non-sync endpoints)
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                body_size = int(content_length)
-                if request.url.path == "/sync":
-                    max_size = config.MAX_SYNC_PAYLOAD_BYTES
-                else:
-                    max_size = config.MAX_REQUEST_BODY_BYTES
-                if body_size > max_size:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"detail": f"Request body too large ({body_size} bytes, max {max_size})"},
-                    )
-            except ValueError:
-                pass
+        # 2. Request body size limit — H2 fix: read actual body bytes from
+        #    the stream instead of trusting the Content-Length header.
+        #    A malicious client can lie about Content-Length or use
+        #    Transfer-Encoding: chunked to bypass a header-only check.
+        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            max_size = (
+                config.MAX_SYNC_PAYLOAD_BYTES
+                if request.url.path == "/sync"
+                else config.MAX_REQUEST_BODY_BYTES
+            )
+
+            # Read the raw body via the ASGI receive channel so we can
+            # count bytes AND re-inject the verified body for downstream
+            # handlers.  Using request.stream() would mark the body as
+            # consumed, preventing FastAPI from parsing it.
+            body_chunks: list[bytes] = []
+            body_len = 0
+            exceeded = False
+
+            while True:
+                message = await request._receive()
+                chunk = message.get("body", b"")
+                if chunk:
+                    body_len += len(chunk)
+                    if body_len > max_size:
+                        exceeded = True
+                        break
+                    body_chunks.append(chunk)
+                if not message.get("more_body", False):
+                    break
+
+            if exceeded:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": f"Request body too large (>{max_size} bytes)"
+                    },
+                )
+
+            # Reassemble the body so downstream handlers can still read it.
+            body_bytes = b"".join(body_chunks)
+
+            # Replace the receive callable so that Starlette / FastAPI
+            # sees the *already-validated* body bytes when it parses the
+            # request.  This also works when the body was delivered in
+            # multiple chunks (Transfer-Encoding: chunked).
+            async def _receive():
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+            request._receive = _receive
 
         # Periodic cleanup of stale rate limit entries
         _cleanup_counter += 1

@@ -127,6 +127,22 @@ def ds():
     return DataStore(node_id="test-node")
 
 
+@pytest.fixture(autouse=True)
+def _mock_identity_verification(monkeypatch):
+    """Auto-mock H1 teePubkey verification so unit tests don't need real keys.
+
+    Tests that specifically verify identity checks should override this
+    by patching ``secure_channel.verify_peer_in_kms_operator_set`` and
+    ``secure_channel.verify_peer_identity`` in their own test body.
+    """
+    monkeypatch.setattr(
+        "secure_channel.verify_peer_in_kms_operator_set", lambda *a, **kw: True
+    )
+    monkeypatch.setattr(
+        "secure_channel.verify_peer_identity", lambda *a, **kw: True
+    )
+
+
 @pytest.fixture
 def peer_cache(kms_reg, nova_reg):
     return PeerCache(kms_registry_client=kms_reg, nova_registry=nova_reg)
@@ -134,7 +150,7 @@ def peer_cache(kms_reg, nova_reg):
 
 @pytest.fixture
 def sync_mgr(ds, peer_cache):
-    return SyncManager(ds, "0xME", peer_cache, scheduler=False)
+    return SyncManager(ds, "0xME", peer_cache)
 
 
 # =============================================================================
@@ -258,9 +274,6 @@ class TestPeerCache:
 
 
 class TestSyncManagerBasic:
-    def test_scheduler_disabled(self, sync_mgr):
-        assert sync_mgr.scheduler is None
-
     def test_set_sync_key(self, sync_mgr):
         sync_mgr.set_sync_key(b"mykey")
         assert sync_mgr._sync_key == b"mykey"
@@ -386,13 +399,17 @@ class TestHandleIncomingSync:
         assert result["status"] == "error"
         assert "sender_wallet does not match" in result["reason"]
 
-    def test_non_operator_rejected(self, sync_mgr, kms_reg):
+    def test_non_operator_rejected(self, sync_mgr, kms_reg, monkeypatch):
         kms_reg.is_operator.return_value = False
+        # Override autouse mock to test real identity verification path
+        monkeypatch.setattr(
+            "secure_channel.verify_peer_in_kms_operator_set", lambda *a, **kw: False
+        )
         pop, wallet = self._make_pop(sync_mgr)
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "error"
-        assert "Not a registered" in result["reason"]
+        assert "Peer identity verification failed" in result["reason"]
 
     def test_hmac_required_when_key_set(self, sync_mgr, kms_reg):
         sync_mgr.set_sync_key(b"shared-key")
@@ -457,10 +474,10 @@ class TestMasterSecretRequest:
         mgr.initialize_from_peer(b"\xAB" * 32)
         # Patch app_module.master_secret_mgr
         with patch.object(app_module, "master_secret_mgr", mgr, create=True):
-            ecdh_key = ec.generate_private_key(ec.SECP256R1())
+            ecdh_key = ec.generate_private_key(ec.SECP384R1())
             pub_bytes = ecdh_key.public_key().public_bytes(
-                serialization.Encoding.X962,
-                serialization.PublicFormat.UncompressedPoint,
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
             )
             body = {
                 "type": "master_secret_request",
@@ -494,36 +511,39 @@ class TestMasterSecretRequest:
 
 
 class TestVerifyAndSyncPeers:
-    def test_verified_count(self, sync_mgr, kms_reg, monkeypatch):
+    def test_verified_count(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
-        with patch("sync_manager.SyncManager.verify_and_sync_peers.__wrapped__", create=True):
-            pass
 
         # Mock probe_node to return True
         with patch("probe.probe_node", return_value=True):
-            count = sync_mgr.verify_and_sync_peers(kms_reg)
+            count = sync_mgr.verify_and_sync_peers(nova_reg)
         assert count == len(_PEER_WALLETS)
 
-    def test_unreachable_peer_skipped(self, sync_mgr, kms_reg, monkeypatch):
+    def test_unreachable_peer_skipped(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
 
         with patch("probe.probe_node", return_value=False):
-            count = sync_mgr.verify_and_sync_peers(kms_reg)
+            count = sync_mgr.verify_and_sync_peers(nova_reg)
         assert count == 0
 
-    def test_non_operator_removed(self, sync_mgr, kms_reg, monkeypatch):
+    def test_non_operator_removed(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
-        kms_reg.is_operator.return_value = False
+
+        # Make nova_reg return instances with wrong app_id so they fail validation
+        from nova_registry import InstanceStatus
+        nova_reg.get_instance_by_wallet.side_effect = lambda w: _FakeInstance(
+            instance_id=999, app_id=0, tee_wallet_address=w, status=InstanceStatus.ACTIVE,
+        )
 
         initial = len(sync_mgr.peer_cache._peers)
         with patch("probe.probe_node", return_value=True):
-            count = sync_mgr.verify_and_sync_peers(kms_reg)
+            count = sync_mgr.verify_and_sync_peers(nova_reg)
         assert count == 0
         assert len(sync_mgr.peer_cache._peers) < initial
 
@@ -584,7 +604,7 @@ class TestNodeTick:
         odyn = MagicMock()
         odyn.get_random_bytes.return_value = b"\xAB" * 32
         odyn.sign_tx.return_value = {"raw_transaction": "0xdeadbeef"}
-        mgr = SyncManager(ds, node_wallet, pc, odyn=odyn, scheduler=False)
+        mgr = SyncManager(ds, node_wallet, pc, odyn=odyn)
         return mgr
 
     # ------------------------------------------------------------------

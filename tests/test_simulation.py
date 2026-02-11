@@ -273,7 +273,7 @@ class TestBuildSimComponents:
     def test_default_build(self):
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "0"}, clear=False):
             os.environ.pop("SIM_PEERS_CSV", None)
-            comp = build_sim_components(scheduler=False)
+            comp = build_sim_components()
 
         assert "tee_wallet" in comp
         assert "node_url" in comp
@@ -293,18 +293,18 @@ class TestBuildSimComponents:
             SimPeer(tee_wallet="0xBEEF", node_url="http://localhost:7778"),
         ]
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "1"}):
-            comp = build_sim_components(peers=custom, scheduler=False)
+            comp = build_sim_components(peers=custom)
         assert comp["tee_wallet"] == "0xBEEF"
 
     def test_node_index_out_of_range_fallback(self):
         with patch.dict(os.environ, {"SIM_NODE_INDEX": "99"}):
-            comp = build_sim_components(scheduler=False)
+            comp = build_sim_components()
         # Falls back to index 0
         assert comp["tee_wallet"] == DEFAULT_SIM_PEERS[0].tee_wallet
 
     def test_authorizer_verify_succeeds(self):
         """AppAuthorizer backed by SimNovaRegistry should accept known wallets."""
-        comp = build_sim_components(scheduler=False)
+        comp = build_sim_components()
         from auth import ClientIdentity
 
         att = ClientIdentity(
@@ -314,7 +314,7 @@ class TestBuildSimComponents:
         assert result.authorized is True
 
     def test_odyn_signer_available(self):
-        comp = build_sim_components(scheduler=False)
+        comp = build_sim_components()
         sig = comp["odyn"].sign_message("hello")
         assert "signature" in sig
 
@@ -356,7 +356,7 @@ class TestSimulationApp:
         body = r.json()
         # simulation_mode is in node_info which propagates through /status
         assert body["node"]["is_operator"] is True
-        assert body["cluster"]["total_operators"] == len(DEFAULT_SIM_PEERS)
+        assert body["cluster"]["total_instances"] == len(DEFAULT_SIM_PEERS)
 
     def test_nodes(self, sim_client):
         r = sim_client.get("/nodes")

@@ -56,13 +56,33 @@ A Python/FastAPI application running inside AWS Nitro Enclave, packaged and depl
 | Health Probing | Client-side probes determine liveness |
 | Status Monitoring | `/status` endpoint showing KMS cluster health |
 
+**Enclave Key Architecture:**
+
+Every Nova Platform enclave (including KMS nodes) has **two independent keypairs** on different elliptic curves:
+
+| Keypair | Curve | On-chain Field | Purpose |
+|---------|-------|----------------|---------|
+| **ETH wallet** | secp256k1 | `teeWalletAddress` | PoP message signing (EIP-191) |
+| **teePubkey** | P-384 (secp384r1) | `teePubkey` (DER/SPKI) | ECDH encryption (master secret exchange) |
+
+These keypairs are **completely independent**:
+- The wallet address is **NOT** derived from `teePubkey`.
+- `teePubkey` is **NOT** derived from the wallet.
+- `teePubkey` is used exclusively for ECDH-based encryption between enclaves.
+- The ETH wallet is used exclusively for signing PoP/response messages.
+
 **Odyn API Usage:**
 
 ```python
-# Get KMS node identity on startup
-eth_address = odyn.eth_address()      # KMS Ethereum address
+# Get KMS node identity on startup (secp256k1 wallet)
+eth_address = odyn.eth_address()       # KMS Ethereum address for signing
 random_bytes = odyn.get_random_bytes() # Hardware RNG
-sig = odyn.sign_message(msg)          # EIP-191 signing for PoP
+sig = odyn.sign_message(msg)           # EIP-191 signing for PoP
+
+# P-384 encryption (teePubkey)
+tee_pubkey_der = odyn.get_encryption_public_key()  # P-384 DER/SPKI
+ciphertext = odyn.encrypt(plaintext, peer_pubkey)  # ECDH + AES-256-GCM
+plaintext = odyn.decrypt(ciphertext)               # ECDH decryption
 ```
 
 ### 1.2 On-chain Contracts
@@ -116,8 +136,8 @@ interface INovaAppRegistry {
         uint256 versionId;
         address operator;
         string instanceUrl;
-        bytes teePubkey;
-        address teeWalletAddress;
+        bytes teePubkey;           // P-384 (secp384r1) public key in DER/SPKI format
+        address teeWalletAddress;  // secp256k1 wallet (independent from teePubkey)
         bool zkVerified;
         InstanceStatus status;
         uint256 registeredAt;

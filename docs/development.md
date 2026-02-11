@@ -37,7 +37,8 @@ nova-kms/
 │   ├── nova_registry.py          # NovaAppRegistry read wrapper
 │   ├── kms_registry.py           # KMSRegistry read-only wrapper
 │   ├── auth.py                   # App authorization via PoP + registry
-│   ├── kdf.py                    # HKDF key derivation + CA
+│   ├── kdf.py                    # HKDF key derivation + sealed exchange
+│   ├── secure_channel.py         # P-384 teePubkey validation + ECDH
 │   ├── data_store.py             # In-memory KV store (vector clocks)
 │   ├── sync_manager.py           # Peer synchronization
 │   ├── probe.py                  # Liveness probing
@@ -56,6 +57,7 @@ nova-kms/
 │   ├── test_nova_registry.py
 │   ├── test_registry_abi.py
 │   ├── test_routes.py
+│   ├── test_secure_channel.py    # P-384 ECDH + identity verification
 │   ├── test_security.py
 │   ├── test_simulation.py
 │   └── test_sync.py

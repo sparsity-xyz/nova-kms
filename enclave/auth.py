@@ -21,11 +21,10 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Dict
 
+import config
 from config import (
-    IN_ENCLAVE,
     MAX_NONCES,
     POP_MAX_AGE_SECONDS,
-    SIMULATION_MODE,
 )
 from nova_registry import (
     AppStatus,
@@ -46,7 +45,7 @@ def set_node_wallet(wallet: str):
 
 def is_production_mode() -> bool:
     """Return True when running in an enclave (non-simulation)."""
-    return bool(IN_ENCLAVE) and not bool(SIMULATION_MODE)
+    return bool(config.IN_ENCLAVE) and not bool(config.SIMULATION_MODE)
 
 
 # =============================================================================
@@ -111,8 +110,10 @@ class _NonceStore:
             return False
         if exp < now:
             return False
-        # Opportunistic cleanup of expired entries
-        if len(self._nonces) > 1024:
+        # Periodic cleanup of expired entries to keep memory bounded.
+        # Low fix: run cleanup on every validate call (not just on issuance)
+        # to prevent unbounded growth from external replay attempts.
+        if len(self._nonces) > 256:
             self._purge(now=now)
         return True
 

@@ -266,10 +266,14 @@ def get_status():
     """Return node status and cluster overview."""
     cluster_info = {}
     try:
+        # Use PeerCache (NovaAppRegistry-sourced) for instance count
+        peer_count = 0
+        if _sync_manager and getattr(_sync_manager, "peer_cache", None):
+            peer_count = len(_sync_manager.peer_cache.get_peers())
         cluster_info = {
             "kms_app_id": _node_info.get("kms_app_id"),
             "registry_address": _node_info.get("kms_registry_address"),
-            "total_operators": _kms_registry.operator_count() if _kms_registry else 0,
+            "total_instances": peer_count,
         }
     except Exception as exc:
         cluster_info["error"] = str(exc)
@@ -285,7 +289,6 @@ def get_status():
                     "state": getattr(_master_secret_mgr, "init_state", "uninitialized")
                     if _master_secret_mgr and _master_secret_mgr.is_initialized
                     else "uninitialized",
-                    "epoch": _master_secret_mgr.epoch if _master_secret_mgr and _master_secret_mgr.is_initialized else 0,
                     "synced_from": getattr(_master_secret_mgr, "synced_from", None) if _master_secret_mgr else None,
                 }
             ),
@@ -302,37 +305,34 @@ def get_status():
 
 @router.get("/nodes")
 def list_operators():
-    """List KMS operators from on-chain registry with instance + connectivity info."""
-    if not _kms_registry:
-        raise HTTPException(status_code=503, detail="KMS registry not available")
+    """List KMS instances from NovaAppRegistry (PeerCache).
 
-    # Use the same NovaRegistry instance that PeerCache uses.
+    Node list is sourced exclusively from NovaAppRegistry via PeerCache
+    (KMS_APP_ID → ENROLLED versions → ACTIVE instances).
+    The KMSRegistry operator list is NOT used.
+
+    M2 fix: no longer performs synchronous outbound HTTP probes to every
+    peer inside this request handler.  Connectivity data comes from the
+    PeerCache which is refreshed asynchronously by ``node_tick``.
+    """
+    peer_cache = None
     nova_registry = None
     if _sync_manager and getattr(_sync_manager, "peer_cache", None):
+        peer_cache = _sync_manager.peer_cache
         nova_registry = _sync_manager.peer_cache.nova_registry
 
-    def _probe(node_url: str, *, timeout: int = 2) -> dict:
-        import time as _time
-        import requests as _requests
-
-        if not node_url:
-            return {"connected": False, "probe_ms": None}
-        url = f"{node_url.rstrip('/')}/health"
-        start = _time.time()
-        try:
-            r = _requests.get(url, timeout=timeout)
-            return {"connected": r.status_code == 200, "probe_ms": int((_time.time() - start) * 1000)}
-        except Exception:
-            return {"connected": False, "probe_ms": int((_time.time() - start) * 1000)}
+    if not peer_cache:
+        raise HTTPException(status_code=503, detail="Peer discovery not available")
 
     try:
-        operators = _kms_registry.get_operators()
+        peers = peer_cache.get_peers()
         enriched = []
-        for op in operators:
+        for p in peers:
+            wallet = p.get("tee_wallet_address", "")
             instance_info: dict = {}
             if nova_registry:
                 try:
-                    inst = nova_registry.get_instance_by_wallet(op)
+                    inst = nova_registry.get_instance_by_wallet(wallet)
                     status_val = getattr(inst.status, "value", inst.status)
                     status_name = getattr(inst.status, "name", str(inst.status))
                     instance_info = {
@@ -349,12 +349,18 @@ def list_operators():
                 except Exception as exc:
                     instance_info = {"error": str(exc)}
 
-            node_url = instance_info.get("instance_url", "")
-            probe = _probe(node_url)
+            connection_info = {
+                "in_peer_cache": True,
+                "cached_status": (
+                    getattr(p.get("status"), "name", str(p.get("status")))
+                    if p.get("status") is not None else None
+                ),
+            }
+
             enriched.append({
-                "operator": op,
+                "operator": wallet,
                 "instance": instance_info,
-                "connection": probe,
+                "connection": connection_info,
             })
 
         return {
@@ -402,12 +408,14 @@ def get_data(key: str, request: Request, response: Response):
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
     _add_mutual_signature(response, auth_info.get("client_sig"))
-    from data_store import DataKeyUnavailableError
+    from data_store import DataKeyUnavailableError, DecryptionError
 
     try:
         record = _data_store.get(app_id, key)
     except DataKeyUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except DecryptionError as exc:
+        raise HTTPException(status_code=503, detail=f"Data decryption failed: {exc}")
     if record is None:
         raise HTTPException(status_code=404, detail=f"Key not found: {key}")
     return {

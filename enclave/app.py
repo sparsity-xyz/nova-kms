@@ -100,8 +100,7 @@ def _startup_simulation() -> dict:
 
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    # scheduler=False: the lifespan creates the single background scheduler
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
 
     # Master secret: try peers first, fall back to deterministic sim secret
     peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
@@ -116,12 +115,11 @@ def _startup_simulation() -> dict:
         if result:
             if isinstance(result, dict):
                 # Sealed ECDH envelope — decrypt it
-                from cryptography.hazmat.primitives.asymmetric import ec as _ec
-                from cryptography.hazmat.primitives import serialization as _ser
                 from kdf import unseal_master_secret
-                ecdh_key = _ec.generate_private_key(_ec.SECP256R1())
-                secret, epoch = unseal_master_secret(result, ecdh_key)
-                master_secret_mgr.initialize_from_peer(secret, epoch=epoch, peer_url=healthy_peer["node_url"])
+                from secure_channel import generate_ecdh_keypair
+                ecdh_key, _ = generate_ecdh_keypair()
+                secret = unseal_master_secret(result, ecdh_key)
+                master_secret_mgr.initialize_from_peer(secret, peer_url=healthy_peer["node_url"])
             else:
                 master_secret_mgr.initialize_from_peer(result, peer_url=healthy_peer["node_url"])
             sync_manager.request_snapshot(healthy_peer["node_url"])
@@ -193,24 +191,30 @@ def _startup_production() -> dict:
     except Exception as exc:
         logger.warning(f"Contract client init failed: {exc}")
 
-    # 4. Check if this node is a registered operator
-    is_operator = False
-    if kms_registry:
+    # 4. Check if this node is a registered ACTIVE KMS instance (via NovaAppRegistry)
+    is_active_instance = False
+    if nova_registry:
         try:
-            is_operator = kms_registry.is_operator(tee_wallet)
-            if is_operator:
-                logger.info("This node is a registered KMS operator")
+            from nova_registry import InstanceStatus
+            inst = nova_registry.get_instance_by_wallet(tee_wallet)
+            kms_app_id = int(config.KMS_APP_ID or 0)
+            is_active_instance = (
+                getattr(inst, "instance_id", 0) != 0
+                and getattr(inst, "app_id", None) == kms_app_id
+                and getattr(inst, "status", None) == InstanceStatus.ACTIVE
+            )
+            if is_active_instance:
+                logger.info("This node is a registered ACTIVE KMS instance")
             else:
-                logger.warning("This node is NOT a registered KMS operator")
+                logger.warning("This node is NOT an active KMS instance in NovaAppRegistry")
         except Exception as exc:
-            logger.warning(f"Operator check failed: {exc}")
-    node_info["is_operator"] = is_operator
+            logger.warning(f"Instance check failed: {exc}")
+    node_info["is_operator"] = is_active_instance
 
     # 5. Initialize data store & sync
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    # scheduler=False: the lifespan creates the single background scheduler
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, scheduler=False)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
 
     # 6. Master secret and sync are handled by the single periodic node tick.
     # Startup should not block on initialization.
@@ -286,6 +290,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Initial node tick failed: {exc}")
 
+    # Second tick: in simulation mode the first tick writes the master secret
+    # hash on-chain (zero → non-zero) and stays offline.  A second tick picks
+    # up the non-zero hash and brings the service online.
+    try:
+        components["sync_manager"].node_tick(master_secret_mgr)
+    except Exception as exc:
+        logger.warning(f"Second node tick failed: {exc}")
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         components["sync_manager"].node_tick,
@@ -314,15 +326,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
-cors_origins_env = os.getenv("CORS_ORIGINS", "*")
-cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] or ["*"]
+# CORS — M3 fix: default to restrictive (no origins) in production.
+# Set CORS_ORIGINS env var to a comma-separated list of allowed origins.
+# Using "*" explicitly in the env var is required to allow all origins.
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env.strip():
+    cors_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+else:
+    cors_origins = []
 allow_all = "*" in cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[] if allow_all else cors_origins,
     allow_origin_regex=".*" if allow_all else None,
-    allow_credentials=True,
+    allow_credentials=not allow_all,
     allow_methods=["*"],
     allow_headers=["*"],
 )

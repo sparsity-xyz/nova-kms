@@ -18,14 +18,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
-from config import (
-    ALLOW_PLAINTEXT_FALLBACK,
-    DEFAULT_TTL_MS,
-    IN_ENCLAVE,
-    MAX_APP_STORAGE,
-    MAX_CLOCK_SKEW_MS,
-    MAX_VALUE_SIZE,
-)
 
 logger = logging.getLogger("nova-kms.data_store")
 
@@ -160,7 +152,7 @@ class _Namespace:
         import os
         key = self._get_key()
         if not key:
-            if ALLOW_PLAINTEXT_FALLBACK:
+            if config.ALLOW_PLAINTEXT_FALLBACK:
                 return value  # Dev-only fallback
             raise DataKeyUnavailableError(f"Encryption key unavailable for app {self.app_id}")
         aesgcm = AESGCM(key)
@@ -173,7 +165,7 @@ class _Namespace:
             return None
         key = self._get_key()
         if not key:
-            if ALLOW_PLAINTEXT_FALLBACK:
+            if config.ALLOW_PLAINTEXT_FALLBACK:
                 return ciphertext  # Dev-only fallback
             raise DataKeyUnavailableError(f"Decryption key unavailable for app {self.app_id}")
         try:
@@ -193,13 +185,10 @@ class _Namespace:
                 return None
             
             # Decrypt value for the caller.
-            # If decryption fails (e.g., poisoned/invalid ciphertext), treat as missing
-            # to avoid persistent 500s on repeated reads.
-            try:
-                decrypted_value = self._decrypt(rec.value) if rec.value else None
-            except DecryptionError:
-                logger.warning(f"Returning None due to decryption failure for app {self.app_id}, key '{key}'")
-                return None
+            # Low fix: propagate DecryptionError instead of silently returning
+            # None, so callers (API layer) can distinguish "key not found" from
+            # "data corrupted / key unavailable" and respond appropriately.
+            decrypted_value = self._decrypt(rec.value) if rec.value else None
             return DataRecord(
                 key=rec.key,
                 value=decrypted_value,
@@ -216,8 +205,8 @@ class _Namespace:
         node_id: str,
         ttl_ms: int = 0,
     ) -> DataRecord:
-        if len(value) > MAX_VALUE_SIZE:
-            raise ValueError(f"Value size {len(value)} exceeds MAX_VALUE_SIZE ({MAX_VALUE_SIZE})")
+        if len(value) > config.MAX_VALUE_SIZE:
+            raise ValueError(f"Value size {len(value)} exceeds MAX_VALUE_SIZE ({config.MAX_VALUE_SIZE})")
 
         with self._lock:
             old = self.records.get(key)
@@ -228,8 +217,8 @@ class _Namespace:
             new_size = len(encrypted_value)
             old_size = old.value_size() if old and not old.tombstone else 0
             projected = self._total_bytes - old_size + new_size
-            if projected > MAX_APP_STORAGE:
-                self._evict_lru(projected - MAX_APP_STORAGE)
+            if projected > config.MAX_APP_STORAGE:
+                self._evict_lru(projected - config.MAX_APP_STORAGE)
 
             rec = DataRecord(
                 key=key,
@@ -237,7 +226,7 @@ class _Namespace:
                 version=vc,
                 updated_at_ms=int(time.time() * 1000),
                 tombstone=False,
-                ttl_ms=ttl_ms if ttl_ms else DEFAULT_TTL_MS,
+                ttl_ms=ttl_ms if ttl_ms else config.DEFAULT_TTL_MS,
             )
             self._total_bytes += new_size - old_size
             self.records[key] = rec
@@ -291,14 +280,14 @@ class _Namespace:
             # Basic bounds checks (defense-in-depth regardless of mode)
             if incoming.value is not None:
                 # incoming.value is stored encrypted; allow modest overhead.
-                if len(incoming.value) > (MAX_VALUE_SIZE + 128):
+                if len(incoming.value) > (config.MAX_VALUE_SIZE + 128):
                     logger.warning(
                         f"Rejecting record '{incoming.key}': value too large ({len(incoming.value)} bytes)"
                     )
                     return False
 
             # In production, reject obviously invalid ciphertext and optionally probe-decrypt.
-            if IN_ENCLAVE and incoming.value is not None and not incoming.tombstone:
+            if config.IN_ENCLAVE and incoming.value is not None and not incoming.tombstone:
                 # Format is: 12-byte nonce + AESGCM(ciphertext||tag). Tag is 16 bytes.
                 if len(incoming.value) < (12 + 16):
                     logger.warning(
@@ -326,10 +315,10 @@ class _Namespace:
             # Clock skew protection: reject records with implausible timestamps
             now_ms = int(time.time() * 1000)
             skew = abs(incoming.updated_at_ms - now_ms)
-            if MAX_CLOCK_SKEW_MS > 0 and skew > MAX_CLOCK_SKEW_MS:
+            if config.MAX_CLOCK_SKEW_MS > 0 and skew > config.MAX_CLOCK_SKEW_MS:
                 logger.warning(
                     f"Rejecting record '{incoming.key}': clock skew {skew}ms "
-                    f"exceeds MAX_CLOCK_SKEW_MS ({MAX_CLOCK_SKEW_MS}ms)"
+                    f"exceeds MAX_CLOCK_SKEW_MS ({config.MAX_CLOCK_SKEW_MS}ms)"
                 )
                 return False
 

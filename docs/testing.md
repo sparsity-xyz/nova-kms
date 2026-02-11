@@ -48,6 +48,7 @@ pip install pytest httpx
 | `test_nova_registry.py` | `nova_registry.py` | Registry reads and cache behavior |
 | `test_registry_abi.py` | ABI helpers | Selector/type alignment with artifacts (when present) |
 | `test_routes.py` | `routes.py` + `app.py` | Full API integration via FastAPI TestClient |
+| `test_secure_channel.py` | `secure_channel.py` | P-384 validation, verify_peer_identity, ECDH key exchange |
 | `test_security.py` | helpers | SSRF URL validation, rate limiting, finalized eth_call behavior |
 | `test_simulation.py` | `simulation.py` | Simulation-mode bootstrapping and safety guardrails |
 | `test_sync.py` | `sync_manager.py` | PeerCache, delta/snapshot sync, mutual PoP + HMAC verification |
