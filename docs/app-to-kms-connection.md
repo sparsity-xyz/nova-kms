@@ -2,9 +2,10 @@
 
 This document describes the end-to-end flow for a **Nova App (client)** to connect to **Nova KMS (server)** and complete request authentication / mutual proof.
 
-> Important: In the current implementation, **App→KMS business requests do NOT use an ECDH-encrypted session**. App→KMS uses **PoP (EIP-191 signatures) + on-chain authorization checks**.
+> **Note**: The current implementation uses **PoP (EIP-191 signatures) + on-chain authorization checks + teePubkey-based E2E encryption**.
 >
-> **ECDH (P-384) is currently used for the KMS↔KMS master secret sealed exchange** (see Appendix A).
+> - **App→KMS**: PoP authentication + E2E encrypted payloads (using Odyn's P-384 ECDH + AES-256-GCM)
+> - **KMS↔KMS**: PoP authentication + E2E encrypted sync messages + sealed master secret exchange
 
 ---
 
@@ -13,7 +14,7 @@ This document describes the end-to-end flow for a **Nova App (client)** to conne
 Each enclave instance has two **fully independent** keypairs:
 
 - **ETH wallet (secp256k1)**: on-chain field `teeWalletAddress`, used for signing (PoP / response mutual signature).
-- **teePubkey (P-384 / secp384r1)**: on-chain field `teePubkey` (typically DER/SPKI), used for ECDH encryption (currently mainly for KMS↔KMS).
+- **teePubkey (P-384 / secp384r1)**: on-chain field `teePubkey` (typically DER/SPKI), used for **E2E encryption** of all sensitive payloads.
 
 They are different keypairs on different curves:
 - the wallet address is **NOT** derived from `teePubkey`
@@ -100,7 +101,7 @@ Validation logic:
 
 ---
 
-## 3. App → KMS: Full PoP-authenticated Request Flow
+## 3. App → KMS: Full PoP-authenticated Request Flow with E2E Encryption
 
 ### 3.1 Overview (Sequence)
 
@@ -113,29 +114,62 @@ sequenceDiagram
 
   App->>Chain: getInstanceByWallet(kms_wallet)
   Chain-->>App: instanceUrl + teePubkey + zkVerified + status
-  App->>App: validate teePubkey is P-384 (optional but recommended)
+  App->>App: validate teePubkey is P-384
 
   App->>KMS: GET /nonce
   KMS-->>App: { nonce: base64(nonce_bytes) }
 
+  App->>KMS: GET /status
+  KMS-->>App: { node: { tee_wallet, tee_pubkey, ... } }
+
   Note over App: message = "NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<timestamp>"
   Note over App: client_sig = EIP-191 sign(message) with app wallet (secp256k1)
+  Note over App: E2E encrypt request body with KMS teePubkey
 
-  App->>KMS: POST /kms/derive (PoP headers + JSON body)
+  App->>KMS: POST /kms/derive (PoP headers + Encrypted Envelope)
 
   KMS->>KMS: validate nonce (single-use) + validate timestamp
-  KMS->>KMS: recover app wallet from signature
+  KMS->>KMS: recover app_wallet from PoP signature
   KMS->>Chain: getInstanceByWallet(app_wallet)
-  Chain-->>KMS: instance(appId/versionId/zkVerified/status)
+  Chain-->>KMS: instance(appId/versionId/zkVerified/status/teePubkey)
+  
+  Note over KMS: SECURITY: verify envelope.sender_tee_pubkey == on-chain teePubkey
+  KMS->>KMS: reject if mismatch (MITM prevention)
+  
+  KMS->>KMS: decrypt request body (E2E)
   KMS->>Chain: getApp(appId) + getVersion(appId, versionId)
   Chain-->>KMS: status checks
 
   Note over KMS: if authorized: derive key / read/write KV
+  Note over KMS: E2E encrypt response with ON-CHAIN App teePubkey
   Note over KMS: resp_sig = sign("NovaKMS:Response:<client_sig>:<kms_wallet>")
 
-  KMS-->>App: 200 + X-KMS-Response-Signature
+  KMS-->>App: 200 + X-KMS-Response-Signature + Encrypted Envelope
   App->>App: recover signer from resp_sig == kms_wallet
+  App->>App: decrypt response body (E2E)
 ```
+
+### 3.2 E2E Encryption Envelope Format
+
+All sensitive request/response bodies are wrapped in an encryption envelope:
+
+```json
+{
+  "sender_tee_pubkey": "<P-384 DER SPKI public key, hex>",
+  "nonce": "<AES-GCM nonce, hex>",
+  "ciphertext": "<encrypted payload, hex>"
+}
+```
+
+- **sender_tee_pubkey**: The sender's P-384 public key (verified against on-chain registration)
+- **nonce**: 12-byte AES-GCM nonce
+- **ciphertext**: AES-256-GCM encrypted JSON payload
+
+**SECURITY**: The server verifies that `sender_tee_pubkey` matches the on-chain registered teePubkey for the authenticated wallet. This prevents MITM attacks where an attacker re-encrypts requests with their own key.
+
+The encryption uses Odyn's built-in ECDH + AES-256-GCM:
+- Sender calls `Odyn.encrypt(plaintext, receiver_tee_pubkey)`
+- Receiver calls `Odyn.decrypt(nonce, sender_tee_pubkey, ciphertext)`
 
 ---
 
@@ -147,7 +181,13 @@ sequenceDiagram
 - returns: `{"nonce": "<base64>"}`
 - the server applies a simple rate limit to `/nonce` (see `routes.py`)
 
-### 4.2 App generates the PoP signature
+### 4.2 Fetch KMS teePubkey for E2E Encryption
+
+- `GET /status`
+- returns: `{"node": {"tee_wallet": "0x...", "tee_pubkey": "<hex>", ...}}`
+- `tee_pubkey` is the P-384 DER SPKI public key for E2E encryption
+
+### 4.3 App generates the PoP signature
 
 The app must know the target node’s `kms_wallet` (i.e. the node’s on-chain `teeWalletAddress`). You can also obtain it from `GET /status` → `node.tee_wallet`.
 
@@ -165,7 +205,7 @@ Server-side logic in `nova-kms/enclave/auth.py`:
 - timestamp must be within the allowed window (`POP_MAX_AGE_SECONDS`)
 - the recovered wallet from the signature is the real identity (`X-App-Wallet` is an optional hint, but if provided must match)
 
-### 4.3 App request headers
+### 4.4 App request headers
 
 Required headers for App→KMS:
 
@@ -174,15 +214,27 @@ Required headers for App→KMS:
 - `X-App-Timestamp`: `timestamp`
 - `X-App-Wallet`: (optional) explicit wallet address; if provided it must match the recovered signer
 
-### 4.4 Example business request: POST /kms/derive
+### 4.5 Example business request: POST /kms/derive
 
 - `POST /kms/derive`
 
+**Request body** (E2E encrypted envelope containing the inner payload):
+
 ```json
 {
-  "path": "some_key_path",
-  "context": "",
-  "length": 32
+  "sender_tee_pubkey": "<app's P-384 teePubkey, hex>",
+  "nonce": "<AES-GCM nonce, hex>",
+  "ciphertext": "<encrypted JSON: {\"path\": \"some_key_path\", \"context\": \"\", \"length\": 32}>"
+}
+```
+
+**Response body** (E2E encrypted envelope):
+
+```json
+{
+  "sender_tee_pubkey": "<KMS's P-384 teePubkey, hex>",
+  "nonce": "<AES-GCM nonce, hex>",
+  "ciphertext": "<encrypted JSON: {\"key\": \"<base64 derived key>\", \"path\": \"...\"}>"
 }
 ```
 
@@ -207,7 +259,7 @@ After authentication succeeds, the server authorizes the request via `AppAuthori
   - `status == ACTIVE`
   - `zkVerified == true`
 3. `getApp(appId)`: App must be `ACTIVE`
-4. `getVersion(appId, versionId)`: Version must be `ENROLLED` or `DEPRECATED`
+4. `getVersion(appId, versionId)`: Version must be `ENROLLED`
 
 Implementation: `nova-kms/enclave/auth.py`.
 
@@ -231,28 +283,79 @@ Example client implementation: `nova-examples/nova-kms-client/enclave/kms_identi
 
 ---
 
-## Appendix A: KMS ↔ KMS ECDH (P-384) and sealed master secret exchange
+## Appendix A: KMS ↔ KMS Authentication and Sync
 
-This is not the App→KMS business request flow, but it is where the current implementation **actually uses ECDH (P-384)**.
+KMS nodes are regular Nova apps registered under `KMS_APP_ID`. The KMS↔KMS authentication follows the **same pattern as App→KMS**, using `AppAuthorizer(require_app_id=KMS_APP_ID)`:
 
-### A.1 Purpose
+### A.1 KMS Peer Authorization (Same as App→KMS)
 
-- When a KMS node boots and detects active peers, it requests the cluster master secret from a peer
-- The master secret is transmitted in sealed form using **ECDH + HKDF + AES-256-GCM**
+When KMS node A sends a sync request to KMS node B, node B verifies A using:
 
-### A.2 Request/Response
+1. `getInstanceByWallet(peer_wallet)` → instance
+2. instance must satisfy:
+   - `status == ACTIVE`
+   - `zkVerified == true`
+3. `instance.app_id == KMS_APP_ID` (verify it's a KMS instance)
+4. `getVersion(KMS_APP_ID, versionId)`: Version must be `ENROLLED`
+5. `teePubkey` must be a valid P-384 public key
 
-Request body (the requester provides its **ephemeral P-384 public key in DER**):
+Implementation: `nova-kms/enclave/auth.py` → `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
+
+### A.2 KMS↔KMS Sync Request Flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant KMS_A as KMS Node A (Sender)
+  participant Chain as NovaAppRegistry
+  participant KMS_B as KMS Node B (Receiver)
+
+  KMS_A->>Chain: getInstanceByWallet(B_wallet)
+  Chain-->>KMS_A: instanceUrl + teePubkey + status
+  KMS_A->>KMS_A: verify B is ACTIVE KMS instance
+
+  KMS_A->>KMS_B: GET /nonce
+  KMS_B-->>KMS_A: { nonce: base64 }
+
+  Note over KMS_A: message = "NovaKMS:Auth:<nonce>:<B_wallet>:<timestamp>"
+  Note over KMS_A: sig = EIP-191 sign(message)
+  Note over KMS_A: E2E encrypt sync body with B's teePubkey
+
+  KMS_A->>KMS_B: POST /sync (PoP headers + Encrypted Envelope)
+
+  KMS_B->>KMS_B: validate nonce + timestamp
+  KMS_B->>KMS_B: recover A_wallet from signature
+  KMS_B->>KMS_B: decrypt request body (E2E)
+
+  KMS_B->>Chain: getInstanceByWallet(A_wallet)
+  Chain-->>KMS_B: instance(app_id/version_id/zkVerified/status/teePubkey)
+
+  Note over KMS_B: AppAuthorizer(require_app_id=KMS_APP_ID).verify():<br/>ACTIVE + zkVerified + app_id==KMS_APP_ID + version ENROLLED
+
+  Note over KMS_B: process sync request
+  Note over KMS_B: E2E encrypt response with A's teePubkey
+  Note over KMS_B: resp_sig = sign("NovaKMS:Response:<sig>:<B_wallet>")
+
+  KMS_B-->>KMS_A: 200 + X-KMS-Peer-Signature + Encrypted Envelope
+  KMS_A->>KMS_A: verify resp_sig
+  KMS_A->>KMS_A: decrypt response (E2E)
+```
+
+### A.3 Master Secret Sealed Exchange
+
+For the initial master secret transfer, an additional ECDH layer is used:
+
+Request body (inside the E2E encrypted envelope):
 
 ```json
 {
   "type": "master_secret_request",
   "sender_wallet": "0xSender...",
-  "ecdh_pubkey": "<P-384 DER hex>"
+  "ecdh_pubkey": "<ephemeral P-384 DER hex>"
 }
 ```
 
-Response body (the peer returns a sealed envelope):
+Response body (inside the E2E encrypted envelope):
 
 ```json
 {
@@ -272,13 +375,65 @@ Implementation:
 
 ---
 
-## Appendix B: Current implementation vs. a “full secure channel”
+## Appendix B: Security Summary
 
-- Current:
-  - App→KMS: PoP (secp256k1 signatures) + on-chain authorization + mutual response signature
-  - KMS↔KMS: PoP + (P-384 ECDH for the master secret sealed exchange)
+The current implementation provides a **unified authorization model** for both App→KMS and KMS↔KMS using `AppAuthorizer`:
 
-- Not implemented (if you expect “all application traffic is E2E encrypted”):
-  - teePubkey-based end-to-end encryption of HTTP payloads / custom TLS trust root / true mTLS (RA-TLS)
+### Transport Layer Assumption
 
-If you want to upgrade App→KMS to “teePubkey-driven end-to-end encryption”, I can propose a minimal, implementable protocol and code changes while keeping PoP backward-compatible (but that would be a feature change and is out of scope for this document).
+The security model assumes **plaintext HTTP** transport. All confidentiality is provided by teePubkey-based E2E encryption, not TLS. This design choice is intentional:
+- Enclave services may terminate at non-enclave load balancers
+- The E2E encryption provides post-compromise security even if TLS is terminated outside the enclave
+- PoP signatures prevent replay/tampering at the application layer
+
+### Authorization Checks
+
+| Check | App→KMS | KMS↔KMS |
+|-------|---------|---------|
+| `require_app_id` | 0 (any app) | KMS_APP_ID |
+| Instance ACTIVE | ✓ | ✓ |
+| Instance zkVerified | ✓ | ✓ |
+| App ID matches | - | ✓ |
+| App ACTIVE | ✓ | ✓ |
+| Version ENROLLED | ✓ | ✓ |
+
+Usage:
+- **App→KMS**: `AppAuthorizer(require_app_id=0).verify(identity)`
+- **KMS↔KMS**: `AppAuthorizer(require_app_id=KMS_APP_ID).verify(identity)`
+
+### E2E Encryption teePubkey Verification
+
+**CRITICAL SECURITY**: KMS verifies that the `sender_tee_pubkey` in encrypted envelopes matches the on-chain registered teePubkey for the authenticated wallet. This prevents MITM attacks:
+
+1. App sends request with PoP headers + encrypted envelope
+2. KMS authenticates App via PoP (recovers wallet from signature)
+3. KMS looks up App's on-chain teePubkey via `getInstanceByWallet(recovered_wallet)`
+4. KMS verifies `envelope.sender_tee_pubkey == on-chain teePubkey` ← **MITM prevention**
+5. Only then does KMS decrypt the request
+6. KMS encrypts response using the **on-chain** teePubkey (not the envelope's)
+
+This ensures:
+- Request payloads cannot be read by MITM (they can't forge a valid PoP signature)
+- Response payloads are only decryptable by the registered App
+
+### Security Features
+
+- **App→KMS**:
+  - PoP (secp256k1 EIP-191 signatures) for authentication
+  - On-chain authorization via `AppAuthorizer.verify()`
+  - Mutual response signature for server authentication
+  - **E2E encryption** of all sensitive payloads using teePubkey
+  - **sender_tee_pubkey verification** against on-chain registry
+
+- **KMS↔KMS**:
+  - PoP (secp256k1 EIP-191 signatures) for peer authentication
+  - On-chain authorization via `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
+  - HMAC-signed sync messages (additional integrity layer)
+  - **E2E encryption** of all sync payloads using teePubkey
+  - **sender_tee_pubkey verification** against on-chain registry
+  - Sealed ECDH exchange for master secret transfer (additional encryption layer)
+
+### Implementation Files
+
+- E2E encryption helpers: `nova-kms/enclave/secure_channel.py` (`encrypt_json_envelope`, `decrypt_json_envelope`)
+- teePubkey verification: `nova-kms/enclave/routes.py` (`_decrypt_request_body`, `/sync`)

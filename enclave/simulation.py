@@ -102,14 +102,26 @@ class SimOdyn:
     """Local-only signer used in simulation mode.
 
     This avoids relying on an external Odyn service while still supporting
-    PoP-based auth flows.
+    PoP-based auth flows and E2E encryption.
     """
 
     def __init__(self, private_key_hex: str):
         from eth_account import Account
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization as _ser
 
         pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
         self._account = Account.from_key(bytes.fromhex(pk))
+
+        # Generate a deterministic P-384 keypair for encryption
+        seed = hashlib.sha256(f"sim-odyn-p384|{self._account.address}".encode()).digest()
+        seed_48 = hashlib.sha384(seed).digest()
+        p384_order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973
+        private_value = int.from_bytes(seed_48, "big") % (p384_order - 1) + 1
+        self._p384_private_key = ec.derive_private_key(private_value, ec.SECP384R1())
+        self._p384_public_key_der = self._p384_private_key.public_key().public_bytes(
+            _ser.Encoding.DER, _ser.PublicFormat.SubjectPublicKeyInfo,
+        )
 
     def eth_address(self) -> str:
         return self._account.address
@@ -119,6 +131,42 @@ class SimOdyn:
 
         signed = self._account.sign_message(encode_defunct(text=message))
         return {"signature": signed.signature.hex()}
+
+    def get_encryption_public_key_der(self) -> bytes:
+        """Return the P-384 public key in DER format (for E2E encryption)."""
+        return self._p384_public_key_der
+
+    def encrypt(self, plaintext: str, receiver_pubkey_hex: str) -> dict:
+        """Simulate ECDH + AES-256-GCM encryption.
+
+        In simulation mode, we just return the plaintext encoded with a
+        marker so that decrypt can reverse it. This is NOT secure but
+        allows the protocol to be tested end-to-end.
+        """
+        import os
+
+        nonce = os.urandom(12)
+        # Fake ciphertext: just base64 the plaintext with a marker
+        import base64
+        fake_ct = base64.b64encode(b"SIM:" + plaintext.encode()).hex()
+
+        return {
+            "nonce": nonce.hex(),
+            "ciphertext": fake_ct,
+        }
+
+    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, ciphertext_hex: str) -> str:
+        """Simulate ECDH + AES-256-GCM decryption.
+
+        Reverses the fake encryption from ``encrypt()``.
+        """
+        import base64
+
+        ct_bytes = bytes.fromhex(ciphertext_hex)
+        decoded = base64.b64decode(ct_bytes)
+        if not decoded.startswith(b"SIM:"):
+            raise ValueError("Invalid simulation ciphertext")
+        return decoded[4:].decode()
 
 
 # =============================================================================

@@ -519,7 +519,7 @@ class SyncManager:
 
     def _make_request(self, url: str, body: dict, timeout: int = None) -> Optional[requests.Response]:
         """
-        Make an outbound sync request with URL validation, optional
+        Make an outbound sync request with URL validation, E2E encryption,
         HMAC signing, and PoP mutual authentication.
         """
         if timeout is None:
@@ -552,12 +552,18 @@ class SyncManager:
         # transmitting any data to the peer.  This prevents MitM by a host
         # that intercepts the TLS connection but cannot forge the on-chain
         # teePubkey registration.
-        from secure_channel import verify_peer_identity
+        from secure_channel import verify_peer_identity, get_tee_pubkey_hex_for_wallet
         if not verify_peer_identity(peer_wallet, self.peer_cache.nova_registry):
             logger.warning(
                 f"Refusing sync request to {url}: peer {peer_wallet} failed "
                 "teePubkey verification"
             )
+            return None
+
+        # Get peer's teePubkey for E2E encryption
+        peer_tee_pubkey_hex = get_tee_pubkey_hex_for_wallet(peer_wallet, self.peer_cache.nova_registry)
+        if not peer_tee_pubkey_hex:
+            logger.warning(f"Refusing sync request to {url}: cannot get peer teePubkey")
             return None
 
         # Prevent self-sync: do not send requests to ourselves.
@@ -590,8 +596,16 @@ class SyncManager:
         if "X-KMS-Signature" not in headers:
             return None
 
-        # 2. HMAC signing (using sync key)
-        payload_json = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        # 2. E2E encrypt the body using peer's teePubkey
+        from secure_channel import encrypt_json_envelope
+        try:
+            encrypted_body = encrypt_json_envelope(self.odyn, body, peer_tee_pubkey_hex)
+        except Exception as exc:
+            logger.warning(f"Failed to encrypt sync request body: {exc}")
+            return None
+
+        # 3. HMAC signing (using sync key) - sign the encrypted envelope
+        payload_json = json.dumps(encrypted_body, sort_keys=True, separators=(",", ":"))
         sig = self._sign_payload(payload_json)
         if sig:
             headers["X-Sync-Signature"] = sig
@@ -604,7 +618,7 @@ class SyncManager:
                 timeout=timeout,
             )
             
-            # 3. Verify Peer response signature for mutual auth
+            # 4. Verify Peer response signature for mutual auth
             resp_sig = resp.headers.get("X-KMS-Peer-Signature")
             if not resp_sig:
                 logger.warning(f"Rejecting sync response from {url}: missing peer signature")
@@ -619,6 +633,18 @@ class SyncManager:
 
             logger.debug(f"Mutual PoP verified for {peer_wallet}")
 
+            # 5. Decrypt the response body (E2E)
+            try:
+                from secure_channel import decrypt_json_envelope
+                resp_data = resp.json()
+                # Check if response is encrypted envelope
+                if all(k in resp_data for k in ("sender_tee_pubkey", "nonce", "ciphertext")):
+                    decrypted_data = decrypt_json_envelope(self.odyn, resp_data)
+                    # Create a new response-like object with decrypted data
+                    resp._decrypted_json = decrypted_data
+            except Exception as exc:
+                logger.debug(f"Response decryption skipped: {exc}")
+
             return resp
         except Exception as exc:
             logger.debug(f"Request to {url} failed: {exc}")
@@ -627,6 +653,12 @@ class SyncManager:
     # ------------------------------------------------------------------
     # Delta push
     # ------------------------------------------------------------------
+
+    def _get_response_json(self, resp: requests.Response) -> dict:
+        """Get JSON from response, preferring decrypted data if available."""
+        if hasattr(resp, "_decrypted_json") and resp._decrypted_json is not None:
+            return resp._decrypted_json
+        return resp.json()
 
     def push_deltas(self) -> int:
         """
@@ -680,7 +712,7 @@ class SyncManager:
             return 0
         try:
             resp.raise_for_status()
-            snapshot_data = resp.json().get("data", {})
+            snapshot_data = self._get_response_json(resp).get("data", {})
             merged = self.data_store.merge_snapshot(snapshot_data)
             logger.info(f"Snapshot from {peer_url}: {merged} records merged")
             return merged
@@ -709,7 +741,7 @@ class SyncManager:
             return None
         try:
             resp.raise_for_status()
-            data = resp.json()
+            data = self._get_response_json(resp)
             # Sealed envelope response
             if "sealed" in data:
                 return data["sealed"]
@@ -810,17 +842,27 @@ class SyncManager:
         if body_sender and body_sender.lower() != p_wallet.lower():
             return {"status": "error", "reason": "sender_wallet does not match PoP signature"}
 
-        # C. Verify wallet is a registered KMS instance with valid teePubkey (H1 fix)
-        from secure_channel import verify_peer_in_kms_operator_set
+        # C. Verify that peer is an authorized KMS instance (same pattern as App→KMS)
+        # KMS nodes are regular Nova apps, so we use AppAuthorizer with require_app_id:
+        #   - Instance is ACTIVE + zkVerified
+        #   - Instance app_id == KMS_APP_ID
+        #   - Version is ENROLLED
+        #   - teePubkey is valid P-384
+        from auth import AppAuthorizer, ClientIdentity
+        from config import KMS_APP_ID
         try:
-            if not verify_peer_in_kms_operator_set(
-                p_wallet,
-                self.peer_cache.nova_registry,
-            ):
-                return {"status": "error", "reason": "Peer identity verification failed (operator + teePubkey)"}
+            peer_identity = ClientIdentity(tee_wallet=p_wallet, signature=p_sig)
+            peer_authorizer = AppAuthorizer(
+                registry=self.peer_cache.nova_registry,
+                require_app_id=int(KMS_APP_ID or 0)
+            )
+            auth_result = peer_authorizer.verify(peer_identity)
+            if not auth_result.authorized:
+                logger.warning(f"Peer authorization failed for {p_wallet}: {auth_result.reason}")
+                return {"status": "error", "reason": f"Peer authorization failed: {auth_result.reason}"}
         except Exception as exc:
-            logger.warning(f"Peer identity verification failed for {p_wallet}: {exc}")
-            return {"status": "error", "reason": "Peer identity verification failed"}
+            logger.warning(f"Peer authorization error for {p_wallet}: {exc}")
+            return {"status": "error", "reason": "Peer authorization failed"}
 
         logger.debug(f"KMS PoP verified for {p_wallet}")
 

@@ -73,11 +73,13 @@ def _setup_routes(monkeypatch):
 
     # NovaAppRegistry mock for PeerCache (used by /nodes and sync verification)
     from dataclasses import dataclass
+    from nova_registry import AppStatus
 
     @dataclass
     class _FakeApp:
         app_id: int = 43
         latest_version_id: int = 1
+        status: object = AppStatus.ACTIVE
 
     @dataclass
     class _FakeVersion:
@@ -104,15 +106,31 @@ def _setup_routes(monkeypatch):
                          instance_url="http://localhost:5002", operator="0x" + "BB" * 20),
     }
 
+    # Counter for generating unique instance IDs for dynamically created instances
+    _next_instance_id = [100]  # Mutable to allow modification in lambda
+
+    def _get_instance_by_wallet(w: str) -> _FakeInstance:
+        """Return a registered instance, or create a valid one for any wallet (for sync tests)."""
+        for inst in _instances.values():
+            if inst.tee_wallet_address.lower() == w.lower():
+                return inst
+        # For sync tests: return a valid instance for any wallet
+        _next_instance_id[0] += 1
+        return _FakeInstance(
+            instance_id=_next_instance_id[0],
+            app_id=43,  # KMS_APP_ID
+            version_id=1,
+            tee_wallet_address=w,
+            status=InstanceStatus.ACTIVE,
+            zk_verified=True,
+        )
+
     nova_reg = MagicMock()
     nova_reg.get_app.return_value = _FakeApp()
     nova_reg.get_version.return_value = _FakeVersion()
     nova_reg.get_instances_for_version.return_value = list(_instances.keys())
     nova_reg.get_instance.side_effect = lambda iid: _instances[iid]
-    nova_reg.get_instance_by_wallet.side_effect = lambda w: next(
-        (inst for inst in _instances.values() if inst.tee_wallet_address.lower() == w.lower()),
-        _FakeInstance(tee_wallet_address=w),
-    )
+    nova_reg.get_instance_by_wallet.side_effect = _get_instance_by_wallet
 
     # Allow http URLs and localhost in tests
     monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)

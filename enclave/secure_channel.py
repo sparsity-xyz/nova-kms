@@ -3,9 +3,8 @@
 Secure Channel (secure_channel.py)
 =============================================================================
 
-Provides teePubkey-based identity verification and ECDH encryption helpers
-for enclave-to-enclave communication.  Addresses audit finding H1 (Missing
-Enclave-to-Enclave TLS with teePubkey Verification).
+Provides teePubkey-based identity verification and E2E encryption helpers
+for enclave-to-enclave and app-to-enclave communication.
 
 Key Architecture
 ----------------
@@ -20,27 +19,159 @@ Every Nova Platform enclave has **two independent keypairs**:
 These keypairs live on *different curves* and are *completely independent*.
 The wallet address is **not** derived from teePubkey and vice-versa.
 
-This module:
-  1. Validates that a peer's ``teePubkey`` (registered on-chain in
-     NovaAppRegistry) is a well-formed P-384 public key.
-  2. Verifies that the peer's wallet address matches the on-chain
-     ``tee_wallet_address`` and the instance is ACTIVE.
-  3. Provides ECDH helpers using P-384 keys for session encryption.
+E2E Encryption Protocol
+-----------------------
+All sensitive payloads (App↔KMS and KMS↔KMS) are encrypted using the
+teePubkey-based ECDH + AES-256-GCM scheme provided by Odyn:
 
-Usage: before accepting sync requests or establishing outbound connections,
-call ``verify_peer_identity(wallet, registry)`` to confirm the peer's
-on-chain registration is valid.
+  1. Sender fetches receiver's teePubkey from on-chain NovaAppRegistry.
+  2. Sender calls ``Odyn.encrypt(plaintext, receiver_teePubkey)`` which
+     performs ECDH key agreement and AES-256-GCM encryption.
+  3. Envelope format: ``{"sender_tee_pubkey": "<hex>", "nonce": "<hex>",
+     "ciphertext": "<hex>"}``
+  4. Receiver calls ``Odyn.decrypt(nonce, sender_teePubkey, ciphertext)``
+     to recover the plaintext.
+
+This ensures confidentiality even if TLS is terminated outside the enclave.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 
+if TYPE_CHECKING:
+    from odyn import Odyn
+
 logger = logging.getLogger("nova-kms.secure_channel")
+
+
+# =============================================================================
+# E2E Envelope Encryption (teePubkey-based)
+# =============================================================================
+
+
+def encrypt_envelope(
+    odyn: "Odyn",
+    plaintext: str,
+    receiver_tee_pubkey_hex: str,
+) -> Dict[str, str]:
+    """
+    Encrypt a plaintext message for a specific receiver using their teePubkey.
+
+    Uses Odyn's built-in ECDH + AES-256-GCM encryption.
+
+    Parameters
+    ----------
+    odyn : Odyn
+        The Odyn SDK instance of the sender.
+    plaintext : str
+        The plaintext message (typically JSON-encoded).
+    receiver_tee_pubkey_hex : str
+        The receiver's P-384 teePubkey in hex (DER/SPKI format).
+
+    Returns
+    -------
+    dict
+        Envelope with keys: sender_tee_pubkey, nonce, ciphertext (all hex).
+    """
+    # Get sender's teePubkey
+    sender_pubkey_der = odyn.get_encryption_public_key_der()
+    sender_pubkey_hex = sender_pubkey_der.hex()
+
+    # Encrypt using receiver's teePubkey
+    result = odyn.encrypt(plaintext, receiver_tee_pubkey_hex)
+
+    return {
+        "sender_tee_pubkey": sender_pubkey_hex,
+        "nonce": result.get("nonce", "").lstrip("0x"),
+        "ciphertext": result.get("ciphertext", "").lstrip("0x"),
+    }
+
+
+def decrypt_envelope(
+    odyn: "Odyn",
+    envelope: Dict[str, str],
+) -> str:
+    """
+    Decrypt an envelope that was encrypted for this node's teePubkey.
+
+    Parameters
+    ----------
+    odyn : Odyn
+        The Odyn SDK instance of the receiver.
+    envelope : dict
+        Envelope with keys: sender_tee_pubkey, nonce, ciphertext (all hex).
+
+    Returns
+    -------
+    str
+        The decrypted plaintext.
+
+    Raises
+    ------
+    ValueError
+        If the envelope is malformed or decryption fails.
+    """
+    sender_pubkey_hex = envelope.get("sender_tee_pubkey", "")
+    nonce_hex = envelope.get("nonce", "")
+    ciphertext_hex = envelope.get("ciphertext", "")
+
+    if not all([sender_pubkey_hex, nonce_hex, ciphertext_hex]):
+        raise ValueError("Malformed envelope: missing required fields")
+
+    try:
+        plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, ciphertext_hex)
+        return plaintext
+    except Exception as exc:
+        raise ValueError(f"Envelope decryption failed: {exc}") from exc
+
+
+def encrypt_json_envelope(
+    odyn: "Odyn",
+    data: Any,
+    receiver_tee_pubkey_hex: str,
+) -> Dict[str, str]:
+    """
+    Convenience wrapper: JSON-encode data and encrypt as envelope.
+    """
+    plaintext = json.dumps(data, separators=(",", ":"))
+    return encrypt_envelope(odyn, plaintext, receiver_tee_pubkey_hex)
+
+
+def decrypt_json_envelope(
+    odyn: "Odyn",
+    envelope: Dict[str, str],
+) -> Any:
+    """
+    Convenience wrapper: decrypt envelope and JSON-decode the result.
+    """
+    plaintext = decrypt_envelope(odyn, envelope)
+    return json.loads(plaintext)
+
+
+def get_tee_pubkey_hex_for_wallet(
+    wallet: str,
+    nova_registry,
+) -> Optional[str]:
+    """
+    Retrieve the on-chain teePubkey (P-384, DER) for a wallet address.
+
+    Returns the hex-encoded teePubkey, or None if not found/invalid.
+    """
+    try:
+        instance = nova_registry.get_instance_by_wallet(wallet)
+        tee_pubkey_bytes = getattr(instance, "tee_pubkey", b"") or b""
+        if not tee_pubkey_bytes or not validate_tee_pubkey(tee_pubkey_bytes):
+            return None
+        return tee_pubkey_bytes.hex()
+    except Exception as exc:
+        logger.debug(f"Failed to get teePubkey for {wallet}: {exc}")
+        return None
 
 
 # =============================================================================

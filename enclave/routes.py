@@ -150,6 +150,95 @@ class SyncRequest(BaseModel):
     ecdh_pubkey: Optional[str] = None
 
 
+class EncryptedEnvelope(BaseModel):
+    """E2E encrypted request/response envelope."""
+    sender_tee_pubkey: str  # Sender's P-384 teePubkey (hex)
+    nonce: str              # AES-GCM nonce (hex)
+    ciphertext: str         # Encrypted payload (hex)
+
+
+def _is_encrypted_envelope(body: dict) -> bool:
+    """Check if the body is an E2E encrypted envelope."""
+    return all(k in body for k in ("sender_tee_pubkey", "nonce", "ciphertext"))
+
+
+def _normalize_hex(s: str) -> str:
+    """Normalize hex string: lowercase, no 0x prefix."""
+    if not s:
+        return ""
+    s = s.lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    return s
+
+
+def _decrypt_request_body(body: dict, app_tee_pubkey: Optional[str]) -> tuple[dict, bool]:
+    """
+    Decrypt the request body if it's an encrypted envelope.
+    Falls back to plaintext if ALLOW_PLAINTEXT_FALLBACK is True.
+    
+    SECURITY: Verifies that sender_tee_pubkey matches the on-chain registered
+    teePubkey for the authenticated wallet. This prevents MITM attacks where
+    an attacker re-encrypts the request with their own teePubkey.
+    
+    Returns: (decrypted_data, was_encrypted)
+    """
+    from secure_channel import decrypt_json_envelope
+
+    if _is_encrypted_envelope(body):
+        # SECURITY: Verify sender_tee_pubkey matches on-chain registration
+        sender_pubkey_hex = _normalize_hex(body.get("sender_tee_pubkey", ""))
+        onchain_pubkey_hex = _normalize_hex(app_tee_pubkey or "")
+        
+        if onchain_pubkey_hex and sender_pubkey_hex != onchain_pubkey_hex:
+            # Potential MITM attack: sender_tee_pubkey doesn't match on-chain
+            logger.warning(
+                f"E2E envelope sender_tee_pubkey mismatch: "
+                f"envelope={sender_pubkey_hex[:32]}..., "
+                f"onchain={onchain_pubkey_hex[:32]}..."
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="sender_tee_pubkey does not match on-chain registration"
+            )
+        
+        # E2E encrypted request
+        try:
+            return decrypt_json_envelope(_odyn, body), True
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to decrypt request: {exc}")
+    elif config.ALLOW_PLAINTEXT_FALLBACK:
+        # Plaintext fallback for development/testing
+        return body, False
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Request must be E2E encrypted. Plaintext fallback is disabled."
+        )
+
+
+def _encrypt_response(data: dict, app_tee_pubkey: Optional[str], request_was_encrypted: bool = True) -> dict:
+    """
+    Encrypt the response if app_tee_pubkey is available AND request was encrypted.
+    Falls back to plaintext if request was plaintext or ALLOW_PLAINTEXT_FALLBACK is True.
+    """
+    from secure_channel import encrypt_json_envelope
+
+    if app_tee_pubkey and request_was_encrypted:
+        try:
+            return encrypt_json_envelope(_odyn, data, app_tee_pubkey)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to encrypt response: {exc}")
+    elif config.ALLOW_PLAINTEXT_FALLBACK or not request_was_encrypted:
+        # Plaintext fallback for development/testing, or request was plaintext
+        return data
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="App teePubkey not available for E2E encryption"
+        )
+
+
 # =============================================================================
 # Auth helper
 # =============================================================================
@@ -175,7 +264,8 @@ def _authorize_app(request: Request) -> dict:
 
     return {
         "app_id": result.app_id,
-        "client_sig": identity.signature
+        "client_sig": identity.signature,
+        "app_tee_pubkey": result.tee_pubkey.hex() if result.tee_pubkey else None,
     }
 
 
@@ -278,9 +368,21 @@ def get_status():
     except Exception as exc:
         cluster_info["error"] = str(exc)
 
+    # Get teePubkey for E2E encryption
+    tee_pubkey_hex = ""
+    try:
+        if _odyn:
+            pub_data = _odyn.get_encryption_public_key()
+            tee_pubkey_hex = pub_data.get("public_key_der", "")
+            if tee_pubkey_hex.startswith("0x"):
+                tee_pubkey_hex = tee_pubkey_hex[2:]
+    except Exception:
+        pass
+
     return {
         "node": {
             "tee_wallet": _node_info.get("tee_wallet"),
+            "tee_pubkey": tee_pubkey_hex,  # P-384 teePubkey for E2E encryption
             "node_url": _node_info.get("node_url"),
             "is_operator": _node_info.get("is_operator", False),
             "service_available": get_service_availability()[0],
@@ -372,42 +474,66 @@ def list_operators():
 
 
 # =============================================================================
-# /kms/derive  (Key Derivation)
+# /kms/derive  (Key Derivation) - E2E Encrypted
 # =============================================================================
 
 @router.post("/kms/derive")
-def derive_key(body: DeriveRequest, request: Request, response: Response):
-    """Derive a deterministic key for the requesting app."""
+def derive_key(request: Request, response: Response, body: dict = None):
+    """Derive a deterministic key for the requesting app (E2E encrypted)."""
+    import json
+    # Parse body manually to support both encrypted and plaintext
+    if body is None:
+        import asyncio
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
+    app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
 
     if not _master_secret_mgr or not _master_secret_mgr.is_initialized:
         raise HTTPException(status_code=503, detail="Master secret not initialized")
 
+    # Decrypt request (or use plaintext fallback)
+    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+
+    # Validate request fields
+    path = req_data.get("path", "")
+    context = req_data.get("context", "")
+    length = req_data.get("length", 32)
+
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing 'path' field")
+
     derived = _master_secret_mgr.derive(
-        app_id, body.path, length=body.length, context=body.context
+        app_id, path, length=length, context=context
     )
-    return {
+
+    # Encrypt response (or use plaintext fallback)
+    resp_data = {
         "app_id": app_id,
-        "path": body.path,
+        "path": path,
         "key": base64.b64encode(derived).decode(),
         "length": len(derived),
     }
 
+    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
+
 
 
 
 # =============================================================================
-# /kms/data  (KV Store)
+# /kms/data  (KV Store) - E2E Encrypted
 # =============================================================================
 
 @router.get("/kms/data/{key}")
 def get_data(key: str, request: Request, response: Response):
-    """Read a key from the app's KV namespace."""
+    """Read a key from the app's KV namespace (E2E encrypted response)."""
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
+    app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
+
     from data_store import DataKeyUnavailableError, DecryptionError
 
     try:
@@ -418,37 +544,62 @@ def get_data(key: str, request: Request, response: Response):
         raise HTTPException(status_code=503, detail=f"Data decryption failed: {exc}")
     if record is None:
         raise HTTPException(status_code=404, detail=f"Key not found: {key}")
-    return {
+
+    resp_data = {
         "app_id": app_id,
         "key": record.key,
         "value": base64.b64encode(record.value).decode() if record.value else None,
         "updated_at_ms": record.updated_at_ms,
     }
 
+    # GET request has no body, so request_was_encrypted=False (plaintext fallback)
+    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted=False)
+
 
 @router.get("/kms/data")
 def list_keys(request: Request, response: Response):
-    """List all keys in the app's KV namespace."""
+    """List all keys in the app's KV namespace (E2E encrypted response)."""
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
+    app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
+
     keys = _data_store.keys(app_id)
-    return {"app_id": app_id, "keys": keys, "count": len(keys)}
+    resp_data = {"app_id": app_id, "keys": keys, "count": len(keys)}
+
+    # GET request has no body, so request_was_encrypted=False (plaintext fallback)
+    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted=False)
 
 
 @router.put("/kms/data")
-def put_data(body: DataPutRequest, request: Request, response: Response):
-    """Write a key-value pair to the app's KV namespace."""
+def put_data(request: Request, response: Response, body: dict = None):
+    """Write a key-value pair to the app's KV namespace (E2E encrypted)."""
+    import asyncio
+    if body is None:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
+    app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
+
+    # Decrypt request (or use plaintext fallback)
+    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+
+    key = req_data.get("key", "")
+    value_b64 = req_data.get("value", "")
+    ttl_ms = req_data.get("ttl_ms", 0)
+
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing 'key' field")
+
     try:
-        value_bytes = base64.b64decode(body.value)
+        value_bytes = base64.b64decode(value_b64)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 value")
 
     try:
-        record = _data_store.put(app_id, body.key, value_bytes, ttl_ms=body.ttl_ms)
+        record = _data_store.put(app_id, key, value_bytes, ttl_ms=ttl_ms)
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as exc:
@@ -457,23 +608,41 @@ def put_data(body: DataPutRequest, request: Request, response: Response):
             raise HTTPException(status_code=503, detail=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return {
+    resp_data = {
         "app_id": app_id,
         "key": record.key,
         "updated_at_ms": record.updated_at_ms,
     }
 
+    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
+
 
 @router.delete("/kms/data")
-def delete_data(body: DataDeleteRequest, request: Request, response: Response):
-    """Delete a key from the app's KV namespace."""
+def delete_data(request: Request, response: Response, body: dict = None):
+    """Delete a key from the app's KV namespace (E2E encrypted)."""
+    import asyncio
+    if body is None:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
+    app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
-    record = _data_store.delete(app_id, body.key)
+
+    # Decrypt request (or use plaintext fallback)
+    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+
+    key = req_data.get("key", "")
+    if not key:
+        raise HTTPException(status_code=400, detail="Missing 'key' field")
+
+    record = _data_store.delete(app_id, key)
     if record is None:
-        raise HTTPException(status_code=404, detail=f"Key not found: {body.key}")
-    return {"app_id": app_id, "key": body.key, "deleted": True}
+        raise HTTPException(status_code=404, detail=f"Key not found: {key}")
+
+    resp_data = {"app_id": app_id, "key": key, "deleted": True}
+
+    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
 
 
 # =============================================================================
@@ -481,12 +650,19 @@ def delete_data(body: DataDeleteRequest, request: Request, response: Response):
 # =============================================================================
 
 @router.post("/sync")
-def sync_endpoint(body: SyncRequest, request: Request, response: Response):
+def sync_endpoint(request: Request, response: Response, body: dict = None):
     """
     Handle incoming sync from a KMS peer.
     Verified via lightweight Proof-of-Possession (PoP) signatures as described
     in docs/kms-core-workflows.md.
+    
+    Request body is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
+    Response is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
     """
+    import asyncio
+    if body is None:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+
     if not _sync_manager:
         raise HTTPException(status_code=503, detail="Sync manager not available")
 
@@ -498,11 +674,58 @@ def sync_endpoint(body: SyncRequest, request: Request, response: Response):
         "nonce": request.headers.get("x-kms-nonce"),
     }
 
+    # Get sender's teePubkey from the envelope for response encryption (if encrypted)
+    sender_tee_pubkey = body.get("sender_tee_pubkey") if _is_encrypted_envelope(body) else None
+
+    # SECURITY: Verify sender_tee_pubkey against on-chain registration BEFORE decryption
+    # This prevents MITM from re-encrypting requests with their own teePubkey
+    if _is_encrypted_envelope(body):
+        peer_wallet = kms_pop.get("wallet")
+        if peer_wallet and sender_tee_pubkey:
+            from secure_channel import get_tee_pubkey_hex_for_wallet
+            try:
+                onchain_pubkey_hex = get_tee_pubkey_hex_for_wallet(
+                    peer_wallet,
+                    _sync_manager.peer_cache.nova_registry if _sync_manager.peer_cache else None
+                )
+                if onchain_pubkey_hex:
+                    sender_hex = _normalize_hex(sender_tee_pubkey)
+                    onchain_hex = _normalize_hex(onchain_pubkey_hex)
+                    if sender_hex != onchain_hex:
+                        logger.warning(
+                            f"Sync E2E envelope sender_tee_pubkey mismatch for {peer_wallet}: "
+                            f"envelope={sender_hex[:32]}..., onchain={onchain_hex[:32]}..."
+                        )
+                        raise HTTPException(
+                            status_code=403,
+                            detail="sender_tee_pubkey does not match on-chain registration"
+                        )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning(f"Failed to verify sync sender_tee_pubkey: {exc}")
+                # Continue - verification will happen in handle_incoming_sync anyway
+
+    # Decrypt request or use plaintext fallback
+    if _is_encrypted_envelope(body):
+        from secure_channel import decrypt_json_envelope
+        try:
+            decrypted_body = decrypt_json_envelope(_odyn, body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to decrypt request: {exc}")
+    elif config.ALLOW_PLAINTEXT_FALLBACK:
+        decrypted_body = body
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Request must be E2E encrypted. Plaintext fallback is disabled."
+        )
+
     # Pass HMAC signature from header
     signature = request.headers.get("x-sync-signature")
     
     result = _sync_manager.handle_incoming_sync(
-        body.model_dump(exclude_unset=True), 
+        decrypted_body, 
         signature=signature,
         kms_pop=kms_pop
     )
@@ -515,4 +738,17 @@ def sync_endpoint(body: SyncRequest, request: Request, response: Response):
     if resp_sig:
         response.headers["X-KMS-Peer-Signature"] = resp_sig
 
-    return result
+    # Encrypt the response (or use plaintext fallback)
+    if sender_tee_pubkey:
+        from secure_channel import encrypt_json_envelope
+        try:
+            return encrypt_json_envelope(_odyn, result, sender_tee_pubkey)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to encrypt response: {exc}")
+    elif config.ALLOW_PLAINTEXT_FALLBACK:
+        return result
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Sender teePubkey not available for E2E encryption"
+        )

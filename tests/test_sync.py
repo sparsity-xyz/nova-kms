@@ -43,17 +43,20 @@ def _plaintext_fallback(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
 
 
+from nova_registry import AppStatus, InstanceStatus, VersionStatus
+
+
 @dataclass
 class _FakeApp:
     app_id: int = 43
     latest_version_id: int = 1
-    status: int = 0  # ACTIVE
+    status: object = AppStatus.ACTIVE
 
 
 @dataclass
 class _FakeVersion:
     version_id: int = 1
-    status: object = None  # set in fixture
+    status: object = VersionStatus.ENROLLED
 
 
 @dataclass
@@ -64,7 +67,8 @@ class _FakeInstance:
     tee_wallet_address: str = ""
     instance_url: str = ""
     operator: str = ""
-    status: object = None  # set in fixture
+    status: object = InstanceStatus.ACTIVE
+    zk_verified: bool = True
 
 
 # Peer definitions reused across fixtures
@@ -113,11 +117,28 @@ def nova_reg():
     reg.get_instances_for_version.return_value = list(instances.keys())
     reg.get_instance.side_effect = lambda iid: instances[iid]
 
-    # Legacy method (still used by handle_incoming_sync operator check)
-    reg.get_instance_by_wallet.side_effect = lambda w: instances.get(
-        next((k for k, v in instances.items() if v.tee_wallet_address.lower() == w.lower()), None),
-        _FakeInstance(tee_wallet_address=w, instance_url="", operator=w),
-    )
+    # Counter for dynamic instance IDs
+    _next_instance_id = [100]
+
+    def _get_instance_by_wallet(w: str) -> _FakeInstance:
+        """Return known instance or create a valid one for any wallet (for sync tests)."""
+        for k, v in instances.items():
+            if v.tee_wallet_address.lower() == w.lower():
+                return v
+        # For sync tests: return a valid instance for any wallet
+        _next_instance_id[0] += 1
+        return _FakeInstance(
+            instance_id=_next_instance_id[0],
+            app_id=43,
+            version_id=1,
+            tee_wallet_address=w,
+            instance_url="",
+            operator=w,
+            status=InstanceStatus.ACTIVE,
+            zk_verified=True,
+        )
+
+    reg.get_instance_by_wallet.side_effect = _get_instance_by_wallet
 
     return reg
 
@@ -399,17 +420,27 @@ class TestHandleIncomingSync:
         assert result["status"] == "error"
         assert "sender_wallet does not match" in result["reason"]
 
-    def test_non_operator_rejected(self, sync_mgr, kms_reg, monkeypatch):
+    def test_non_operator_rejected(self, sync_mgr, kms_reg, nova_reg, monkeypatch):
+        """Non-KMS peer (different app_id) should be rejected."""
         kms_reg.is_operator.return_value = False
-        # Override autouse mock to test real identity verification path
-        monkeypatch.setattr(
-            "secure_channel.verify_peer_in_kms_operator_set", lambda *a, **kw: False
-        )
+        
+        # Override registry to return an instance with wrong app_id (not KMS_APP_ID)
+        def _get_non_kms_instance(w):
+            return _FakeInstance(
+                instance_id=999,
+                app_id=123,  # Not KMS_APP_ID (43)
+                version_id=1,
+                tee_wallet_address=w,
+                status=InstanceStatus.ACTIVE,
+                zk_verified=True,
+            )
+        nova_reg.get_instance_by_wallet.side_effect = _get_non_kms_instance
+        
         pop, wallet = self._make_pop(sync_mgr)
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "error"
-        assert "Peer identity verification failed" in result["reason"]
+        assert "Peer authorization failed" in result["reason"]
 
     def test_hmac_required_when_key_set(self, sync_mgr, kms_reg):
         sync_mgr.set_sync_key(b"shared-key")

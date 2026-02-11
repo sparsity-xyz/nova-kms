@@ -219,19 +219,26 @@ def authenticate_app(request, headers: dict) -> ClientIdentity:
     Unified app authentication.
 
     - In production mode: require PoP signature.
-    - In dev/sim mode: allow header-based identity for convenience.
+    - In dev/sim mode: try PoP first, then fall back to header-based identity.
     """
-    if is_production_mode():
-        # Require lightweight PoP signature
+    # Try PoP signature first (works in both production and dev mode)
+    try:
         identity = app_identity_from_signature(request)
         if identity is not None:
             return identity
+    except RuntimeError:
+        # PoP failed - in production mode, propagate the error
+        if is_production_mode():
+            raise
+        # In dev mode, fall through to header-based fallback
+        pass
 
+    if is_production_mode():
         raise RuntimeError(
             "Missing PoP authentication. "
             "Provide X-App-Signature / X-App-Nonce / X-App-Timestamp headers."
         )
-    # Dev/sim mode: headers are acceptable
+    # Dev/sim mode: headers are acceptable as fallback
     return identity_from_headers(headers)
 
 
@@ -244,6 +251,7 @@ class AuthResult:
     authorized: bool
     app_id: Optional[int] = None
     version_id: Optional[int] = None
+    tee_pubkey: Optional[bytes] = None  # App's P-384 teePubkey for E2E encryption
     reason: Optional[str] = None
 
 
@@ -258,12 +266,23 @@ class AppAuthorizer:
     Steps (mirrors architecture doc §2.3):
       1. getInstanceByWallet(teeWallet)  →  instance
       2. instance must be ACTIVE and zkVerified
-      3. getApp(appId) → app must be ACTIVE
-      4. getVersion(appId, versionId) → ENROLLED or DEPRECATED
+      3. (if require_app_id != 0) instance.app_id must match require_app_id
+      4. getApp(appId) → app must be ACTIVE
+      5. getVersion(appId, versionId) → must be ENROLLED
     """
 
-    def __init__(self, registry: Optional[NovaRegistry] = None):
+    def __init__(self, registry: Optional[NovaRegistry] = None, require_app_id: int = 0):
+        """
+        Parameters
+        ----------
+        registry : NovaRegistry, optional
+            The registry client to use for lookups.
+        require_app_id : int, optional
+            If non-zero, the instance's app_id must match this value.
+            Use this for KMS peer verification (require_app_id=KMS_APP_ID).
+        """
         self.registry = registry or NovaRegistry()
+        self._require_app_id = require_app_id
 
     def verify(self, identity: ClientIdentity) -> AuthResult:
         """
@@ -289,7 +308,14 @@ class AppAuthorizer:
         if not instance.zk_verified:
             return AuthResult(authorized=False, reason="Instance not zkVerified")
 
-        # 3. App must be ACTIVE
+        # 3. If require_app_id is set, instance.app_id must match
+        if self._require_app_id != 0 and instance.app_id != self._require_app_id:
+            return AuthResult(
+                authorized=False,
+                reason=f"Instance app_id {instance.app_id} != required {self._require_app_id}"
+            )
+
+        # 4. App must be ACTIVE
         try:
             app = self.registry.get_app(instance.app_id)
         except Exception as exc:
@@ -299,21 +325,26 @@ class AppAuthorizer:
         if app.status != AppStatus.ACTIVE:
             return AuthResult(authorized=False, reason="App not active")
 
-        # 4. Version must be ENROLLED or DEPRECATED
+        # 5. Version must be ENROLLED
         try:
             version = self.registry.get_version(instance.app_id, instance.version_id)
         except Exception as exc:
             logger.warning(f"Version lookup failed: {exc}")
             return AuthResult(authorized=False, reason="Version lookup failed")
 
-        if version.status not in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED):
-            return AuthResult(authorized=False, reason="Version not allowed")
+        if version.status != VersionStatus.ENROLLED:
+            return AuthResult(authorized=False, reason="Version not enrolled")
+
+        # Get app's teePubkey for E2E response encryption
+        app_tee_pubkey = getattr(instance, "tee_pubkey", b"") or b""
 
         return AuthResult(
             authorized=True,
             app_id=instance.app_id,
             version_id=instance.version_id,
+            tee_pubkey=app_tee_pubkey,
         )
+
 
 def verify_wallet_signature(wallet: str, message: str, signature: str) -> bool:
     """

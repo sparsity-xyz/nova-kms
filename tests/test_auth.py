@@ -288,16 +288,18 @@ class TestAppAuthorizer:
         auth = AppAuthorizer(registry=reg)
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
-        assert "not allowed" in result.reason
+        assert "not enrolled" in result.reason
 
-    def test_deprecated_version_ok(self):
+    def test_deprecated_version_rejected(self):
+        """DEPRECATED versions are no longer allowed — only ENROLLED."""
         inst = _make_instance()
         app_obj = _make_app()
         ver = _make_version(status=VersionStatus.DEPRECATED)
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
-        assert result.authorized
+        assert not result.authorized
+        assert "not enrolled" in result.reason
 
     def test_version_lookup_exception(self):
         inst = _make_instance()
@@ -310,6 +312,64 @@ class TestAppAuthorizer:
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
         assert "lookup failed" in result.reason
+
+    def test_returns_tee_pubkey(self):
+        """Successful auth returns the app's teePubkey for E2E encryption."""
+        inst = _make_instance()
+        inst.tee_pubkey = b"\x04" + b"\xAB" * 96  # 97 bytes P-384 uncompressed
+        app_obj = _make_app()
+        ver = _make_version()
+        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
+        auth = AppAuthorizer(registry=reg)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert result.authorized
+        assert result.tee_pubkey == inst.tee_pubkey
+
+    def test_require_app_id_success(self):
+        """require_app_id=100 should accept instance with app_id=100."""
+        inst = _make_instance(app_id=100)
+        app_obj = _make_app(app_id=100)
+        ver = _make_version()
+        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
+        auth = AppAuthorizer(registry=reg, require_app_id=100)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert result.authorized
+        assert result.app_id == 100
+
+    def test_require_app_id_mismatch(self):
+        """require_app_id=100 should reject instance with app_id=200."""
+        inst = _make_instance(app_id=200)
+        app_obj = _make_app(app_id=200)
+        ver = _make_version()
+        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
+        auth = AppAuthorizer(registry=reg, require_app_id=100)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert not result.authorized
+        assert "app_id 200 != required 100" in result.reason
+
+    def test_require_app_id_zero_accepts_any(self):
+        """require_app_id=0 (default) should accept any valid app."""
+        inst = _make_instance(app_id=999)
+        app_obj = _make_app(app_id=999)
+        ver = _make_version()
+        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
+        auth = AppAuthorizer(registry=reg, require_app_id=0)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert result.authorized
+        assert result.app_id == 999
+
+    def test_kms_peer_authorization(self):
+        """KMS peer authorization uses require_app_id=KMS_APP_ID."""
+        import config
+        kms_app_id = config.KMS_APP_ID
+        inst = _make_instance(app_id=kms_app_id)
+        app_obj = _make_app(app_id=kms_app_id)
+        ver = _make_version()
+        reg = _mock_registry(instance=inst, app=app_obj, version=ver)
+        auth = AppAuthorizer(registry=reg, require_app_id=kms_app_id)
+        result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
+        assert result.authorized
+        assert result.app_id == kms_app_id
 
 
 # =============================================================================

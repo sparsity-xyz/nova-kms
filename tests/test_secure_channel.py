@@ -590,3 +590,319 @@ class TestSealUnsealWithP384:
         p256_der = _make_p256_der()
         with pytest.raises(ValueError, match="P-384"):
             seal_master_secret(b"\xEE" * 32, p256_der)
+
+
+# =============================================================================
+# E2E Envelope Encryption (teePubkey-based)
+# =============================================================================
+
+
+class _MockOdyn:
+    """Mock Odyn SDK for testing E2E encryption helpers."""
+
+    def __init__(self, *, fail_encrypt=False, fail_decrypt=False):
+        self._fail_encrypt = fail_encrypt
+        self._fail_decrypt = fail_decrypt
+        self._pubkey_der = b"\x30" + b"\xAA" * 120  # fake DER
+
+    def get_encryption_public_key_der(self) -> bytes:
+        return self._pubkey_der
+
+    def encrypt(self, plaintext: str, receiver_pubkey_hex: str) -> dict:
+        if self._fail_encrypt:
+            raise RuntimeError("Encryption failed")
+        import hashlib
+        # Fake encryption: just hash the plaintext
+        h = hashlib.sha256(plaintext.encode()).hexdigest()
+        return {
+            "nonce": "0x" + "ab" * 12,
+            "ciphertext": "0x" + h,
+        }
+
+    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, ciphertext_hex: str) -> str:
+        if self._fail_decrypt:
+            raise RuntimeError("Decryption failed")
+        # For testing, return a fixed plaintext
+        return '{"test": "data"}'
+
+
+class TestEncryptEnvelope:
+    def test_basic_encrypt(self):
+        from secure_channel import encrypt_envelope
+
+        odyn = _MockOdyn()
+        result = encrypt_envelope(odyn, "hello", "deadbeef")
+
+        assert "sender_tee_pubkey" in result
+        assert "nonce" in result
+        assert "ciphertext" in result
+        assert result["sender_tee_pubkey"] == odyn._pubkey_der.hex()
+        # nonce should have 0x prefix stripped
+        assert not result["nonce"].startswith("0x")
+
+    def test_encrypt_strips_0x_prefix(self):
+        from secure_channel import encrypt_envelope
+
+        odyn = _MockOdyn()
+        result = encrypt_envelope(odyn, "test", "aabbcc")
+
+        # Both nonce and ciphertext should have 0x prefix stripped
+        assert not result["nonce"].startswith("0x")
+        assert not result["ciphertext"].startswith("0x")
+
+
+class TestDecryptEnvelope:
+    def test_basic_decrypt(self):
+        from secure_channel import decrypt_envelope
+
+        odyn = _MockOdyn()
+        envelope = {
+            "sender_tee_pubkey": "aabbcc",
+            "nonce": "112233",
+            "ciphertext": "445566",
+        }
+        result = decrypt_envelope(odyn, envelope)
+        assert result == '{"test": "data"}'
+
+    def test_malformed_envelope_raises(self):
+        from secure_channel import decrypt_envelope
+
+        odyn = _MockOdyn()
+
+        # Missing sender_tee_pubkey
+        with pytest.raises(ValueError, match="Malformed"):
+            decrypt_envelope(odyn, {"nonce": "aa", "ciphertext": "bb"})
+
+        # Missing nonce
+        with pytest.raises(ValueError, match="Malformed"):
+            decrypt_envelope(odyn, {"sender_tee_pubkey": "aa", "ciphertext": "bb"})
+
+        # Missing ciphertext
+        with pytest.raises(ValueError, match="Malformed"):
+            decrypt_envelope(odyn, {"sender_tee_pubkey": "aa", "nonce": "bb"})
+
+    def test_decrypt_failure_raises(self):
+        from secure_channel import decrypt_envelope
+
+        odyn = _MockOdyn(fail_decrypt=True)
+        envelope = {
+            "sender_tee_pubkey": "aabbcc",
+            "nonce": "112233",
+            "ciphertext": "445566",
+        }
+        with pytest.raises(ValueError, match="decryption failed"):
+            decrypt_envelope(odyn, envelope)
+
+
+class TestEncryptJsonEnvelope:
+    def test_json_serialization(self):
+        from secure_channel import encrypt_json_envelope
+
+        odyn = _MockOdyn()
+        data = {"key": "value", "num": 123}
+        result = encrypt_json_envelope(odyn, data, "receiver_pubkey")
+
+        assert "sender_tee_pubkey" in result
+        assert "nonce" in result
+        assert "ciphertext" in result
+
+
+class TestDecryptJsonEnvelope:
+    def test_json_parsing(self):
+        from secure_channel import decrypt_json_envelope
+
+        odyn = _MockOdyn()
+        envelope = {
+            "sender_tee_pubkey": "aabbcc",
+            "nonce": "112233",
+            "ciphertext": "445566",
+        }
+        result = decrypt_json_envelope(odyn, envelope)
+        assert result == {"test": "data"}
+
+
+class TestGetTeePubkeyHexForWallet:
+    def test_returns_hex(self, p384_der):
+        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from nova_registry import InstanceStatus
+
+        reg = MagicMock()
+        reg.get_instance_by_wallet.return_value = _FakeInstance(
+            instance_id=1,
+            tee_pubkey=p384_der,
+            status=InstanceStatus.ACTIVE,
+        )
+
+        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        assert result == p384_der.hex()
+
+    def test_returns_none_for_missing_pubkey(self):
+        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from nova_registry import InstanceStatus
+
+        reg = MagicMock()
+        reg.get_instance_by_wallet.return_value = _FakeInstance(
+            instance_id=1,
+            tee_pubkey=b"",
+            status=InstanceStatus.ACTIVE,
+        )
+
+        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        assert result is None
+
+    def test_returns_none_for_invalid_pubkey(self):
+        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from nova_registry import InstanceStatus
+
+        reg = MagicMock()
+        reg.get_instance_by_wallet.return_value = _FakeInstance(
+            instance_id=1,
+            tee_pubkey=b"\x04" + b"\x00" * 10,  # too short for P-384
+            status=InstanceStatus.ACTIVE,
+        )
+
+        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        assert result is None
+
+    def test_returns_none_on_exception(self):
+        from secure_channel import get_tee_pubkey_hex_for_wallet
+
+        reg = MagicMock()
+        reg.get_instance_by_wallet.side_effect = RuntimeError("RPC error")
+
+        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        assert result is None
+
+
+# =============================================================================
+# Test sender_tee_pubkey mismatch protection (MITM prevention)
+# =============================================================================
+
+
+class TestSenderTeePubkeyMismatchProtection:
+    """
+    Test that _decrypt_request_body rejects envelopes where sender_tee_pubkey
+    does not match the on-chain registered teePubkey.
+    
+    This prevents MITM attacks where an attacker re-encrypts requests with
+    their own teePubkey.
+    """
+
+    def test_matching_pubkey_accepted(self, p384_der, monkeypatch):
+        """Request decryption succeeds when sender_tee_pubkey matches on-chain."""
+        import routes
+        import config
+        
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+        
+        # Create matching teePubkey
+        pubkey_hex = p384_der.hex()
+        
+        # Mock Odyn to avoid actual decryption (we're testing the pubkey check)
+        mock_odyn = MagicMock()
+        mock_odyn.decrypt.return_value = '{"path": "test"}'
+        monkeypatch.setattr(routes, "_odyn", mock_odyn)
+        
+        envelope = {
+            "sender_tee_pubkey": pubkey_hex,
+            "nonce": "00" * 12,
+            "ciphertext": "00" * 32,
+        }
+        
+        # Should not raise - matching pubkeys
+        result, was_encrypted = routes._decrypt_request_body(envelope, pubkey_hex)
+        assert was_encrypted is True
+        assert result == {"path": "test"}
+
+    def test_mismatched_pubkey_rejected(self, p384_der, monkeypatch):
+        """Request decryption fails when sender_tee_pubkey differs from on-chain."""
+        import routes
+        import config
+        from fastapi import HTTPException
+        
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+        
+        # Create two different teePubkeys
+        envelope_pubkey_hex = p384_der.hex()
+        onchain_pubkey_hex = "AA" + p384_der.hex()[2:]  # Different pubkey
+        
+        # Mock Odyn (shouldn't be called if pubkey check fails first)
+        mock_odyn = MagicMock()
+        monkeypatch.setattr(routes, "_odyn", mock_odyn)
+        
+        envelope = {
+            "sender_tee_pubkey": envelope_pubkey_hex,
+            "nonce": "00" * 12,
+            "ciphertext": "00" * 32,
+        }
+        
+        # Should raise 403 - mismatched pubkeys
+        with pytest.raises(HTTPException) as exc_info:
+            routes._decrypt_request_body(envelope, onchain_pubkey_hex)
+        
+        assert exc_info.value.status_code == 403
+        assert "does not match on-chain" in exc_info.value.detail
+
+    def test_plaintext_fallback_bypasses_check(self, monkeypatch):
+        """Plaintext requests bypass the pubkey check (for testing)."""
+        import routes
+        import config
+        
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+        
+        plaintext_body = {"path": "test"}
+        
+        result, was_encrypted = routes._decrypt_request_body(plaintext_body, "0x1234")
+        assert was_encrypted is False
+        assert result == {"path": "test"}
+
+    def test_no_onchain_pubkey_allows_decryption(self, p384_der, monkeypatch):
+        """If on-chain pubkey is empty/None, decryption proceeds without check."""
+        import routes
+        import config
+        
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+        
+        pubkey_hex = p384_der.hex()
+        
+        mock_odyn = MagicMock()
+        mock_odyn.decrypt.return_value = '{"path": "test"}'
+        monkeypatch.setattr(routes, "_odyn", mock_odyn)
+        
+        envelope = {
+            "sender_tee_pubkey": pubkey_hex,
+            "nonce": "00" * 12,
+            "ciphertext": "00" * 32,
+        }
+        
+        # Empty on-chain pubkey - should proceed (can't verify)
+        result, was_encrypted = routes._decrypt_request_body(envelope, "")
+        assert was_encrypted is True
+        
+        # None on-chain pubkey - should proceed (can't verify)
+        result, was_encrypted = routes._decrypt_request_body(envelope, None)
+        assert was_encrypted is True
+
+    def test_hex_normalization(self, p384_der, monkeypatch):
+        """Pubkey comparison normalizes hex (lowercase, no 0x prefix)."""
+        import routes
+        import config
+        
+        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+        
+        pubkey_hex = p384_der.hex()
+        
+        mock_odyn = MagicMock()
+        mock_odyn.decrypt.return_value = '{"path": "test"}'
+        monkeypatch.setattr(routes, "_odyn", mock_odyn)
+        
+        # Test with 0x prefix and uppercase
+        envelope = {
+            "sender_tee_pubkey": "0x" + pubkey_hex.upper(),
+            "nonce": "00" * 12,
+            "ciphertext": "00" * 32,
+        }
+        
+        # Should match despite different formatting
+        result, was_encrypted = routes._decrypt_request_body(envelope, pubkey_hex.lower())
+        assert was_encrypted is True

@@ -80,6 +80,10 @@ def _setup_pop_routes(monkeypatch):
     )
     routes.set_service_availability(True)
 
+    # Set node wallet for PoP verification
+    from auth import set_node_wallet
+    set_node_wallet(tee_wallet)
+
     if routes.router not in [r for r in app.routes]:
         app.include_router(routes.router)
 
@@ -104,14 +108,15 @@ def _sign_pop(client, kms_wallet, private_key_hex):
     ts = str(int(time.time()))
     pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
     acct = Account.from_key(bytes.fromhex(pk))
-    msg = f"NovaKMS:Auth:{nonce_b64}:{kms_wallet}:{ts}"
+    # Message format for App PoP: NovaKMS:AppAuth:<nonce>:<kms_wallet>:<timestamp>
+    msg = f"NovaKMS:AppAuth:{nonce_b64}:{kms_wallet}:{ts}"
     sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
 
     return {
-        "x-pop-signature": sig,
-        "x-pop-timestamp": ts,
-        "x-pop-nonce": nonce_b64,
-        "x-tee-wallet": acct.address,
+        "x-app-signature": sig,
+        "x-app-timestamp": ts,
+        "x-app-nonce": nonce_b64,
+        "x-app-wallet": acct.address,
     }
 
 
