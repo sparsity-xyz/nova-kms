@@ -189,7 +189,7 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
 ### Handshake Flow
 1.  **Challenge**: Node A (Client) calls `GET /nonce` on Node B (Server) to get $Nonce_B$.
 2.  **Signature A ($Sig\_A$)**: Node A signs a message binding the challenge, the recipient, and a timestamp:
-    `NovaKMS:Auth:<Nonce_B>:<Wallet_B>:<Timestamp_A>`
+    `NovaKMS:Auth:<NonceBase64>:<Wallet_B>:<Timestamp_A>`
     This signature is sent in the `X-KMS-Signature` header.
 3.  **Request**: Node A sends `POST /sync` with PoP headers.
 4.  **Verification B**: 
@@ -229,7 +229,7 @@ sequenceDiagram
     A->>B: GET /nonce
     B-->>A: Nonce_B
     
-    Note over A: Create Message:<br/>"NovaKMS:Auth:Nonce_B:Wallet_B:TS"
+    Note over A: Create Message:<br/>"NovaKMS:Auth:NonceBase64:Wallet_B:TS"
     Note over A: Sign with TEE Private Key (Sig_A)
     
     A->>B: POST /sync (Headers: Sig_A, Wallet_A, TS)
@@ -258,7 +258,7 @@ KMS supports **Lightweight PoP** for high-performance app API calls.
 1.  **Discovery**: App discovers KMS nodes via **NovaAppRegistry** (same enumeration used by the KMS peer cache: `KMS_APP_ID` → ENROLLED versions → ACTIVE instances).
 2.  **Challenge**: App calls `GET /nonce` on a selected KMS node.
 3.  **Signature A ($Sig\_A$)**: App signs a message binding the challenge and the node:
-    `NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>`
+    `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
     This is sent in the `X-App-Signature` header.
 4.  **Authenticated Request**: App calls KMS API (e.g., `POST /kms/derive`) with PoP headers.
 5.  **Verification & Permission Management**: 
@@ -294,7 +294,7 @@ sequenceDiagram
     App->>KMS: GET /nonce
     KMS-->>App: Nonce
     
-    Note over App: Create Message:<br/>"NovaKMS:AppAuth:Nonce:KMS_Wallet:TS"
+    Note over App: Create Message:<br/>"NovaKMS:AppAuth:NonceBase64:KMS_Wallet:TS"
     Note over App: Sign with TEE Private Key (Sig_A)
     
     App->>KMS: POST /kms/derive (App PoP Headers)

@@ -22,88 +22,32 @@ They are different keypairs on different curves:
 
 ---
 
-## 1. Discover Available KMS Nodes (Discovery)
+## 1. Discover Available KMS Nodes (Registry Only)
 
-### 1.1 Get the node list from a KMS node (HTTP /nodes)
+The only secure way to discover KMS nodes is by querying the on-chain `NovaAppRegistry`. This ensures you are connecting to an **ACTIVE**, **zkVerified** instance of the official KMS App.
 
-If you already know any KMS node URL (bootstrap), you can call:
+### 1.1 Lookup Logic
 
-- `GET /nodes`
+1.  **Input:** `KMS_APP_ID` (The App ID of the KMS service).
+2.  **Steps:**
+    *   Get the `App` record for `KMS_APP_ID`.
+    *   Iterate through `ENROLLED` versions.
+    *   Find all `ACTIVE` instances for those versions.
+3.  **Output:** A list of active KMS instances, including their:
+    *   `instanceUrl` (e.g. `https://kms-node-1.example.com`)
+    *   `teeWalletAddress` (The verified EVM identity of the enclave)
+    *   `teePubkey` (The verified P-384 public key for encryption)
 
-Server implementation: `/nodes` in `nova-kms/enclave/routes.py`.
-
-Notes:
-- The node list is sourced **only** from NovaAppRegistry (via PeerCache: `KMS_APP_ID → ACTIVE instances`)
-- It iterates through enrolled versions and their instances to find active nodes
-- It does not synchronously probe every peer inside this handler (uses cached status)
-
-Response shape is roughly:
-
-```json
-{
-  "operators": [
-    {
-      "operator": "0x...",
-      "instance": {
-        "instance_id": 1,
-        "app_id": 43,
-        "version_id": 1,
-        "operator": "0x...",
-        "instance_url": "https://...",
-        "tee_wallet": "0x...",
-        "zk_verified": true,
-        "instance_status": {"value": 0, "name": "ACTIVE"},
-        "registered_at": 0
-      },
-      "connection": {
-        "in_peer_cache": true,
-        "cached_status": "..."
-      }
-    }
-  ],
-  "count": 1
-}
-```
-
-### 1.2 Query on-chain directly (recommended)
-
-An app can also query `NovaAppRegistry` directly:
-
-- use `KMS_APP_ID` to enumerate/query ACTIVE KMS instances
-- use `instanceUrl` and `teeWalletAddress` as connection information
-- use `teePubkey` as (optional) encryption/identity material
-
-> The exact read APIs depend on your registry client; the KMS server internally uses `NovaRegistry.get_instance_by_wallet()`.
+> [!IMPORTANT]
+> **Zero Trust Verification**: You MUST use the `teePubkey` and `teeWalletAddress` obtained from the Registry. Do NOT trust values returned by the KMS node itself until you have verified them against the Registry.
 
 ---
 
-## 2. Fetch and Validate the KMS node teePubkey (P-384)
 
-### 2.1 Fetch teePubkey
 
-teePubkey lives in the on-chain RuntimeInstance record (field name typically `teePubkey` / `tee_pubkey`).
+## 2. App → KMS: Full PoP-authenticated Request Flow with E2E Encryption
 
-On the App side, you first identify the target node’s `teeWalletAddress` (the wallet used for PoP signing), then:
-
-- call `NovaAppRegistry.getInstanceByWallet(teeWalletAddress)`
-- read the returned `teePubkey` byte string
-
-### 2.2 Validate teePubkey (encoding + curve)
-
-The current implementation accepts two encodings:
-
-- **DER/SPKI** (typically from Odyn `/v1/encryption/public_key`, first byte often `0x30`)
-- **SEC1 uncompressed point**: `0x04 || x || y`, length **97 bytes** for P-384
-
-Validation logic:
-- Server: `validate_tee_pubkey()` / `parse_tee_pubkey()` in `nova-kms/enclave/secure_channel.py`
-- Example client: `nova-examples/nova-kms-client/enclave/kms_identity.py`
-
----
-
-## 3. App → KMS: Full PoP-authenticated Request Flow with E2E Encryption
-
-### 3.1 Overview (Sequence)
+### 2.1 Overview (Sequence)
 
 ```mermaid
 sequenceDiagram
@@ -149,7 +93,7 @@ sequenceDiagram
   App->>App: decrypt response body (E2E)
 ```
 
-### 3.2 E2E Encryption Envelope Format
+### 2.2 E2E Encryption Envelope Format
 
 All sensitive request/response bodies are wrapped in an encryption envelope:
 
@@ -173,21 +117,17 @@ The encryption uses Odyn's built-in ECDH + AES-256-GCM:
 
 ---
 
-## 4. Concrete Request Details (Aligned to Current Code)
+## 3. Concrete Request Details (Aligned to Current Code)
 
-### 4.1 Fetch Nonce
+### 3.1 Fetch Nonce
 
 - `GET /nonce`
 - returns: `{"nonce": "<base64>"}`
 - the server applies a simple rate limit to `/nonce` (see `routes.py`)
 
-### 4.2 Fetch KMS teePubkey for E2E Encryption
 
-- `GET /status`
-- returns: `{"node": {"tee_wallet": "0x...", "tee_pubkey": "<hex>", ...}}`
-- `tee_pubkey` is the P-384 DER SPKI public key for E2E encryption
 
-### 4.3 App generates the PoP signature
+### 3.2 App generates the PoP signature
 
 The app must know the target node’s `kms_wallet` (i.e. the node’s on-chain `teeWalletAddress`). You can also obtain it from `GET /status` → `node.tee_wallet`.
 
@@ -205,7 +145,7 @@ Server-side logic in `nova-kms/enclave/auth.py`:
 - timestamp must be within the allowed window (`POP_MAX_AGE_SECONDS`)
 - the recovered wallet from the signature is the real identity (`X-App-Wallet` is an optional hint, but if provided must match)
 
-### 4.4 App request headers
+### 3.3 App request headers
 
 Required headers for App→KMS:
 
@@ -214,7 +154,7 @@ Required headers for App→KMS:
 - `X-App-Timestamp`: `timestamp`
 - `X-App-Wallet`: (optional) explicit wallet address; if provided it must match the recovered signer
 
-### 4.5 Example business request: POST /kms/derive
+### 3.4 Example business request: POST /kms/derive
 
 - `POST /kms/derive`
 
