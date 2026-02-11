@@ -21,7 +21,12 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Dict
 
-import config
+from config import (
+    IN_ENCLAVE,
+    MAX_NONCES,
+    POP_MAX_AGE_SECONDS,
+    SIMULATION_MODE,
+)
 from nova_registry import (
     AppStatus,
     InstanceStatus,
@@ -41,9 +46,7 @@ def set_node_wallet(wallet: str):
 
 def is_production_mode() -> bool:
     """Return True when running in an enclave (non-simulation)."""
-    return bool(getattr(config, "IN_ENCLAVE", False)) and not bool(
-        getattr(config, "SIMULATION_MODE", False)
-    )
+    return bool(IN_ENCLAVE) and not bool(SIMULATION_MODE)
 
 
 # =============================================================================
@@ -125,8 +128,8 @@ class _NonceStore:
 
 
 _nonce_store = _NonceStore(
-    ttl_seconds=getattr(config, "POP_MAX_AGE_SECONDS", 120),
-    max_nonces=getattr(config, "MAX_NONCES", 4096),
+    ttl_seconds=POP_MAX_AGE_SECONDS,
+    max_nonces=MAX_NONCES,
 )
 
 
@@ -355,7 +358,7 @@ def _require_fresh_timestamp(ts: str) -> None:
     except Exception:
         raise RuntimeError("Invalid timestamp")
 
-    max_age = getattr(config, "POP_MAX_AGE_SECONDS", 120)
+    max_age = POP_MAX_AGE_SECONDS
     now = int(time.time())
     if abs(now - ts_int) > max_age:
         raise RuntimeError("Stale timestamp")

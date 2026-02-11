@@ -2,11 +2,14 @@
 
 Centralized configuration for the Nova KMS enclave application.
 
-Production deployments typically bake these values into the enclave image.
+This file defines the runtime configuration. In production (Nitro Enclave), these values
+are typically "baked in" to the enclave image to ensure security and immutability.
+Environment variables are sparingly used, primarily for local simulation adjustments.
 
-For local development and simulation, a small set of values (notably
-`IN_ENCLAVE`) may be overridden via environment variables by the helper
-scripts under `scripts/`.
+Key Design Principles:
+1. **Security by Default**: Defaults are set for the hardened Enclave environment.
+2. **Immutability**: Critical addresses (Contracts) are hardcoded to act as trust roots.
+3. **Simulation Support**: `IN_ENCLAVE` flag switches strictly between Production and Simulation behavior.
 """
 
 from __future__ import annotations
@@ -17,158 +20,142 @@ import os
 # Environment Detection
 # =============================================================================
 
-# Treat Nitro Enclave as the safe default.
+# IN_ENCLAVE: The master switch for security modes.
+# - True (Production):
+#     - Enforces PoP (Proof of Possession) authentication.
+#     - Disables text/plain master secret exchange (requires sealed ECDH).
+#     - Enforces HTTPS for peer communication.
+#     - Disables simulation shortcuts (e.g., fake registries).
 #
-# Local simulation scripts override this with `IN_ENCLAVE=false` so that
-# simulation mode can be enabled (see simulation.is_simulation_mode()).
+# - False (Simulation/Dev):
+#     - Allows HTTP.
+#     - Allows plaintext master secret (for debugging).
+#     - Enables header-based identity injection (X-Tee-Wallet).
+#
+# Helper scripts (scripts/) set IN_ENCLAVE=false to enable simulation.
 _in_enclave_env = os.getenv("IN_ENCLAVE", "").strip().lower()
 if _in_enclave_env in ("1", "true", "yes"):
     IN_ENCLAVE: bool = True
 elif _in_enclave_env in ("0", "false", "no"):
     IN_ENCLAVE = False
 else:
-    IN_ENCLAVE = True
+    IN_ENCLAVE = True  # Safe default
 
 # =============================================================================
-# Chain / RPC
+# Chain & Trust Roots
 # =============================================================================
 
 CHAIN_ID: int = 84532  # Base Sepolia
 
-# Minimum number of block confirmations before trusting eth_call results.
-# Protects against reorgs that could change on-chain operator sets.
-CONFIRMATION_DEPTH: int = 6
 
-# Master secret initialization safety:
-# Require the on-chain ACTIVE set to be stable for K consecutive refresh rounds
-# before allowing seed generation when this node is the only ACTIVE instance.
-MASTER_SECRET_SEED_STABLE_ROUNDS: int = 3
 
 # =============================================================================
-# On-chain Contract Addresses
+# Contract Addresses (Trust Roots)
 # =============================================================================
+# These addresses are hardcoded to establish a Root of Trust.
+# Changing them requires rebuilding the enclave image, which ensures that a running
+# enclave cannot be tricked into using a malicious registry via simplistic env var manipulation.
 
-# NovaAppRegistry proxy address (UUPS upgradeable)
+# NovaAppRegistry: Source of truth for App, Version, and Instance status.
 NOVA_APP_REGISTRY_ADDRESS: str = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"
 
-# KMSRegistry contract address
+# KMSRegistry: Manages the KMS Operator set and the Master Secret Hash.
 KMS_REGISTRY_ADDRESS: str = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
 
-# KMS application ID assigned by NovaAppRegistry
+# The App ID for the KMS itself within the Nova ecosystem.
 KMS_APP_ID: int = 43
 
 # =============================================================================
-# Simulation Mode
+# Simulation Config
 # =============================================================================
-# Hardcoded to False for production Enclave
+# These settings are ONLY active when IN_ENCLAVE is False.
+
 SIMULATION_MODE: bool = False
-
-# Preconfigured peer list for simulation.
 SIM_PEERS: list = []
-
-# Deterministic master secret hex for reproducible dev runs (optional).
 SIM_MASTER_SECRET_HEX: str = ""
 
 # =============================================================================
-# Security — Authentication
+# Security & Authentication
 # =============================================================================
 
-# In production (IN_ENCLAVE=True), AppAuthorizer can require code measurement
-# for non-PoP identity paths. For PoP, wallet→measurement binding is enforced
-# at enrollment time on-chain.
-REQUIRE_MEASUREMENT: bool = IN_ENCLAVE
-
-# Max age (seconds) for PoP timestamps and the nonce TTL.
+# POP_MAX_AGE_SECONDS:
+# Defines the specific validity window for a PoP (Proof of Possession) signature.
+# Prevents replay attacks where an old signature is intercepted and reused.
+# Clients must include a timestamp within this window.
 POP_MAX_AGE_SECONDS: int = 120
 
-# In production (IN_ENCLAVE=True), never fall back to plaintext storage when
-# per-app encryption keys are unavailable.
+# ALLOW_PLAINTEXT_FALLBACK:
+# Data security safety fuse.
+# If False (Production Default), the System halts if it cannot derive encryption keys
+# for an app. It will NEVER store data in plaintext.
 ALLOW_PLAINTEXT_FALLBACK: bool = False
 
 # =============================================================================
-# Security — Sync Integrity
+# Sync & integrity
 # =============================================================================
 
-# Maximum clock skew (in ms) tolerated for LWW merge from sync peers.
-# Records with updated_at_ms more than this far from local time are rejected.
+# MAX_CLOCK_SKEW_MS:
+# Tolerance for Last-Write-Wins conflict resolution.
+# Peer updates claiming a timestamp too far in the future are rejected to prevent
+# clock-skewed nodes from permanently overwriting data.
 MAX_CLOCK_SKEW_MS: int = 30000  # 30 seconds
 
-# Maximum payload size (bytes) accepted on /sync endpoint.
+# MAX_SYNC_PAYLOAD_BYTES:
+# DDoS protection for the /sync endpoint.
 MAX_SYNC_PAYLOAD_BYTES: int = 50 * 1024 * 1024  # 50 MB
 
 # =============================================================================
-# Security — Rate Limiting
+# Rate Limiting (DDoS Protection)
 # =============================================================================
 
-# Global rate limit: max requests per minute across all endpoints
 RATE_LIMIT_PER_MINUTE: int = 120
-
-# Dedicated /nonce rate limit (per-IP). Lower than the global limit to reduce
-# nonce-store churn under abuse.
 NONCE_RATE_LIMIT_PER_MINUTE: int = 30
-
-# Hard cap on active nonces held in memory.
 MAX_NONCES: int = 4096
-
-# Maximum request body size in bytes for non-sync endpoints
 MAX_REQUEST_BODY_BYTES: int = 2 * 1024 * 1024  # 2 MB
 
 # =============================================================================
-# Security — Peer URL Validation
+# Networking
 # =============================================================================
 
-# Only these URL schemes are allowed for outbound peer communication.
 ALLOWED_PEER_URL_SCHEMES: list = ["https"]
-
-# In dev/sim mode, also allow plain http.
 if not IN_ENCLAVE:
     ALLOWED_PEER_URL_SCHEMES = ["http", "https"]
 
 # =============================================================================
-# KMS Behaviour
+# Storage Limits
 # =============================================================================
 
-# =============================================================================
-# Data Store Limits
-# =============================================================================
-
-# Maximum size of a single value in bytes (1 MB)
-MAX_VALUE_SIZE: int = 1_048_576
-
-# Per-app maximum total storage in bytes (10 MB)
-MAX_APP_STORAGE: int = 10_485_760
-
-# Default TTL for records (0 = no expiry)
-DEFAULT_TTL_MS: int = 0
+MAX_VALUE_SIZE: int = 1_048_576       # 1 MB per value
+MAX_APP_STORAGE: int = 10_485_760     # 10 MB total per app
+DEFAULT_TTL_MS: int = 0               # 0 = No expiration by default
 
 # =============================================================================
-# Sync
+# Periodic Tasks (Scheduling)
 # =============================================================================
 
-# Interval in seconds for periodic anti-entropy sync
+# SYNC_INTERVAL_SECONDS:
+# Rate limiter for the Data Sync operation (`push_deltas`).
+# While the node "ticks" every `KMS_NODE_TICK_SECONDS` (15s) to maintain availability status,
+# the heavy operation of pushing data to peers is restricted to run only this often.
+# Must be >= KMS_NODE_TICK_SECONDS.
 SYNC_INTERVAL_SECONDS: int = 60
 
-# Maximum number of delta records per sync push
+# SYNC_BATCH_SIZE:
+# Max records to push in one batch.
 SYNC_BATCH_SIZE: int = 500
 
-# Peer cache TTL in seconds
-PEER_CACHE_TTL_SECONDS: int = 120
 
-# Single periodic node tick interval (seconds). This job is responsible for:
-# - refreshing operators and instance status from chain
-# - master secret initialization/sync
-# - periodic data sync
+
+# KMS_NODE_TICK_SECONDS:
+# The HEARTBEAT of the KMS node.
+# This single interval controls the entire lifecycle loop:
+# 1. Refreshing Operator status (Am I still active?).
+# 2. Checking Master Secret integrity (Is my secret correct? Do I need to sync?).
+# 3. Triggering Data Sync.
 KMS_NODE_TICK_SECONDS: int = 15
 
-# How often the node should refresh its own operator status from chain.
-# This makes `/status` accurate even if operator registration becomes visible
-# shortly after startup.
-SELF_OPERATOR_REFRESH_SECONDS: int = 15
-
-# =============================================================================
-# Nova Registry Cache
-# =============================================================================
-
-# TTL in seconds for caching NovaAppRegistry authorization results.
-# Reduces on-chain calls during high-frequency API requests.
+# REGISTRY_CACHE_TTL_SECONDS:
+# Caching for App/Version/Instance lookups during *high-frequency* API authorization.
+# Unlike KMS node ticks (which happen every ~15s), API requests can happen hundreds
+# of times per second. This cache protects the chain RPC from being overwhelmed.
 REGISTRY_CACHE_TTL_SECONDS: int = 60

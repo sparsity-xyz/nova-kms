@@ -290,7 +290,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         components["sync_manager"].node_tick,
         "interval",
-        seconds=getattr(config, "KMS_NODE_TICK_SECONDS", config.SELF_OPERATOR_REFRESH_SECONDS),
+        seconds=config.KMS_NODE_TICK_SECONDS,
         args=[master_secret_mgr],
     )
     scheduler.start()

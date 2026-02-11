@@ -82,6 +82,31 @@ After deployment and setting the App ID, you **must** register the `KMSRegistry`
 2. Set the `dappContract` field to the address of the newly deployed `KMSRegistry`.
 3. This ensures that when a new KMS node is successfully verified (ZKP), the platform automatically calls `addOperator` on your contract.
 
+## Upgrade Flow
+When you need to update the logic of `KMSRegistry`:
+
+1. **Modify Contract**:
+   Update `src/KMSRegistry.sol`. Remember UUPS constraints (no storage layout changes unless append-only, no `selfdestruct`).
+
+2. **Run Upgrade**:
+   Use the existing proxy address to upgrade to the new implementation:
+   ```bash
+   export PROXY_ADDRESS=0x_YOUR_PROXY_ADDRESS
+   make upgrade
+   ```
+   This will:
+   - Deploy the new implementation.
+   - Call `upgradeToAndCall` on the proxy.
+   - Print the new implementation address.
+
+3. **Verify New Implementation**:
+   You must verify the *new* implementation contract on the block explorer:
+   ```bash
+   export IMPL_ADDRESS=0x_NEW_IMPL_ADDRESS
+   make verify-basescan
+   ```
+   Note: The proxy address remains unchanged.
+
 ## Contract Verification
 
 In the UUPS pattern, you must verify the **Implementation** contract.

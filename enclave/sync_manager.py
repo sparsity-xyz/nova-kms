@@ -38,7 +38,6 @@ import config as config_module
 
 from config import (
     MAX_SYNC_PAYLOAD_BYTES,
-    PEER_CACHE_TTL_SECONDS,
     SYNC_BATCH_SIZE,
     SYNC_INTERVAL_SECONDS,
 )
@@ -108,10 +107,8 @@ class PeerCache:
             logger.info(f"Removed peer {wallet} from cache")
 
     def get_peers(self, exclude_wallet: Optional[str] = None) -> List[dict]:
-        """Return list of peer dicts, refreshing from chain if stale."""
+        """Return list of peer dicts."""
         with self._lock:
-            if time.time() - self._last_refresh > PEER_CACHE_TTL_SECONDS:
-                self._refresh()
             peers = list(self._peers)
 
         if exclude_wallet:
@@ -351,9 +348,6 @@ class SyncManager:
                 logger.warning(f"Operator check failed for self {self.node_wallet}: {exc}")
                 return False
 
-        stable_required = int(getattr(config_module, "MASTER_SECRET_SEED_STABLE_ROUNDS", 3))
-        stable_rounds = 0
-
         # Hard safety rule: a non-operator node must not participate in master secret
         # initialization at all (no generate, no sync). Leave it uninitialized.
         if not _self_is_operator():
@@ -389,7 +383,6 @@ class SyncManager:
                 # treat the operator set as unstable/unknown and do not seed-generate.
                 if kms_registry is not None:
                     if not operators:
-                        stable_rounds = 0
                         logger.info("Operators list empty; waiting for on-chain operator set")
                         time.sleep(retry_interval)
                         continue
@@ -400,7 +393,7 @@ class SyncManager:
                                 "Self isOperator() is true, but self is missing from getOperators(). "
                                 "Treating operator set as unstable; refusing to seed-generate master secret yet."
                             )
-                            stable_rounds = 0
+    
                             time.sleep(retry_interval)
                             continue
 
@@ -420,7 +413,6 @@ class SyncManager:
                 # If multiple ACTIVE instances exist and master secret is uninitialized,
                 # require manual intervention (do not seed, do not sync).
                 if len(active_set) > 1:
-                    stable_rounds = 0
                     logger.critical(
                         f"Multiple ACTIVE KMS instances detected on-chain ({len(active_set)}). "
                         "Master secret is uninitialized; refusing to generate or sync. "
@@ -431,7 +423,7 @@ class SyncManager:
 
                 # If no ACTIVE instances, wait.
                 if len(active_set) == 0:
-                    stable_rounds = 0
+
                     logger.warning("No ACTIVE KMS instances on-chain; waiting")
                     time.sleep(retry_interval)
                     continue
@@ -439,7 +431,6 @@ class SyncManager:
                 # Exactly one ACTIVE instance exists.
                 sole_active = next(iter(active_set))
                 if sole_active != self.node_wallet.lower():
-                    stable_rounds = 0
                     logger.info(
                         "Another KMS instance is the sole ACTIVE operator on-chain; "
                         "waiting for it to initialize master secret."
@@ -447,15 +438,6 @@ class SyncManager:
                     time.sleep(retry_interval)
                     continue
 
-                # Self is the sole ACTIVE instance; require stability for K rounds.
-                stable_rounds += 1
-                logger.info(
-                    f"Self is sole ACTIVE instance on-chain (stable_rounds={stable_rounds}/{stable_required})."
-                )
-                if stable_rounds < stable_required:
-                    time.sleep(retry_interval)
-                    continue
-                
                 # Seed-generate master secret (single ACTIVE instance rule satisfied).
                 logger.info("ACTIVE set stable and only self is ACTIVE. Initializing as seed node.")
                 if not self.odyn:
@@ -465,7 +447,6 @@ class SyncManager:
                 
             except Exception as exc:
                 logger.error(f"Error during master secret initialization: {exc}")
-                stable_rounds = 0
 
             # 6. Wait and retry from step 1
             logger.info(f"Retrying master secret initialization in {retry_interval} seconds...")
@@ -624,8 +605,8 @@ class SyncManager:
 
         # 4) If online: sync data with peers (paced)
         now = time.time()
-        interval = int(getattr(config_module, "SYNC_INTERVAL_SECONDS", 60))
-        if now - self._last_push_deltas_at >= interval:
+        # Use config constant directly (imported at top)
+        if now - self._last_push_deltas_at >= config_module.SYNC_INTERVAL_SECONDS:
             try:
                 self.push_deltas()
             finally:
@@ -688,13 +669,18 @@ class SyncManager:
         base_url = url.rsplit("/", 1)[0].rstrip("/")
 
         # 1. Lightweight PoP Signature (Handshake)
-        # Fetch peer's wallet from cache to bind signature to the intended recipient.
+        # fetch peer's wallet from cache to bind signature to the intended recipient.
         peer_wallet = self.peer_cache.get_wallet_by_url(base_url)
 
         # PoP requires an explicit recipient wallet binding.
         # If we can't determine the peer wallet, refuse to send the request.
         if not peer_wallet:
             logger.warning(f"Refusing sync request to {url}: unknown peer wallet for {base_url}")
+            return None
+
+        # Prevent self-sync: do not send requests to ourselves.
+        if peer_wallet.lower() == self.node_wallet.lower():
+            logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
             return None
         
         try:

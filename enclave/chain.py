@@ -19,7 +19,11 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 from eth_hash.auto import keccak
 
-from config import CHAIN_ID, CONFIRMATION_DEPTH
+from config import CHAIN_ID
+
+# Minimum number of block confirmations before trusting eth_call results.
+# Protects against reorgs that could change on-chain operator sets.
+CONFIRMATION_DEPTH: int = 6
 
 logger = logging.getLogger("nova-kms.chain")
 

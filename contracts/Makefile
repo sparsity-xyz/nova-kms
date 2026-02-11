@@ -40,6 +40,18 @@ deploy:
 		--private-key $(PRIVATE_KEY) \
 		--broadcast
 
+# Upgrade KMSRegistry implementation
+upgrade:
+	@echo "======================================"
+	@echo "Upgrading KMSRegistry"
+	@echo "======================================"
+	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS not set"; exit 1; fi; \
+	echo "Required env vars: PROXY_ADDRESS, PRIVATE_KEY"
+	forge script script/UpgradeKMSRegistry.s.sol --tc UpgradeKMSRegistry \
+		--rpc-url $(RPC_URL) \
+		--private-key $(PRIVATE_KEY) \
+		--broadcast
+
 # Verify KMSRegistry implementation on Blockscout
 verify-blockscout:
 	@if [ -z "$(IMPL_ADDRESS)" ]; then echo "Error: IMPL_ADDRESS not set"; exit 1; fi; \

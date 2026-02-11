@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
-from config import DEFAULT_TTL_MS, MAX_APP_STORAGE, MAX_CLOCK_SKEW_MS, MAX_VALUE_SIZE
+from config import (
+    ALLOW_PLAINTEXT_FALLBACK,
+    DEFAULT_TTL_MS,
+    IN_ENCLAVE,
+    MAX_APP_STORAGE,
+    MAX_CLOCK_SKEW_MS,
+    MAX_VALUE_SIZE,
+)
 
 logger = logging.getLogger("nova-kms.data_store")
 
@@ -153,7 +160,7 @@ class _Namespace:
         import os
         key = self._get_key()
         if not key:
-            if getattr(config, "ALLOW_PLAINTEXT_FALLBACK", True):
+            if ALLOW_PLAINTEXT_FALLBACK:
                 return value  # Dev-only fallback
             raise DataKeyUnavailableError(f"Encryption key unavailable for app {self.app_id}")
         aesgcm = AESGCM(key)
@@ -166,7 +173,7 @@ class _Namespace:
             return None
         key = self._get_key()
         if not key:
-            if getattr(config, "ALLOW_PLAINTEXT_FALLBACK", True):
+            if ALLOW_PLAINTEXT_FALLBACK:
                 return ciphertext  # Dev-only fallback
             raise DataKeyUnavailableError(f"Decryption key unavailable for app {self.app_id}")
         try:
@@ -291,7 +298,7 @@ class _Namespace:
                     return False
 
             # In production, reject obviously invalid ciphertext and optionally probe-decrypt.
-            if getattr(config, "IN_ENCLAVE", False) and incoming.value is not None and not incoming.tombstone:
+            if IN_ENCLAVE and incoming.value is not None and not incoming.tombstone:
                 # Format is: 12-byte nonce + AESGCM(ciphertext||tag). Tag is 16 bytes.
                 if len(incoming.value) < (12 + 16):
                     logger.warning(
