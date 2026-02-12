@@ -392,7 +392,7 @@ def get_status():
         # Use PeerCache (NovaAppRegistry-sourced) for instance count
         peer_count = 0
         if _sync_manager and getattr(_sync_manager, "peer_cache", None):
-            peer_count = len(_sync_manager.peer_cache.get_peers())
+            peer_count = len(_sync_manager.peer_cache.get_peers(refresh_if_stale=False))
         cluster_info = {
             "kms_app_id": _node_info.get("kms_app_id"),
             "registry_address": _node_info.get("kms_registry_address"),
@@ -460,7 +460,7 @@ def list_operators():
         raise HTTPException(status_code=503, detail="Peer discovery not available")
 
     try:
-        peers = peer_cache.get_peers()
+        peers = peer_cache.get_peers(refresh_if_stale=False)
         enriched = []
         for p in peers:
             wallet = p.get("tee_wallet_address", "")

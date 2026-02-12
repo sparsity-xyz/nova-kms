@@ -87,7 +87,7 @@ def _verify_hmac(sync_key: bytes, payload: bytes, signature: str) -> bool:
 # Peer Cache
 # =============================================================================
 
-PEER_CACHE_TTL_SECONDS = 30
+from config import PEER_CACHE_TTL_SECONDS
 
 
 class PeerCache:
@@ -119,9 +119,24 @@ class PeerCache:
         return self._nova_registry
 
     def refresh(self) -> None:
-        """Force a refresh of the peer cache from on-chain data."""
-        with self._lock:
-            self._refresh()
+        """
+        Force a refresh of the peer cache from on-chain data.
+        
+        Optimized to avoid holding the lock during slow network calls.
+        1. Fetch data from chain (slow, no lock).
+        2. Update cache (fast, with lock).
+        """
+        try:
+            # 1. Fetch from chain (slow IO, no lock)
+            new_peers = self._fetch_peers_from_chain()
+            
+            # 2. Update cache (fast, exclusive lock)
+            with self._lock:
+                self._update_cache(new_peers)
+                logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
+                
+        except Exception as exc:
+            logger.warning(f"Failed to refresh peer cache: {exc}")
 
     def remove_peer(self, wallet: str) -> None:
         """Remove a peer from the cache by wallet address (step 4.3)."""
@@ -134,12 +149,25 @@ class PeerCache:
         """Check if the cache needs refreshing."""
         return (time.time() - self._last_refresh) > PEER_CACHE_TTL_SECONDS
 
-    def get_peers(self, exclude_wallet: Optional[str] = None) -> List[dict]:
-        """Return list of peer dicts, auto-refreshing if stale."""
-        if self._is_stale():
-            with self._lock:
-                if self._is_stale():  # double-check inside lock
-                    self._refresh()
+    def get_peers(self, exclude_wallet: Optional[str] = None, refresh_if_stale: bool = True) -> List[dict]:
+        """
+        Return list of peer dicts.
+        
+        Args:
+            exclude_wallet: Optional wallet address to filter out.
+            refresh_if_stale: If True (default), triggers a synchronous refresh if the cache 
+                              is stale. Set to False for latency-sensitive endpoints (e.g. /status)
+                              that prefer slightly stale data over blocking.
+        """
+        # Optimized: Check staleness with a read lock (or just access atomic float)
+        # If stale and refresh_if_stale is True, perform refresh efficiently.
+        if refresh_if_stale and self._is_stale():
+            # Double-check pattern not needed for _is_stale check itself, 
+            # but we want to avoid multiple threads hammering the chain.
+            # strict consistency isn't required here, so we can just call refresh().
+            # Since refresh() is now optimized to do IO outside the lock, 
+            # calling it here is safer than before, but still blocks THIS caller.
+            self.refresh()
 
         with self._lock:
             peers = list(self._peers)
@@ -158,88 +186,89 @@ class PeerCache:
                     return p["tee_wallet_address"]
         return None
 
-    def _refresh(self):
-        """Refresh peer list from NovaAppRegistry."""
-        try:
-            from config import KMS_APP_ID
-            from nova_registry import InstanceStatus, VersionStatus
+    def _fetch_peers_from_chain(self) -> List[dict]:
+        """Fetch peer list from NovaAppRegistry. Slow IO, NO LOCK."""
+        from config import KMS_APP_ID
+        from nova_registry import InstanceStatus, VersionStatus
 
-            kms_app_id = int(KMS_APP_ID or 0)
-            if kms_app_id <= 0:
-                raise ValueError("KMS_APP_ID not configured")
+        kms_app_id = int(KMS_APP_ID or 0)
+        if kms_app_id <= 0:
+            raise ValueError("KMS_APP_ID not configured")
 
-            app = self.nova_registry.get_app(kms_app_id)
-            latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
-            logger.debug(f"Peer discovery: App {kms_app_id} has latest version {latest_version_id}")
+        app = self.nova_registry.get_app(kms_app_id)
+        latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
+        logger.debug(f"Peer discovery: App {kms_app_id} has latest version {latest_version_id}")
 
-            peers: List[dict] = []
-            seen_wallets: set[str] = set()
+        peers: List[dict] = []
+        seen_wallets: set[str] = set()
 
-            # Optimization: Scan from latest version backwards, checking at most 5 versions
-            start_version = max(1, latest_version_id - 4)
-            for version_id in range(latest_version_id, start_version - 1, -1):
-                logger.debug(f"Peer discovery: Scanning version {version_id}...")
+        # Optimization: Scan from latest version backwards, checking at most 5 versions
+        start_version = max(1, latest_version_id - 4)
+        for version_id in range(latest_version_id, start_version - 1, -1):
+            logger.debug(f"Peer discovery: Scanning version {version_id}...")
+            try:
+                ver = self.nova_registry.get_version(kms_app_id, version_id)
+            except Exception:
+                continue
+
+            if getattr(ver, "status", None) != VersionStatus.ENROLLED:
+                continue
+
+            try:
+                instance_ids = self.nova_registry.get_instances_for_version(kms_app_id, version_id) or []
+                logger.debug(f"Peer discovery: Version {version_id} has {len(instance_ids)} instances")
+            except Exception as exc:
+                logger.debug(f"Instances lookup failed for version {version_id}: {exc}")
+                continue
+
+            for instance_id in instance_ids:
                 try:
-                    ver = self.nova_registry.get_version(kms_app_id, version_id)
-                except Exception:
-                    continue
-
-                if getattr(ver, "status", None) != VersionStatus.ENROLLED:
-                    continue
-
-                try:
-                    instance_ids = self.nova_registry.get_instances_for_version(kms_app_id, version_id) or []
-                    logger.debug(f"Peer discovery: Version {version_id} has {len(instance_ids)} instances")
+                    instance = self.nova_registry.get_instance(int(instance_id))
                 except Exception as exc:
-                    logger.debug(f"Instances lookup failed for version {version_id}: {exc}")
+                    logger.debug(f"Instance lookup failed for id {instance_id}: {exc}")
                     continue
 
-                for instance_id in instance_ids:
-                    try:
-                        instance = self.nova_registry.get_instance(int(instance_id))
-                    except Exception as exc:
-                        logger.debug(f"Instance lookup failed for id {instance_id}: {exc}")
-                        continue
+                if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
+                    logger.debug(f"Skipping instance {instance_id}: status is {instance.status} (expected ACTIVE)")
+                    continue
 
-                    if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
-                        logger.debug(f"Skipping instance {instance_id}: status is {instance.status} (expected ACTIVE)")
-                        continue
+                wallet = _normalize_wallet(getattr(instance, "tee_wallet_address", ""))
+                if not wallet or wallet in seen_wallets:
+                    if not wallet:
+                        logger.debug(f"Skipping instance {instance_id}: no wallet address")
+                    else:
+                        logger.debug(f"Skipping instance {instance_id}: wallet {wallet} already seen")
+                    continue
 
-                    wallet = _normalize_wallet(getattr(instance, "tee_wallet_address", ""))
-                    if not wallet or wallet in seen_wallets:
-                        if not wallet:
-                            logger.debug(f"Skipping instance {instance_id}: no wallet address")
-                        else:
-                            logger.debug(f"Skipping instance {instance_id}: wallet {wallet} already seen")
-                        continue
-
-                    # Validate peer URL before making request
-                    try:
-                        validate_peer_url(instance.instance_url)
-                    except URLValidationError as url_err:
-                        logger.warning(
-                            f"Skipping peer {wallet}: invalid URL "
-                            f"'{instance.instance_url}': {url_err}"
-                        )
-                        continue
-
-                    peers.append(
-                        {
-                            "tee_wallet_address": wallet,
-                            "node_url": instance.instance_url,
-                            "operator": _normalize_wallet(getattr(instance, "operator", "")),
-                            "status": instance.status,
-                            "version_id": instance.version_id,
-                            "instance_id": instance.instance_id,
-                        }
+                # Validate peer URL before making request
+                try:
+                    validate_peer_url(instance.instance_url)
+                except URLValidationError as url_err:
+                    logger.warning(
+                        f"Skipping peer {wallet}: invalid URL "
+                        f"'{instance.instance_url}': {url_err}"
                     )
-                    seen_wallets.add(wallet)
-                    logger.debug(f"Added peer {wallet} from instance {instance_id}")
-            self._peers = peers
-            self._last_refresh = time.time()
-            logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
-        except Exception as exc:
-            logger.warning(f"Failed to refresh peer cache: {exc}")
+                    continue
+
+                peers.append(
+                    {
+                        "tee_wallet_address": wallet,
+                        "node_url": instance.instance_url,
+                        "operator": _normalize_wallet(getattr(instance, "operator", "")),
+                        "status": instance.status,
+                        "version_id": instance.version_id,
+                        "instance_id": instance.instance_id,
+                    }
+                )
+                seen_wallets.add(wallet)
+                logger.debug(f"Added peer {wallet} from instance {instance_id}")
+        return peers
+
+    def _update_cache(self, peers: List[dict]) -> None:
+        """Update internal cache state. Fast, REQUIRES LOCK."""
+        self._peers = peers
+        self._last_refresh = time.time()
+
 
 
 # =============================================================================
