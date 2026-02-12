@@ -276,10 +276,12 @@ def _authorize_app(request: Request) -> dict:
 
 def _add_mutual_signature(response: Response, client_sig: Optional[str]):
     """If client used PoP signature, add a mutual response signature header."""
-    if client_sig and _odyn and _node_info.get("tee_wallet"):
+    if client_sig and _odyn:
         try:
             # Create Response Message: NovaKMS:Response:<Sig_A>:<KMS_Wallet>
-            resp_msg = f"NovaKMS:Response:{client_sig}:{_node_info['tee_wallet']}"
+            # Use current Odyn wallet to match the key used for signing
+            current_wallet = _odyn.eth_address()
+            resp_msg = f"NovaKMS:Response:{client_sig}:{current_wallet}"
             sig_res = _odyn.sign_message(resp_msg)
             response.headers["X-KMS-Response-Signature"] = sig_res["signature"]
         except Exception as exc:

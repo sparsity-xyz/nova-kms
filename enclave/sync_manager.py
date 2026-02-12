@@ -622,7 +622,9 @@ class SyncManager:
                 sig_res = self.odyn.sign_message(message)
                 
                 headers["X-KMS-Signature"] = sig_res["signature"]
-                headers["X-KMS-Wallet"] = self.node_wallet
+                # Use the actual signing wallet address from Odyn, not the static node_wallet
+                # This prevents mismatch errors if keys are rotated or simulated differently
+                headers["X-KMS-Wallet"] = self.odyn.eth_address()
                 headers["X-KMS-Timestamp"] = str(timestamp)
                 headers["X-KMS-Nonce"] = nonce_b64
         except Exception as exc:
@@ -959,7 +961,9 @@ class SyncManager:
         # 3. Add own signature to response if requested / for mutual auth
         if self.odyn and kms_pop:
             # Sign the client's signature to prove we processed this specific request
-            resp_msg = f"NovaKMS:Response:{p_sig}:{self.node_wallet}"
+            # Use current Odyn wallet to match the key used for signing
+            current_wallet = self.odyn.eth_address()
+            resp_msg = f"NovaKMS:Response:{p_sig}:{current_wallet}"
             sig_res = self.odyn.sign_message(resp_msg)
             result["_kms_response_sig"] = sig_res["signature"]
 
