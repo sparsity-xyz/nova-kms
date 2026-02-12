@@ -91,7 +91,7 @@ ALLOW_PLAINTEXT_FALLBACK: bool = False
 # Tolerance for Last-Write-Wins conflict resolution.
 # Peer updates claiming a timestamp too far in the future are rejected to prevent
 # clock-skewed nodes from permanently overwriting data.
-MAX_CLOCK_SKEW_MS: int = 30000  # 30 seconds
+MAX_CLOCK_SKEW_MS: int = 900000  # 15 minutes (increased from 30s to allow client drift)
 
 # MAX_SYNC_PAYLOAD_BYTES:
 # DDoS protection for the /sync endpoint.
