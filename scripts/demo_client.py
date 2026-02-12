@@ -14,7 +14,7 @@ from eth_account.messages import encode_defunct
 # Configuration
 KMS_URL = "http://localhost:4000"  # Node 0
 CLIENT_PRIVATE_KEY = "0x" + secrets.token_hex(32)
-CLIENT_WALLET = Account.from_key(CLIENT_PRIVATE_KEY).address
+CLIENT_WALLET = Account.from_key(CLIENT_PRIVATE_KEY).address.lower()
 
 print(f"--- KMS Simulation Demo Client ---")
 print(f"Target: {KMS_URL}")

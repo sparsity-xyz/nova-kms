@@ -430,7 +430,7 @@ class TestSimulationApp:
 
         nonce = sim_client.get("/nonce").json()["nonce"]
         ts = str(int(time.time()))
-        recipient_wallet = DEFAULT_SIM_PEERS[0].tee_wallet
+        recipient_wallet = DEFAULT_SIM_PEERS[0].tee_wallet.lower()
         sender_wallet = DEFAULT_SIM_PEERS[1].tee_wallet
         pk_hex = get_sim_private_key_hex(sender_wallet)
         assert pk_hex is not None

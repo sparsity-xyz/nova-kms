@@ -17,6 +17,7 @@ Authorization is always enforced via NovaAppRegistry lookups in AppAuthorizer.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict
@@ -37,10 +38,32 @@ logger = logging.getLogger("nova-kms.auth")
  
 _node_wallet: Optional[str] = None
 
+_ETH_WALLET_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
+
+
+def _canonical_eth_wallet(wallet: Optional[str]) -> str:
+    """Return canonical wallet string: '0x' + 40 lowercase hex.
+
+    Raises ValueError if wallet is missing or not a valid Ethereum address.
+    """
+    if wallet is None:
+        raise ValueError("Wallet is not set")
+    w = str(wallet).strip()
+    if not w:
+        raise ValueError("Wallet is empty")
+    if not _ETH_WALLET_RE.match(w):
+        raise ValueError(
+            "Wallet must be an Ethereum address in the form 0x + 40 hex chars"
+        )
+    w = w.lower()
+    if not w.startswith("0x"):
+        w = "0x" + w
+    return w
+
 def set_node_wallet(wallet: str):
     """Set the local node wallet for PoP recipient binding."""
     global _node_wallet
-    _node_wallet = wallet
+    _node_wallet = _canonical_eth_wallet(wallet)
 
 
 def is_production_mode() -> bool:
@@ -188,19 +211,27 @@ def app_identity_from_signature(request) -> Optional[ClientIdentity]:
         # Enforce timestamp freshness to limit replay window.
         _require_fresh_timestamp(ts)
 
+        if not _node_wallet:
+            raise RuntimeError("KMS node wallet is not configured")
+
         # Message: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
-        message = f"NovaKMS:AppAuth:{nonce_b64}:{_node_wallet}:{ts}"
+        node_wallet = _canonical_eth_wallet(_node_wallet)
+        message = f"NovaKMS:AppAuth:{nonce_b64}:{node_wallet}:{ts}"
 
         recovered = recover_wallet_from_signature(message, sig)
         if not recovered:
             raise RuntimeError("Invalid app signature")
 
+        recovered_wallet = _canonical_eth_wallet(recovered)
+
         # Optional explicit wallet header must match recovered signer.
-        if wallet and recovered.lower() != wallet.lower():
-            raise RuntimeError("App wallet header does not match signature")
+        if wallet:
+            header_wallet = _canonical_eth_wallet(wallet)
+            if recovered_wallet != header_wallet:
+                raise RuntimeError("App wallet header does not match signature")
 
         return ClientIdentity(
-            tee_wallet=recovered.lower(),
+            tee_wallet=recovered_wallet,
             signature=sig
         )
     except Exception as exc:

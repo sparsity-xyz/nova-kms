@@ -16,7 +16,7 @@ NODE1_URL = "http://localhost:4001"
 
 # Client Identity (Simulated)
 CLIENT_PRIVATE_KEY = "0x" + secrets.token_hex(32)
-CLIENT_WALLET = Account.from_key(CLIENT_PRIVATE_KEY).address
+CLIENT_WALLET = Account.from_key(CLIENT_PRIVATE_KEY).address.lower()
 
 def get_auth_headers(node_url):
     try:

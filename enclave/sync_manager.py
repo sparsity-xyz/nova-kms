@@ -47,6 +47,28 @@ logger = logging.getLogger("nova-kms.sync")
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _normalize_wallet(wallet: Optional[str]) -> str:
+    """Canonical wallet string for PoP binding.
+
+    For real Ethereum addresses (0x + 40 hex chars), enforce lowercase.
+    For non-standard/test identifiers (e.g., "0xTestNode"), preserve case
+    to avoid breaking fixtures that use symbolic wallet strings.
+    """
+    w = (wallet or "").strip()
+    if not w:
+        return ""
+    if len(w) == 42 and w.startswith("0x"):
+        hex_part = w[2:]
+        if all(c in "0123456789abcdefABCDEF" for c in hex_part):
+            return w.lower()
+    return w
+
+
+# =============================================================================
 # HMAC Message Signing
 # =============================================================================
 
@@ -181,7 +203,7 @@ class PeerCache:
                         logger.debug(f"Skipping instance {instance_id}: status is {instance.status} (expected ACTIVE)")
                         continue
 
-                    wallet = (getattr(instance, "tee_wallet_address", "") or "").lower()
+                    wallet = _normalize_wallet(getattr(instance, "tee_wallet_address", ""))
                     if not wallet or wallet in seen_wallets:
                         if not wallet:
                             logger.debug(f"Skipping instance {instance_id}: no wallet address")
@@ -201,9 +223,9 @@ class PeerCache:
 
                     peers.append(
                         {
-                            "tee_wallet_address": instance.tee_wallet_address,
+                            "tee_wallet_address": wallet,
                             "node_url": instance.instance_url,
-                            "operator": instance.operator,
+                            "operator": _normalize_wallet(getattr(instance, "operator", "")),
                             "status": instance.status,
                             "version_id": instance.version_id,
                             "instance_id": instance.instance_id,
@@ -243,7 +265,7 @@ class SyncManager:
         http_timeout: int = 15,
     ):
         self.data_store = data_store
-        self.node_wallet = node_wallet
+        self.node_wallet = _normalize_wallet(node_wallet)
         self.peer_cache = peer_cache
         self.odyn = odyn
         self.node_info = node_info
@@ -576,7 +598,7 @@ class SyncManager:
 
         # 1. Lightweight PoP Signature (Handshake)
         # fetch peer's wallet from cache to bind signature to the intended recipient.
-        peer_wallet = self.peer_cache.get_wallet_by_url(base_url)
+        peer_wallet = _normalize_wallet(self.peer_cache.get_wallet_by_url(base_url))
 
         # PoP requires an explicit recipient wallet binding.
         # If we can't determine the peer wallet, refuse to send the request.
@@ -603,7 +625,7 @@ class SyncManager:
             return None
 
         # Prevent self-sync: do not send requests to ourselves.
-        if peer_wallet.lower() == self.node_wallet.lower():
+        if peer_wallet == self.node_wallet:
             logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
             return None
         
@@ -624,7 +646,7 @@ class SyncManager:
                 headers["X-KMS-Signature"] = sig_res["signature"]
                 # Use the actual signing wallet address from Odyn, not the static node_wallet
                 # This prevents mismatch errors if keys are rotated or simulated differently
-                headers["X-KMS-Wallet"] = self.odyn.eth_address()
+                headers["X-KMS-Wallet"] = _normalize_wallet(self.odyn.eth_address())
                 headers["X-KMS-Timestamp"] = str(timestamp)
                 headers["X-KMS-Nonce"] = nonce_b64
         except Exception as exc:
@@ -675,6 +697,7 @@ class SyncManager:
 
             from auth import verify_wallet_signature
             client_sig = headers.get("X-KMS-Signature")
+
             resp_msg = f"NovaKMS:Response:{client_sig}:{peer_wallet}"
             if not verify_wallet_signature(peer_wallet, resp_msg, resp_sig):
                 logger.warning(f"KMS Peer response signature verification failed for {peer_wallet}")
@@ -846,7 +869,7 @@ class SyncManager:
         p_ts = kms_pop.get("timestamp")
         p_nonce_b64 = kms_pop.get("nonce")
 
-        p_wallet = kms_pop.get("wallet")
+        p_wallet = _normalize_wallet(kms_pop.get("wallet"))
 
         logger.debug(f"Incoming sync from {p_wallet}: type={body.get('type')}")
 
@@ -873,6 +896,7 @@ class SyncManager:
             return {"status": "error", "reason": "Invalid nonce encoding"}
 
         # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
+        # Enforce a single canonical wallet string format (lowercase) across sender/receiver.
         message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
         try:
             recovered = recover_wallet_from_signature(message, p_sig)
@@ -889,7 +913,7 @@ class SyncManager:
             return {"status": "error", "reason": "Invalid KMS signature"}
 
         # Optional explicit wallet header must match recovered signer.
-        if p_wallet and recovered.lower() != p_wallet.lower():
+        if p_wallet and recovered.lower() != p_wallet:
             logger.warning(
                 f"Peer PoP wallet mismatch | "
                 f"Header='{p_wallet}' | "
@@ -897,11 +921,11 @@ class SyncManager:
             )
             return {"status": "error", "reason": "KMS wallet header does not match signature"}
 
-        p_wallet = recovered
+        p_wallet = recovered.lower()
 
         # Bind body.sender_wallet to the recovered PoP wallet to avoid spoofing/confusing logs.
         body_sender = body.get("sender_wallet") if isinstance(body, dict) else None
-        if body_sender and body_sender.lower() != p_wallet.lower():
+        if body_sender and body_sender.lower() != p_wallet:
             logger.warning(f"Sync rejected: sender_wallet {body_sender} does not match PoP signer {p_wallet}")
             return {"status": "error", "reason": "sender_wallet does not match PoP signature"}
 
@@ -962,7 +986,7 @@ class SyncManager:
         if self.odyn and kms_pop:
             # Sign the client's signature to prove we processed this specific request
             # Use current Odyn wallet to match the key used for signing
-            current_wallet = self.odyn.eth_address()
+            current_wallet = _normalize_wallet(self.odyn.eth_address())
             resp_msg = f"NovaKMS:Response:{p_sig}:{current_wallet}"
             sig_res = self.odyn.sign_message(resp_msg)
             result["_kms_response_sig"] = sig_res["signature"]

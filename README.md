@@ -31,6 +31,7 @@ The system implements a **Defense in Depth** strategy with four layers of securi
     2.  Caller signs a recipient-bound message:
         - **App→KMS**: `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
         - **KMS↔KMS**: `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
+    - **Wallet canonicalization**: wallet strings MUST be `0x` + 40 lowercase hex characters.
     3.  Recipient verifies signature and checks registry status.
     4.  Recipient returns a signed response: `NovaKMS:Response:<Caller_Sig>:<My_Wallet>`.
 

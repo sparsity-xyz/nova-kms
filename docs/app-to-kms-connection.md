@@ -140,6 +140,8 @@ Where:
 - `KMS_Wallet`: the destination node wallet (recipient binding; prevents reusing the signature for another node)
 - `Timestamp`: unix seconds
 
+**Wallet canonicalization**: `KMS_Wallet` MUST be a canonical Ethereum address string: `0x` + 40 lowercase hex characters.
+
 Server-side logic in `nova-kms/enclave/auth.py`:
 - nonce must be single-use and unexpired (it is consumed)
 - timestamp must be within the allowed window (`POP_MAX_AGE_SECONDS`)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -44,6 +45,26 @@ if TYPE_CHECKING:
     from sync_manager import SyncManager
 
 logger = logging.getLogger("nova-kms.routes")
+
+_ETH_WALLET_RE = re.compile(r"^(0x)?[0-9a-fA-F]{40}$")
+
+
+def _canonical_eth_wallet(wallet: Optional[str]) -> Optional[str]:
+    """Canonical Ethereum wallet string: '0x' + 40 lowercase hex.
+
+    Returns the original stripped string for non-address inputs.
+    """
+    if wallet is None:
+        return None
+    w = str(wallet).strip()
+    if not w:
+        return w
+    if not _ETH_WALLET_RE.match(w):
+        return w
+    w = w.lower()
+    if not w.startswith("0x"):
+        w = "0x" + w
+    return w
 
 # =============================================================================
 # Shared references (set by app.py at startup)
@@ -82,6 +103,8 @@ def init(
     _authorizer = authorizer
     _kms_registry = kms_registry
     _sync_manager = sync_manager
+    node_info = dict(node_info or {})
+    node_info["tee_wallet"] = _canonical_eth_wallet(node_info.get("tee_wallet"))
     _node_info = node_info
     logger.info("Routes module initialized")
 
@@ -280,7 +303,7 @@ def _add_mutual_signature(response: Response, client_sig: Optional[str]):
         try:
             # Create Response Message: NovaKMS:Response:<Sig_A>:<KMS_Wallet>
             # Use current Odyn wallet to match the key used for signing
-            current_wallet = _odyn.eth_address()
+            current_wallet = _canonical_eth_wallet(_odyn.eth_address())
             resp_msg = f"NovaKMS:Response:{client_sig}:{current_wallet}"
             sig_res = _odyn.sign_message(resp_msg)
             response.headers["X-KMS-Response-Signature"] = sig_res["signature"]
@@ -388,7 +411,7 @@ def get_status():
 
     return {
         "node": {
-            "tee_wallet": _node_info.get("tee_wallet"),
+            "tee_wallet": _canonical_eth_wallet(_node_info.get("tee_wallet")),
             "tee_pubkey": tee_pubkey_hex,  # P-384 teePubkey for E2E encryption
             "node_url": _node_info.get("node_url"),
             "is_operator": _node_info.get("is_operator", False),

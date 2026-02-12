@@ -101,7 +101,7 @@ def client(_setup_pop_routes):
 @pytest.fixture
 def kms_wallet():
     from simulation import DEFAULT_SIM_PEERS
-    return DEFAULT_SIM_PEERS[0].tee_wallet
+    return DEFAULT_SIM_PEERS[0].tee_wallet.lower()
 
 
 def _sign_pop(client, kms_wallet, private_key_hex):
@@ -121,7 +121,7 @@ def _sign_pop(client, kms_wallet, private_key_hex):
         "x-app-signature": sig,
         "x-app-timestamp": ts,
         "x-app-nonce": nonce_b64,
-        "x-app-wallet": acct.address,
+        "x-app-wallet": acct.address.lower(),
     }
 
 
