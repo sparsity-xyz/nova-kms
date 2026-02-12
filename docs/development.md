@@ -115,7 +115,7 @@ python app.py
  curl http://localhost:8000/status
  ```
  
- > **Note:** In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`). Local development overrides may apply if `IN_ENCLAVE=false` is set in `config.py` (see config documentation), but full identity verification requires valid on-chain registration.
+ > **Note:** In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`). For local development, overrides may apply if the `IN_ENCLAVE` environment variable is set to `false` (for example, `export IN_ENCLAVE=false` before running; see config documentation), but full identity verification still requires valid on-chain registration.
 
 ---
 
