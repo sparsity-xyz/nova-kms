@@ -412,16 +412,19 @@ class SyncManager:
                     return
                 try:
                     master_secret_mgr.initialize_from_random(self.odyn)
+                    logger.debug("Master secret generated successfully")
                 except Exception as exc:
                     logger.warning(f"Master secret generation failed: {exc}")
                     _set_unavailable("master secret generation failed")
                     return
 
+            logger.debug("Attempting to retrieve local master secret hash for on-chain setting...")
             local_hash = _local_secret_hash()
             if not local_hash or len(local_hash) != 32:
                 _set_unavailable("local master secret hash unavailable")
                 return
 
+            logger.debug("Attempting to set master secret hash on-chain...")
             # Attempt to set on-chain (one try per tick)
             try:
                 if not self.odyn:
@@ -433,7 +436,10 @@ class SyncManager:
                 )
                 logger.info(f"Submitted setMasterSecretHash tx: {tx_hash}")
             except Exception as exc:
-                logger.warning(f"Failed to set masterSecretHash on-chain: {exc}")
+                if hasattr(exc, "response") and exc.response is not None:
+                    logger.warning(f"Failed to set masterSecretHash on-chain: {exc} Body: {exc.response.text}")
+                else:
+                    logger.warning(f"Failed to set masterSecretHash on-chain: {exc}")
                 _set_unavailable("failed to set master secret hash")
                 return
 
@@ -442,6 +448,7 @@ class SyncManager:
             return
         else:
             # 3.2 chain hash non-zero: ensure local secret matches, else sync
+            logger.debug("Node tick: Chain hash non-zero; ensuring local secret matches...")
             local_hash = _local_secret_hash()
             if local_hash != chain_hash:
                 logger.debug(f"Node tick: Local hash {local_hash.hex() if local_hash else 'None'} != Chain hash {chain_hash.hex()}")
@@ -460,19 +467,23 @@ class SyncManager:
                     if not peer_url:
                         continue
                     try:
+                        logger.debug(f"Attempting to sync master secret from {peer_url}...")
                         if self._sync_master_secret_from_peer(peer_url, master_secret_mgr):
                             synced = True
                             break
+                        logger.debug(f"Master secret sync attempt from {peer_url} failed")
                     except Exception as exc:
                         logger.warning(f"Master secret sync attempt from {peer_url} failed: {exc}")
 
                 if not synced:
+                    logger.debug("Master secret sync failed; remaining offline")
                     _set_unavailable("master secret sync failed")
                     return
 
                 # Validate synced hash against chain
                 local_hash = _local_secret_hash()
                 if local_hash != chain_hash:
+                    logger.debug("Master secret hash mismatch; remaining offline")
                     _set_unavailable("synced master secret hash mismatch")
                     return
 
@@ -484,6 +495,7 @@ class SyncManager:
             except Exception as exc:
                 logger.warning(f"Failed to set sync key: {exc}")
 
+            logger.debug("Node tick: Online; setting available...")
             _set_available()
 
         # 4) If online: sync data with peers (paced)
@@ -492,6 +504,7 @@ class SyncManager:
         if now - self._last_push_deltas_at >= config_module.SYNC_INTERVAL_SECONDS:
             try:
                 self.push_deltas()
+                logger.debug("Node tick: Pushed deltas...")
             finally:
                 self._last_push_deltas_at = now
 
@@ -500,6 +513,7 @@ class SyncManager:
         Request the master secret from a verified peer using sealed ECDH,
         then pull a snapshot.  Returns True on success.
         """
+        logger.debug(f"Syncing master secret from {peer_url}...")
         from kdf import unseal_master_secret
         from secure_channel import generate_ecdh_keypair
 
