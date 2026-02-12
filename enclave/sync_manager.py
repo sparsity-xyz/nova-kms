@@ -582,7 +582,7 @@ class SyncManager:
             logger.info(f"Master secret received via sealed ECDH from {peer_url}")
             return True
         elif result and isinstance(result, bytes):
-            # Legacy plaintext fallback — ONLY allowed outside enclave (dev/sim).
+            # Legacy plaintext fallback — ONLY allowed outside enclave (dev).
             # C1 fix: production nodes must never accept an unencrypted master secret.
             if config_module.IN_ENCLAVE:
                 logger.warning(
@@ -678,7 +678,7 @@ class SyncManager:
                 
                 headers["X-KMS-Signature"] = sig_res["signature"]
                 # Use the actual signing wallet address from Odyn, not the static node_wallet
-                # This prevents mismatch errors if keys are rotated or simulated differently
+                # This prevents mismatch errors if keys are rotated differently
                 headers["X-KMS-Wallet"] = _normalize_wallet(self.odyn.eth_address())
                 headers["X-KMS-Timestamp"] = str(timestamp)
                 headers["X-KMS-Nonce"] = nonce_b64
@@ -836,7 +836,7 @@ class SyncManager:
 
         If ecdh_pubkey is provided, the peer will encrypt the master secret
         using ECDH + AES-GCM.  Returns the sealed envelope dict.
-        If ecdh_pubkey is None, returns raw secret bytes (legacy/sim mode).
+        If ecdh_pubkey is None, returns raw secret bytes (legacy dev mode).
         """
         url = f"{peer_url.rstrip('/')}/sync"
         body: dict = {
@@ -855,7 +855,7 @@ class SyncManager:
             # Sealed envelope response
             if "sealed" in data:
                 return data["sealed"]
-            # Legacy plaintext response (sim mode only)
+            # Legacy plaintext response (dev mode only)
             secret_hex = data.get("master_secret")
             if secret_hex:
                 return bytes.fromhex(secret_hex)

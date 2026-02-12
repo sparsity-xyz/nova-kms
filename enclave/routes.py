@@ -18,7 +18,7 @@ Endpoints (see architecture.md §3):
 
 Security:
     - In production: app calls authenticate via PoP signatures.
-    - In dev/sim: can fall back to x-tee-wallet header.
+    - In dev: can fall back to x-tee-wallet header.
     - Rate limiting and request body size limits enforced by middleware.
 """
 

@@ -220,9 +220,7 @@ Per-app namespace isolation. LRU eviction when quota exceeded.
 
 ## Environment Variables
 
-
-
 | Variable | Description | Default |
- |----------|-------------|---------|
- | `NODE_URL` | Public URL of this KMS node | (empty) |
- | `CORS_ORIGINS` | Allowed CORS origins | `*` |
+|----------|-------------|---------|
+| `NODE_URL` | Public URL of this KMS node | (empty) |
+| `CORS_ORIGINS` | Allowed CORS origins | `*` |

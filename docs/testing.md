@@ -42,6 +42,7 @@ pip install pytest httpx
 | `test_auth.py` | `auth.py` | PoP helpers, nonce store, AppAuthorizer, dev header identity |
 | `test_data_store.py` | `data_store.py` | CRUD, namespace isolation, merge, deltas, snapshots, TTL/LRU |
 | `test_encryption.py` | `data_store.py` | AES-GCM at-rest behavior and fail-closed semantics |
+| `test_integration_pop.py` | routes + auth | End-to-end App PoP authentication flows through the API |
 | `test_kdf.py` | `kdf.py` | HKDF derivation, master secret lifecycle, sealed exchange helpers |
 | `test_kms_registry.py` | `kms_registry.py` | ABI alignment and read-only registry views |
 | `test_master_secret_operator_guard.py` | `sync_manager.py` | Security guard: Ensures master secret isn't requested from non-operators |

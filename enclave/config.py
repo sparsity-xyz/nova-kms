@@ -1,15 +1,15 @@
 """enclave/config.py
 
-# Centralized configuration for the Nova KMS enclave application.
-#
-# This file defines the runtime configuration. In production (Nitro Enclave), these values
-# are typically "baked in" to the enclave image to ensure security and immutability.
-# Environment variables are sparingly used, primarily for local debugging and overrides.
-#
-# Key Design Principles:
-# 1. **Security by Default**: Defaults are set for the hardened Enclave environment.
-# 2. **Immutability**: Critical addresses (Contracts) are hardcoded to act as trust roots.
-# 3. **Environment Support**: `IN_ENCLAVE` flag switches strictly between Enclave and Local behavior.
+Centralized configuration for the Nova KMS enclave application.
+
+This file defines the runtime configuration. In production (Nitro Enclave), these values
+are typically "baked in" to the enclave image to ensure security and immutability.
+Environment variables are sparingly used, primarily for local debugging and overrides.
+
+Key Design Principles:
+  1. Security by Default: Defaults are set for the hardened Enclave environment.
+  2. Immutability: Critical addresses (Contracts) are hardcoded to act as trust roots.
+  3. Environment Support: `IN_ENCLAVE` flag switches strictly between Enclave and Local behavior.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import os
 # Environment Detection
 # =============================================================================
 
-# Logging
 # Logging
 # Hardcoded to DEBUG to expose internal state transitions as requested.
 # To reduce verbosity, change this to "INFO".

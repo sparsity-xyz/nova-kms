@@ -213,9 +213,8 @@ async def lifespan(app: FastAPI):
 
     # 10. Background scheduler (single job)
     # Run one tick immediately so service availability is correct on startup.
-    # A second tick is needed when the first tick sets the on-chain hash
-    # (e.g., local dev): the second tick sees the non-zero hash and transitions
-    # the service to online.
+    # Note: a seed node (chain hash == 0) will remain offline until the next
+    # scheduled tick confirms the on-chain hash was set.
     try:
         components["sync_manager"].node_tick(master_secret_mgr)
     except Exception as exc:
