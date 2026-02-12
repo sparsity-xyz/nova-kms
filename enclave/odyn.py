@@ -55,7 +55,19 @@ class Odyn:
 
     def sign_tx(self, tx: dict) -> dict:
         if "kind" not in tx:
-            tx["kind"] = "transaction"
+            # Convert web3-style tx dict to Odyn "structured" payload format.
+            # Odyn only accepts "structured" or "raw_rlp", NOT "transaction".
+            tx = {
+                "kind": "structured",
+                "chain_id": hex(tx["chainId"]),
+                "nonce": hex(tx["nonce"]),
+                "max_priority_fee_per_gas": hex(tx["maxPriorityFeePerGas"]),
+                "max_fee_per_gas": hex(tx["maxFeePerGas"]),
+                "gas_limit": hex(tx["gas"]),
+                "to": tx["to"],
+                "value": hex(tx.get("value", 0)),
+                "data": tx["data"],
+            }
         return self._call("POST", "/v1/eth/sign-tx", {"payload": tx})
 
     def sign_message(self, message: str, include_attestation: bool = False) -> dict:
