@@ -6,9 +6,9 @@ This repository no longer uses RA-TLS / Nitro attestation documents for HTTP
 request authentication.
 
 Security modes:
-    - Production (IN_ENCLAVE=True, SIMULATION_MODE=False): require lightweight
+    - Production (IN_ENCLAVE=True): require lightweight
         Proof-of-Possession (PoP) signatures (EIP-191) for app requests.
-    - Dev / Sim (IN_ENCLAVE=False or SIMULATION_MODE=True): allow convenience
+    - Dev (IN_ENCLAVE=False): allow convenience
         header (x-tee-wallet) to stand in for identity.
 
 Authorization is always enforced via NovaAppRegistry lookups in AppAuthorizer.
@@ -67,8 +67,8 @@ def set_node_wallet(wallet: str):
 
 
 def is_production_mode() -> bool:
-    """Return True when running in an enclave (non-simulation)."""
-    return bool(config.IN_ENCLAVE) and not bool(config.SIMULATION_MODE)
+    """Return True when running in an enclave."""
+    return bool(config.IN_ENCLAVE)
 
 
 # =============================================================================

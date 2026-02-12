@@ -394,7 +394,7 @@ class DataRecord:
 - **Non-persistent**: no filesystem writes; no local database.
 - **Rehydration**: on startup, node performs sync and/or snapshot to rebuild state.
 - **Limits**: per-app size quota + LRU eviction; TTL expiration for stale records.
-- **Security**: values are stored encrypted-at-rest using a per-app data key (AES-GCM). In production (`IN_ENCLAVE=true`), plaintext fallback is disabled; in dev/simulation, plaintext fallback may be enabled for convenience.
+- **Security**: values are stored encrypted-at-rest using a per-app data key (AES-GCM). In production (`IN_ENCLAVE=true`), plaintext fallback is disabled; in local development, plaintext fallback may be enabled for convenience.
 
 ---
 
