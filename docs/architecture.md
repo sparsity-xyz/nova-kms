@@ -31,18 +31,18 @@ graph TB
         KMSContract[KMSRegistry<br/>Operator Callbacks + masterSecretHash]
     end
     
-    App1 -->|PoP Signature / Instance Wallet| KMS1
-    App2 -->|PoP Signature / Instance Wallet| KMS2
-    App3 -->|PoP Signature / Instance Wallet| KMS1
+    App1 -- "PoP Signature / Instance Wallet" --> KMS1
+    App2 -- "PoP Signature / Instance Wallet" --> KMS2
+    App3 -- "PoP Signature / Instance Wallet" --> KMS1
     
-    KMS1 <-->|PoP Sync| KMS2
-    KMS2 <-->|PoP Sync| KMS3
-    KMS1 <-->|PoP Sync| KMS3
+    KMS1 -- "PoP Sync" --- KMS2
+    KMS2 -- "PoP Sync" --- KMS3
+    KMS1 -- "PoP Sync" --- KMS3
     
-    Registry -->|addOperator / removeOperator| KMSContract
-    KMS1 -->|Peer discovery (KMS_APP_ID → versions → instances)| Registry
-    KMS1 -->|Read masterSecretHash / optional bootstrap write| KMSContract
-    KMS1 -->|Verify instance + app + version| Registry
+    Registry -- "addOperator / removeOperator" --> KMSContract
+    KMS1 -- "Peer discovery (KMS_APP_ID → versions → instances)" --> Registry
+    KMS1 -- "Read masterSecretHash / optional bootstrap write" --> KMSContract
+    KMS1 -- "Verify instance + app + version" --> Registry
 ```
 
 ---
@@ -161,7 +161,8 @@ interface INovaAppRegistry {
 
 Operational note: NovaAppRegistry is **UUPS upgradeable**; always interact with the **proxy address**.
 
-> Note: `appId` is a **uint256 assigned by NovaAppRegistry**, not a contract address. If an app uses an on-chain contract, it is referenced via the optional `dappContract` field.
+> [!NOTE]
+> `appId` is a **uint256 assigned by NovaAppRegistry**, not a contract address. If an app uses an on-chain contract, it is referenced via the optional `dappContract` field.
 
 #### 1.2.2 KMSRegistry (Operator List)
 
@@ -289,7 +290,8 @@ The `/status` endpoint returns a merged view of local health and cluster overvie
 ### 3.3 Request Format (PoP Secured)
 Payload format is simple JSON.
 
-> Note: The KMS **does not trust client-provided App IDs**. It derives `appId`
+> [!IMPORTANT]
+> The KMS **does not trust client-provided App IDs**. It derives `appId`
 > from the PoP-identified TEE wallet via NovaAppRegistry. If a header is provided,
 > it must match.
 >
