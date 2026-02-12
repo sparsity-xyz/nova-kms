@@ -92,6 +92,7 @@ To prevent cluster fragmentation, nodes follow a strict startup protocol:
 ```
 nova-kms/
 ├── contracts/           # Solidity (KMSRegistry + tests)
+├── demo-client/         # Reference Client (Python)
 ├── enclave/             # Python KMS application
 │   ├── app.py           # FastAPI entry point
 │   ├── auth.py          # PoP auth & Registry integration
@@ -111,7 +112,7 @@ See `docs/development.md` for local development instructions. Note that `nova-km
 
 ## Client Integration
 
-Clients should use the `nova-kms-client` pattern (see `nova-examples/`):
+Clients should use the `demo-client` pattern (see `demo-client/`):
 
 1.  **Discover**: Query `NovaAppRegistry` for `ACTIVE` instances of the KMS App ID.
 2.  **Authenticate**: Use `Odyn` SDK to sign PoP headers.

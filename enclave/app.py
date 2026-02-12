@@ -142,6 +142,25 @@ def _startup_production() -> dict:
             )
             if is_active_instance:
                 logger.info("This node is a registered ACTIVE KMS instance")
+
+                # Verify that the registered teePubkey matches our local key.
+                # If these mismatch, we cannot decrypt messages sent by peers.
+                try:
+                    local_pubkey_der = odyn.get_encryption_public_key_der()
+                    registered_pubkey_bytes = getattr(inst, "tee_pubkey", b"") or b""
+                    
+                    # Compare bytes
+                    if local_pubkey_der != registered_pubkey_bytes:
+                        logger.critical(
+                            "CRITICAL CONFIGURATION ERROR: Local teePubkey does not match "
+                            "NovaAppRegistry! Encrypted communication will fail."
+                        )
+                        logger.critical(f"Local (DER): {local_pubkey_der.hex()}")
+                        logger.critical(f"Registry   : {registered_pubkey_bytes.hex()}")
+                    else:
+                        logger.info("teePubkey verified: matches NovaAppRegistry")
+                except Exception as exc:
+                    logger.warning(f"Failed to verify teePubkey against registry: {exc}")
             else:
                 reasons = []
                 if inst_id == 0:

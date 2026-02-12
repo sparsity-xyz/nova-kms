@@ -47,3 +47,6 @@ logs/
 
 # Node (if any)
 node_modules/
+
+# Demo Client
+request_logs.json
