@@ -175,7 +175,9 @@ class PeerCache:
             peers: List[dict] = []
             seen_wallets: set[str] = set()
 
-            for version_id in range(1, latest_version_id + 1):
+            # Optimization: Scan from latest version backwards, checking at most 5 versions
+            start_version = max(1, latest_version_id - 4)
+            for version_id in range(latest_version_id, start_version - 1, -1):
                 logger.debug(f"Peer discovery: Scanning version {version_id}...")
                 try:
                     ver = self.nova_registry.get_version(kms_app_id, version_id)
