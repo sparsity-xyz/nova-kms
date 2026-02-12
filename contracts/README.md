@@ -26,6 +26,11 @@ The core contract is `KMSRegistry.sol`. It is responsible for:
    make build
    ```
 
+3. **Format code**:
+   ```bash
+   make fmt
+   ```
+
 ## Testing
 
 Run the test suite using Foundry:
@@ -64,7 +69,7 @@ The script will:
 2. Initialize with the configured `NOVA_APP_REGISTRY_PROXY`.
 3. Output the deployed **Implementation** address and the **Proxy** address (the proxy is the one you will use for all future configuration and platform integration).
 
-### Setup KMS App ID
+### 3. Setup KMS App ID
 
 Once you have the Application ID assigned to Nova KMS by the platform, you **must** set it on the proxy:
 
@@ -133,6 +138,13 @@ If you need to update the App ID later:
 export PROXY_ADDRESS=0x_PROXY_ADDRESS
 export KMS_APP_ID=your_assigned_id
 make set-app-id
+```
+
+#### Reset Master Secret Hash
+If you need to rotate the master secret group or recover from a compromised group, the owner can reset the on-chain hash:
+```bash
+export PROXY_ADDRESS=0x_PROXY_ADDRESS
+make reset-secret-hash
 ```
 
 #### Manual Check

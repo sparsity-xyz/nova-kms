@@ -647,6 +647,17 @@ class SyncManager:
                 headers=headers,
                 timeout=timeout,
             )
+
+            # Check HTTP status first — error responses won't have mutual auth headers
+            if not resp.ok:
+                try:
+                    err_detail = resp.json().get("detail", resp.text[:200])
+                except Exception:
+                    err_detail = resp.text[:200]
+                logger.warning(
+                    f"Sync request to {url} returned HTTP {resp.status_code}: {err_detail}"
+                )
+                return None
             
             # 4. Verify Peer response signature for mutual auth
             resp_sig = resp.headers.get("X-KMS-Peer-Signature")
@@ -820,6 +831,7 @@ class SyncManager:
 
         # 1. Verify Lightweight PoP Signature (KMS Peer Identity)
         if not kms_pop:
+            logger.warning("Sync rejected: Missing PoP headers")
             return {"status": "error", "reason": "Missing PoP headers"}
 
         p_sig = kms_pop.get("signature")
@@ -831,12 +843,14 @@ class SyncManager:
         logger.debug(f"Incoming sync from {p_wallet}: type={body.get('type')}")
 
         if not all([p_sig, p_ts, p_nonce_b64]):
+            logger.warning(f"Sync rejected from {p_wallet}: Incomplete PoP headers (sig={bool(p_sig)}, ts={bool(p_ts)}, nonce={bool(p_nonce_b64)})")
             return {"status": "error", "reason": "Incomplete PoP headers"}
 
         # Timestamp freshness check (limits replay window)
         try:
             _require_fresh_timestamp(str(p_ts))
         except Exception as exc:
+            logger.warning(f"Sync rejected from {p_wallet}: Timestamp freshness check failed: {exc}")
             return {"status": "error", "reason": str(exc)}
 
         # A. Validate and consume nonce
@@ -844,8 +858,10 @@ class SyncManager:
         try:
             nonce_bytes = base64.b64decode(p_nonce_b64)
             if not _nonce_store.validate_and_consume(nonce_bytes):
+                logger.warning(f"Sync rejected from {p_wallet}: Invalid or expired nonce")
                 return {"status": "error", "reason": "Invalid or expired nonce"}
         except Exception:
+            logger.warning(f"Sync rejected from {p_wallet}: Invalid nonce encoding")
             return {"status": "error", "reason": "Invalid nonce encoding"}
 
         # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
@@ -878,6 +894,7 @@ class SyncManager:
         # Bind body.sender_wallet to the recovered PoP wallet to avoid spoofing/confusing logs.
         body_sender = body.get("sender_wallet") if isinstance(body, dict) else None
         if body_sender and body_sender.lower() != p_wallet.lower():
+            logger.warning(f"Sync rejected: sender_wallet {body_sender} does not match PoP signer {p_wallet}")
             return {"status": "error", "reason": "sender_wallet does not match PoP signature"}
 
         # C. Verify that peer is an authorized KMS instance (same pattern as App→KMS)
@@ -930,6 +947,7 @@ class SyncManager:
         elif sync_type == "master_secret_request":
             result = self._handle_master_secret_request(body)
         else:
+            logger.warning(f"Sync rejected from {p_wallet}: Unknown sync type: {sync_type}")
             return {"status": "error", "reason": f"Unknown sync type: {sync_type}"}
 
         # 3. Add own signature to response if requested / for mutual auth

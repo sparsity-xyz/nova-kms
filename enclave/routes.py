@@ -741,7 +741,9 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     )
 
     if result.get("status") == "error":
-        raise HTTPException(status_code=403, detail=result.get("reason", "Sync denied"))
+        reason = result.get("reason", "Sync denied")
+        logger.warning(f"Sync request from {sender_wallet} rejected: {reason}")
+        raise HTTPException(status_code=403, detail=reason)
 
     # Return server signature if available for mutual auth
     resp_sig = result.pop("_kms_response_sig", None)

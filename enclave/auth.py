@@ -299,6 +299,14 @@ class AppAuthorizer:
             logger.warning(f"Instance lookup failed for {identity.tee_wallet}: {exc}")
             return AuthResult(authorized=False, reason="Instance not found")
 
+        logger.debug(
+            f"AppAuthorizer: instance for {identity.tee_wallet}: "
+            f"id={instance.instance_id}, app_id={instance.app_id} "
+            f"(require={self._require_app_id}), "
+            f"status={instance.status}, zk_verified={instance.zk_verified}, "
+            f"version_id={instance.version_id}"
+        )
+
         if instance.instance_id == 0:
             return AuthResult(authorized=False, reason="Instance not found")
 

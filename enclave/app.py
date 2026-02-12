@@ -205,15 +205,38 @@ def _startup_production() -> dict:
             from nova_registry import InstanceStatus
             inst = nova_registry.get_instance_by_wallet(tee_wallet)
             kms_app_id = int(config.KMS_APP_ID or 0)
+
+            inst_id = getattr(inst, "instance_id", 0)
+            inst_app_id = getattr(inst, "app_id", None)
+            inst_status = getattr(inst, "status", None)
+            inst_zk = getattr(inst, "zk_verified", None)
+            inst_url = getattr(inst, "instance_url", "")
+
+            logger.info(
+                f"Instance lookup for {tee_wallet}: "
+                f"instance_id={inst_id}, app_id={inst_app_id} (expected {kms_app_id}), "
+                f"status={inst_status} (expected {InstanceStatus.ACTIVE}), "
+                f"zk_verified={inst_zk}, instance_url={inst_url}"
+            )
+
             is_active_instance = (
-                getattr(inst, "instance_id", 0) != 0
-                and getattr(inst, "app_id", None) == kms_app_id
-                and getattr(inst, "status", None) == InstanceStatus.ACTIVE
+                inst_id != 0
+                and inst_app_id == kms_app_id
+                and inst_status == InstanceStatus.ACTIVE
             )
             if is_active_instance:
                 logger.info("This node is a registered ACTIVE KMS instance")
             else:
-                logger.warning("This node is NOT an active KMS instance in NovaAppRegistry")
+                reasons = []
+                if inst_id == 0:
+                    reasons.append("instance_id is 0 (not found)")
+                if inst_app_id != kms_app_id:
+                    reasons.append(f"app_id mismatch: {inst_app_id} != {kms_app_id}")
+                if inst_status != InstanceStatus.ACTIVE:
+                    reasons.append(f"status is {inst_status}, not ACTIVE")
+                logger.warning(
+                    f"This node is NOT an active KMS instance: {'; '.join(reasons)}"
+                )
         except Exception as exc:
             logger.warning(f"Instance check failed: {exc}")
     node_info["is_operator"] = is_active_instance

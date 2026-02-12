@@ -150,18 +150,16 @@ SYNC_INTERVAL_SECONDS: int = 60
 # Max records to push in one batch.
 SYNC_BATCH_SIZE: int = 500
 
-
-
 # KMS_NODE_TICK_SECONDS:
 # The HEARTBEAT of the KMS node.
 # This single interval controls the entire lifecycle loop:
 # 1. Refreshing Operator status (Am I still active?).
 # 2. Checking Master Secret integrity (Is my secret correct? Do I need to sync?).
 # 3. Triggering Data Sync.
-KMS_NODE_TICK_SECONDS: int = 15
+KMS_NODE_TICK_SECONDS: int = 60
 
 # REGISTRY_CACHE_TTL_SECONDS:
 # Caching for App/Version/Instance lookups during *high-frequency* API authorization.
 # Unlike KMS node ticks (which happen every ~15s), API requests can happen hundreds
 # of times per second. This cache protects the chain RPC from being overwhelmed.
-REGISTRY_CACHE_TTL_SECONDS: int = 60
+REGISTRY_CACHE_TTL_SECONDS: int = 180
