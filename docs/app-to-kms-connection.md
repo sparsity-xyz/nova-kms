@@ -101,19 +101,19 @@ All sensitive request/response bodies are wrapped in an encryption envelope:
 {
   "sender_tee_pubkey": "<P-384 DER SPKI public key, hex>",
   "nonce": "<AES-GCM nonce, hex>",
-  "ciphertext": "<encrypted payload, hex>"
+  "encrypted_data": "<encrypted payload, hex>"
 }
 ```
 
 - **sender_tee_pubkey**: The sender's P-384 public key (verified against on-chain registration)
 - **nonce**: 12-byte AES-GCM nonce
-- **ciphertext**: AES-256-GCM encrypted JSON payload
+- **encrypted_data**: AES-256-GCM encrypted JSON payload
 
 **SECURITY**: The server verifies that `sender_tee_pubkey` matches the on-chain registered teePubkey for the authenticated wallet. This prevents MITM attacks where an attacker re-encrypts requests with their own key.
 
 The encryption uses Odyn's built-in ECDH + AES-256-GCM:
 - Sender calls `Odyn.encrypt(plaintext, receiver_tee_pubkey)`
-- Receiver calls `Odyn.decrypt(nonce, sender_tee_pubkey, ciphertext)`
+- Receiver calls `Odyn.decrypt(nonce, sender_tee_pubkey, encrypted_data)`
 
 ---
 
@@ -164,7 +164,7 @@ Required headers for App→KMS:
 {
   "sender_tee_pubkey": "<app's P-384 teePubkey, hex>",
   "nonce": "<AES-GCM nonce, hex>",
-  "ciphertext": "<encrypted JSON: {\"path\": \"some_key_path\", \"context\": \"\", \"length\": 32}>"
+  "encrypted_data": "<encrypted JSON: {\"path\": \"some_key_path\", \"context\": \"\", \"length\": 32}>"
 }
 ```
 
@@ -174,7 +174,7 @@ Required headers for App→KMS:
 {
   "sender_tee_pubkey": "<KMS's P-384 teePubkey, hex>",
   "nonce": "<AES-GCM nonce, hex>",
-  "ciphertext": "<encrypted JSON: {\"key\": \"<base64 derived key>\", \"path\": \"...\"}>"
+  "encrypted_data": "<encrypted JSON: {\"key\": \"<base64 derived key>\", \"path\": \"...\"}>"
 }
 ```
 
@@ -302,7 +302,7 @@ Response body (inside the E2E encrypted envelope):
   "status": "ok",
   "sealed": {
     "ephemeral_pubkey": "<P-384 DER hex>",
-    "ciphertext": "<hex>",
+    "encrypted_data": "<hex>",
     "nonce": "<hex>"
   }
 }

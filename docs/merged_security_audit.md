@@ -44,7 +44,7 @@ It summarizes the **security-relevant behaviors that are implemented in this rep
 ### 3) E2E encryption envelopes + sender teePubkey binding
 
 - Sensitive payloads are carried in an envelope:
-  - `sender_tee_pubkey`, `nonce`, `ciphertext`
+  - `sender_tee_pubkey`, `nonce`, `encrypted_data`
 - Before decrypting an encrypted envelope, the server verifies:
   - `envelope.sender_tee_pubkey` matches the **on-chain** teePubkey for the authenticated wallet
 

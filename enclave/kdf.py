@@ -198,7 +198,7 @@ def seal_master_secret(master_secret: bytes, peer_pubkey_bytes: bytes) -> dict:
 
     Returns
     -------
-    dict with keys: ephemeral_pubkey (hex, DER), ciphertext (hex), nonce (hex)
+    dict with keys: ephemeral_pubkey (hex, DER), encrypted_data (hex), nonce (hex)
     """
     from secure_channel import parse_tee_pubkey
 
@@ -230,7 +230,7 @@ def seal_master_secret(master_secret: bytes, peer_pubkey_bytes: bytes) -> dict:
             serialization.Encoding.DER,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         ).hex(),
-        "ciphertext": ciphertext.hex(),
+        "encrypted_data": ciphertext.hex(),
         "nonce": nonce.hex(),
     }
 
@@ -248,7 +248,7 @@ def unseal_master_secret(sealed: dict, my_private_key: ec.EllipticCurvePrivateKe
     from secure_channel import parse_tee_pubkey
 
     ephemeral_pub_bytes = bytes.fromhex(sealed["ephemeral_pubkey"])
-    ciphertext = bytes.fromhex(sealed["ciphertext"])
+    ciphertext = bytes.fromhex(sealed["encrypted_data"])
     nonce = bytes.fromhex(sealed["nonce"])
 
     ephemeral_pub = parse_tee_pubkey(ephemeral_pub_bytes)

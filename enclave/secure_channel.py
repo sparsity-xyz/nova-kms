@@ -76,27 +76,6 @@ def encrypt_envelope(
 
     Returns
     -------
-def encrypt_envelope(
-    odyn: "Odyn",
-    plaintext: str,
-    receiver_tee_pubkey_hex: str,
-) -> Dict[str, str]:
-    """
-    Encrypt a plaintext message for a specific receiver using their teePubkey.
-
-    Uses Odyn's built-in ECDH + AES-256-GCM encryption.
-
-    Parameters
-    ----------
-    odyn : Odyn
-        The Odyn SDK instance of the sender.
-    plaintext : str
-        The plaintext message (typically JSON-encoded).
-    receiver_tee_pubkey_hex : str
-        The receiver's P-384 teePubkey in hex (DER/SPKI format).
-
-    Returns
-    -------
     dict
         Envelope with keys: sender_tee_pubkey, nonce, encrypted_data (all hex).
     """

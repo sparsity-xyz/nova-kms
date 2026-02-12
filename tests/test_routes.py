@@ -166,14 +166,21 @@ def _setup_routes(monkeypatch):
     # Service must be marked available for endpoints to respond 200
     routes.set_service_availability(True)
 
-    if routes.router not in [r for r in app.routes]:
+    def _has_path(path: str) -> bool:
+        return any(getattr(r, "path", None) == path for r in app.routes)
+
+    # Mount routers if they aren't already present (FastAPI stores Route objects,
+    # not the APIRouter instance itself).
+    if not _has_path("/kms/derive"):
         app.include_router(routes.router)
+    if not _has_path("/nonce"):
+        app.include_router(routes.exempt_router)
 
     yield
 
 
 @pytest.fixture
-def client():
+def client(_setup_routes):
     return TestClient(app, raise_server_exceptions=False)
 
 

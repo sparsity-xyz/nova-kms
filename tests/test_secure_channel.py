@@ -548,7 +548,7 @@ class TestSealUnsealWithP384:
 
         sealed = seal_master_secret(secret, receiver_pub_der)
         assert "ephemeral_pubkey" in sealed
-        assert "ciphertext" in sealed
+        assert "encrypted_data" in sealed
         assert "nonce" in sealed
 
         recovered = unseal_master_secret(sealed, receiver_key)
@@ -607,7 +607,7 @@ class _MockOdyn:
 
     def get_encryption_public_key_der(self) -> bytes:
         return self._pubkey_der
-
+    
     def encrypt(self, plaintext: str, receiver_pubkey_hex: str) -> dict:
         if self._fail_encrypt:
             raise RuntimeError("Encryption failed")
@@ -616,10 +616,10 @@ class _MockOdyn:
         h = hashlib.sha256(plaintext.encode()).hexdigest()
         return {
             "nonce": "0x" + "ab" * 12,
-            "ciphertext": "0x" + h,
+            "encrypted_data": "0x" + h,
         }
 
-    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, ciphertext_hex: str) -> str:
+    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, encrypted_data_hex: str) -> str:
         if self._fail_decrypt:
             raise RuntimeError("Decryption failed")
         # For testing, return a fixed plaintext
@@ -635,7 +635,7 @@ class TestEncryptEnvelope:
 
         assert "sender_tee_pubkey" in result
         assert "nonce" in result
-        assert "ciphertext" in result
+        assert "encrypted_data" in result
         assert result["sender_tee_pubkey"] == odyn._pubkey_der.hex()
         # nonce should have 0x prefix stripped
         assert not result["nonce"].startswith("0x")
@@ -646,9 +646,9 @@ class TestEncryptEnvelope:
         odyn = _MockOdyn()
         result = encrypt_envelope(odyn, "test", "aabbcc")
 
-        # Both nonce and ciphertext should have 0x prefix stripped
+        # Both nonce and encrypted_data should have 0x prefix stripped
         assert not result["nonce"].startswith("0x")
-        assert not result["ciphertext"].startswith("0x")
+        assert not result["encrypted_data"].startswith("0x")
 
 
 class TestDecryptEnvelope:
@@ -659,7 +659,7 @@ class TestDecryptEnvelope:
         envelope = {
             "sender_tee_pubkey": "aabbcc",
             "nonce": "112233",
-            "ciphertext": "445566",
+            "encrypted_data": "445566",
         }
         result = decrypt_envelope(odyn, envelope)
         assert result == '{"test": "data"}'
@@ -671,13 +671,13 @@ class TestDecryptEnvelope:
 
         # Missing sender_tee_pubkey
         with pytest.raises(ValueError, match="Malformed"):
-            decrypt_envelope(odyn, {"nonce": "aa", "ciphertext": "bb"})
+            decrypt_envelope(odyn, {"nonce": "aa", "encrypted_data": "bb"})
 
         # Missing nonce
         with pytest.raises(ValueError, match="Malformed"):
-            decrypt_envelope(odyn, {"sender_tee_pubkey": "aa", "ciphertext": "bb"})
+            decrypt_envelope(odyn, {"sender_tee_pubkey": "aa", "encrypted_data": "bb"})
 
-        # Missing ciphertext
+        # Missing encrypted_data
         with pytest.raises(ValueError, match="Malformed"):
             decrypt_envelope(odyn, {"sender_tee_pubkey": "aa", "nonce": "bb"})
 
@@ -688,7 +688,7 @@ class TestDecryptEnvelope:
         envelope = {
             "sender_tee_pubkey": "aabbcc",
             "nonce": "112233",
-            "ciphertext": "445566",
+            "encrypted_data": "445566",
         }
         with pytest.raises(ValueError, match="decryption failed"):
             decrypt_envelope(odyn, envelope)
@@ -704,7 +704,7 @@ class TestEncryptJsonEnvelope:
 
         assert "sender_tee_pubkey" in result
         assert "nonce" in result
-        assert "ciphertext" in result
+        assert "encrypted_data" in result
 
 
 class TestDecryptJsonEnvelope:
@@ -715,7 +715,7 @@ class TestDecryptJsonEnvelope:
         envelope = {
             "sender_tee_pubkey": "aabbcc",
             "nonce": "112233",
-            "ciphertext": "445566",
+            "encrypted_data": "445566",
         }
         result = decrypt_json_envelope(odyn, envelope)
         assert result == {"test": "data"}
@@ -806,7 +806,7 @@ class TestSenderTeePubkeyMismatchProtection:
         envelope = {
             "sender_tee_pubkey": pubkey_hex,
             "nonce": "00" * 12,
-            "ciphertext": "00" * 32,
+            "encrypted_data": "00" * 32,
         }
         
         # Should not raise - matching pubkeys
@@ -833,7 +833,7 @@ class TestSenderTeePubkeyMismatchProtection:
         envelope = {
             "sender_tee_pubkey": envelope_pubkey_hex,
             "nonce": "00" * 12,
-            "ciphertext": "00" * 32,
+            "encrypted_data": "00" * 32,
         }
         
         # Should raise 403 - mismatched pubkeys
@@ -872,7 +872,7 @@ class TestSenderTeePubkeyMismatchProtection:
         envelope = {
             "sender_tee_pubkey": pubkey_hex,
             "nonce": "00" * 12,
-            "ciphertext": "00" * 32,
+            "encrypted_data": "00" * 32,
         }
         
         # Empty on-chain pubkey - should proceed (can't verify)
@@ -900,7 +900,7 @@ class TestSenderTeePubkeyMismatchProtection:
         envelope = {
             "sender_tee_pubkey": "0x" + pubkey_hex.upper(),
             "nonce": "00" * 12,
-            "ciphertext": "00" * 32,
+            "encrypted_data": "00" * 32,
         }
         
         # Should match despite different formatting

@@ -687,7 +687,7 @@ class SyncManager:
                 from secure_channel import decrypt_json_envelope
                 resp_data = resp.json()
                 # Check if response is encrypted envelope
-                if all(k in resp_data for k in ("sender_tee_pubkey", "nonce", "ciphertext")):
+                if all(k in resp_data for k in ("sender_tee_pubkey", "nonce", "encrypted_data")):
                     decrypted_data = decrypt_json_envelope(self.odyn, resp_data)
                     # Create a new response-like object with decrypted data
                     resp._decrypted_json = decrypted_data

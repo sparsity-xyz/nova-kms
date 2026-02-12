@@ -90,7 +90,7 @@ sig_res = odyn.sign_message(msg)       # EIP-191 signing for PoP
 # P-384 encryption (teePubkey)
 pub = odyn.get_encryption_public_key()             # includes public_key_der (hex)
 enc = odyn.encrypt("plaintext", peer_pubkey_hex)
-plaintext = odyn.decrypt(enc["nonce"], peer_pubkey_hex, enc["ciphertext"])
+plaintext = odyn.decrypt(enc["nonce"], peer_pubkey_hex, enc["encrypted_data"])
 ```
 
 ### 1.2 On-chain Contracts

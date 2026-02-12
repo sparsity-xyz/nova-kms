@@ -146,26 +146,26 @@ class SimOdyn:
         import os
 
         nonce = os.urandom(12)
-        # Fake ciphertext: just base64 the plaintext with a marker
+        # Fake encrypted_data: just base64 the plaintext with a marker
         import base64
         fake_ct = base64.b64encode(b"SIM:" + plaintext.encode()).hex()
 
         return {
             "nonce": nonce.hex(),
-            "ciphertext": fake_ct,
+            "encrypted_data": fake_ct,
         }
 
-    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, ciphertext_hex: str) -> str:
+    def decrypt(self, nonce_hex: str, sender_pubkey_hex: str, encrypted_data_hex: str) -> str:
         """Simulate ECDH + AES-256-GCM decryption.
 
         Reverses the fake encryption from ``encrypt()``.
         """
         import base64
 
-        ct_bytes = bytes.fromhex(ciphertext_hex)
+        ct_bytes = bytes.fromhex(encrypted_data_hex)
         decoded = base64.b64decode(ct_bytes)
         if not decoded.startswith(b"SIM:"):
-            raise ValueError("Invalid simulation ciphertext")
+            raise ValueError("Invalid simulation encrypted_data")
         return decoded[4:].decode()
 
 

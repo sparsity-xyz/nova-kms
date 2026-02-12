@@ -84,12 +84,17 @@ def _setup_pop_routes(monkeypatch):
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
 
-    if routes.router not in [r for r in app.routes]:
+    def _has_path(path: str) -> bool:
+        return any(getattr(r, "path", None) == path for r in app.routes)
+
+    if not _has_path("/kms/derive"):
         app.include_router(routes.router)
+    if not _has_path("/nonce"):
+        app.include_router(routes.exempt_router)
 
 
 @pytest.fixture
-def client():
+def client(_setup_pop_routes):
     return TestClient(app, raise_server_exceptions=False)
 
 

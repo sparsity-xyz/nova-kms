@@ -171,7 +171,7 @@ class TestSealedKeyExchange:
 
         sealed = seal_master_secret(secret, receiver_pub)
         assert "ephemeral_pubkey" in sealed
-        assert "ciphertext" in sealed
+        assert "encrypted_data" in sealed
         assert "nonce" in sealed
 
         recovered_secret = unseal_master_secret(sealed, receiver_key)

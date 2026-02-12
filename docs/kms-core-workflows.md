@@ -157,7 +157,7 @@ These keypairs are **completely independent**. The wallet is NOT derived from te
    - Generate ephemeral P-384 keypair
    - ECDH: `shared_secret = ECDH(ephemeral_private, requester_pubkey)`
    - HKDF: `aes_key = HKDF-SHA256(shared_secret, salt="nova-kms:sealed-master-secret", info="aes-gcm-key")`
-   - Encrypt: `ciphertext = AES-256-GCM(aes_key, master_secret)`
+   - Encrypt: `encrypted_data = AES-256-GCM(aes_key, master_secret)`
 
 3. **Response**: Sealed envelope returned:
    ```json
@@ -165,7 +165,7 @@ These keypairs are **completely independent**. The wallet is NOT derived from te
      "status": "ok",
      "sealed": {
        "ephemeral_pubkey": "<P-384 DER hex>",
-       "ciphertext": "<hex>",
+       "encrypted_data": "<hex>",
        "nonce": "<hex>"
      }
    }
