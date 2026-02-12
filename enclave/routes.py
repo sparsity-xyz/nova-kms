@@ -159,12 +159,12 @@ class EncryptedEnvelope(BaseModel):
     """E2E encrypted request/response envelope."""
     sender_tee_pubkey: str  # Sender's P-384 teePubkey (hex)
     nonce: str              # AES-GCM nonce (hex)
-    ciphertext: str         # Encrypted payload (hex)
+    encrypted_data: str     # Encrypted payload (hex)
 
 
 def _is_encrypted_envelope(body: dict) -> bool:
     """Check if the body is an E2E encrypted envelope."""
-    return all(k in body for k in ("sender_tee_pubkey", "nonce", "ciphertext"))
+    return all(k in body for k in ("sender_tee_pubkey", "nonce", "encrypted_data"))
 
 
 def _normalize_hex(s: str) -> str:

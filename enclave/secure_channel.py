@@ -28,8 +28,8 @@ teePubkey-based ECDH + AES-256-GCM scheme provided by Odyn:
   2. Sender calls ``Odyn.encrypt(plaintext, receiver_teePubkey)`` which
      performs ECDH key agreement and AES-256-GCM encryption.
   3. Envelope format: ``{"sender_tee_pubkey": "<hex>", "nonce": "<hex>",
-     "ciphertext": "<hex>"}``
-  4. Receiver calls ``Odyn.decrypt(nonce, sender_teePubkey, ciphertext)``
+     "encrypted_data": "<hex>"}``
+  4. Receiver calls ``Odyn.decrypt(nonce, sender_teePubkey, encrypted_data)``
      to recover the plaintext.
 
 This ensures confidentiality even if TLS is terminated outside the enclave.
@@ -76,8 +76,29 @@ def encrypt_envelope(
 
     Returns
     -------
+def encrypt_envelope(
+    odyn: "Odyn",
+    plaintext: str,
+    receiver_tee_pubkey_hex: str,
+) -> Dict[str, str]:
+    """
+    Encrypt a plaintext message for a specific receiver using their teePubkey.
+
+    Uses Odyn's built-in ECDH + AES-256-GCM encryption.
+
+    Parameters
+    ----------
+    odyn : Odyn
+        The Odyn SDK instance of the sender.
+    plaintext : str
+        The plaintext message (typically JSON-encoded).
+    receiver_tee_pubkey_hex : str
+        The receiver's P-384 teePubkey in hex (DER/SPKI format).
+
+    Returns
+    -------
     dict
-        Envelope with keys: sender_tee_pubkey, nonce, ciphertext (all hex).
+        Envelope with keys: sender_tee_pubkey, nonce, encrypted_data (all hex).
     """
     # Get sender's teePubkey
     sender_pubkey_der = odyn.get_encryption_public_key_der()
@@ -86,13 +107,13 @@ def encrypt_envelope(
     # Encrypt using receiver's teePubkey
     result = odyn.encrypt(plaintext, receiver_tee_pubkey_hex)
 
-    # Some Odyn versions return 'encrypted_data', others 'ciphertext'
-    ciphertext = result.get("ciphertext") or result.get("encrypted_data") or ""
+    # Odyn returns 'encrypted_data'
+    encrypted_data = result.get("encrypted_data") or ""
 
     return {
         "sender_tee_pubkey": sender_pubkey_hex,
         "nonce": result.get("nonce", "").lstrip("0x"),
-        "ciphertext": ciphertext.lstrip("0x"),
+        "encrypted_data": encrypted_data.lstrip("0x"),
     }
 
 
@@ -108,7 +129,7 @@ def decrypt_envelope(
     odyn : Odyn
         The Odyn SDK instance of the receiver.
     envelope : dict
-        Envelope with keys: sender_tee_pubkey, nonce, ciphertext (all hex).
+        Envelope with keys: sender_tee_pubkey, nonce, encrypted_data (all hex).
 
     Returns
     -------
@@ -122,14 +143,13 @@ def decrypt_envelope(
     """
     sender_pubkey_hex = envelope.get("sender_tee_pubkey", "")
     nonce_hex = envelope.get("nonce", "")
-    # Check for both standard names
-    ciphertext_hex = envelope.get("ciphertext") or envelope.get("encrypted_data") or ""
+    encrypted_data_hex = envelope.get("encrypted_data", "")
 
-    if not all([sender_pubkey_hex, nonce_hex, ciphertext_hex]):
+    if not all([sender_pubkey_hex, nonce_hex, encrypted_data_hex]):
         raise ValueError("Malformed envelope: missing required fields")
 
     try:
-        plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, ciphertext_hex)
+        plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
         return plaintext
     except Exception as exc:
         raise ValueError(f"Envelope decryption failed: {exc}") from exc
