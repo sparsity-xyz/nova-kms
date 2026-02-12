@@ -212,31 +212,31 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
         if (_novaAppRegistryAddr == address(0)) return false;
         if (kmsAppId == 0) return false;
 
-        // getInstanceByWallet(address) returns a tuple with 10 head words.
+        // getInstanceByWallet(address) returns a struct-wrapped tuple (word[0]=0x20 offset).
         // We only need:
-        //   word[1] appId
-        //   word[2] versionId
-        //   word[6] teeWalletAddress
-        //   word[8] instanceStatus
+        //   word[2] appId
+        //   word[3] versionId
+        //   word[7] teeWalletAddress
+        //   word[9] instanceStatus
         (bool ok1, bytes memory instRet) =
             _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender));
-        if (!ok1 || instRet.length < 32 * 10) return false;
+        if (!ok1 || instRet.length < 32 * 11) return false;
 
-        uint256 appId = _loadWord(instRet, 1);
-        uint256 versionId = _loadWord(instRet, 2);
-        address teeWallet = address(uint160(_loadWord(instRet, 6)));
-        uint8 instanceStatus = uint8(_loadWord(instRet, 8));
+        uint256 appId = _loadWord(instRet, 2);
+        uint256 versionId = _loadWord(instRet, 3);
+        address teeWallet = address(uint160(_loadWord(instRet, 7)));
+        uint8 instanceStatus = uint8(_loadWord(instRet, 9));
 
         if (teeWallet != sender) return false;
         if (appId != kmsAppId) return false;
         if (instanceStatus != _INSTANCE_STATUS_ACTIVE) return false;
 
-        // getVersion(appId, versionId) head word[7] is version status.
+        // getVersion(appId, versionId) struct-wrapped; version status at word[8].
         (bool ok2, bytes memory verRet) =
             _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_VERSION, appId, versionId));
-        if (!ok2 || verRet.length < 32 * 10) return false;
+        if (!ok2 || verRet.length < 32 * 11) return false;
 
-        uint8 versionStatus = uint8(_loadWord(verRet, 7));
+        uint8 versionStatus = uint8(_loadWord(verRet, 8));
         return versionStatus == _VERSION_STATUS_ENROLLED;
     }
 
