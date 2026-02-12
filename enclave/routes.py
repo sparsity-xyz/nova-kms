@@ -103,7 +103,10 @@ def init(
     _authorizer = authorizer
     _kms_registry = kms_registry
     _sync_manager = sync_manager
-    node_info = dict(node_info or {})
+    # Keep the original dict reference so background tasks (e.g., SyncManager)
+    # can update fields like is_operator and have /status reflect it.
+    if node_info is None:
+        node_info = {}
     node_info["tee_wallet"] = _canonical_eth_wallet(node_info.get("tee_wallet"))
     _node_info = node_info
     logger.info("Routes module initialized")
@@ -558,7 +561,7 @@ def derive_key(request: Request, response: Response, body: dict = None):
 # /kms/data  (KV Store) - E2E Encrypted
 # =============================================================================
 
-@router.get("/kms/data/{key}")
+@router.get("/kms/data/{key:path}")
 def get_data(key: str, request: Request, response: Response):
     """Read a key from the app's KV namespace (E2E encrypted response)."""
     auth_info = _authorize_app(request)

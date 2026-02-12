@@ -417,6 +417,17 @@ class SyncManager:
         
         if self.node_info is not None:
             self.node_info["is_operator"] = True
+
+            # If NODE_URL was not configured, backfill it from the ACTIVE KMS
+            # instance list discovered via NovaAppRegistry.
+            cur_url = (self.node_info.get("node_url") or "").strip()
+            if not cur_url:
+                for p in peers:
+                    if (p.get("tee_wallet_address") or "").lower() == self_wallet:
+                        own_url = (p.get("node_url") or "").strip()
+                        if own_url:
+                            self.node_info["node_url"] = own_url
+                        break
         logger.debug("Node tick: Self is in KMS node list. Proceeding to check master secret.")
 
         # 2) Read on-chain master secret hash
@@ -559,6 +570,14 @@ class SyncManager:
         if result and isinstance(result, dict):
             secret = unseal_master_secret(result, ecdh_key)
             master_secret_mgr.initialize_from_peer(secret, peer_url=peer_url)
+
+            # As soon as we have the master secret, derive the sync HMAC key so
+            # follow-up sync calls (snapshot/delta) include X-Sync-Signature.
+            try:
+                self.set_sync_key(master_secret_mgr.get_sync_key())
+            except Exception as exc:
+                logger.warning(f"Failed to derive sync key after master secret sync: {exc}")
+
             self.request_snapshot(peer_url)
             logger.info(f"Master secret received via sealed ECDH from {peer_url}")
             return True
@@ -572,6 +591,12 @@ class SyncManager:
                 )
                 return False
             master_secret_mgr.initialize_from_peer(result, peer_url=peer_url)
+
+            try:
+                self.set_sync_key(master_secret_mgr.get_sync_key())
+            except Exception as exc:
+                logger.warning(f"Failed to derive sync key after master secret sync: {exc}")
+
             self.request_snapshot(peer_url)
             logger.info(f"Master secret received via plaintext from {peer_url}")
             return True
