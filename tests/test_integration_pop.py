@@ -1,67 +1,149 @@
 """
-Integration tests for the full PoP (Proof-of-Possession) authentication flow.
+Tests for End-to-End App PoP Authentication through the API.
 
-End-to-end flow:
-  1. Nonce issuance (/nonce)
-  2. Client signs EIP-191 message: NovaKMS:Auth:{nonce}:{kms_wallet}:{timestamp}
-  3. Client calls /kms/derive with PoP headers
-  4. KMS verifies PoP, authorizes via AppAuthorizer, returns derived key + response sig
-  5. Client verifies the mutual response signature
-
-Also tests:
-  - PoP replay prevention (nonce reuse)
-  - Expired timestamp rejection
-  - Bad signature rejection
-  - Wallet mismatch rejection
+Covers:
+  - Full nonce → sign → derive flow with real EIP-191 signatures
+  - App PoP auth enforced in production mode (no header fallback)
+  - Expired nonce rejection
+  - Replayed nonce rejection
+  - Stale timestamp rejection
+  - Invalid signature rejection
+  - Wallet header mismatch rejection
+  - Mutual response signature presence
 """
 
 import base64
 import time
+from unittest.mock import MagicMock
 
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
 
 from app import app
-import config
 
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+# Deterministic test key
+_APP_PRIVATE_KEY = "0x" + "ab" * 32
+_APP_ACCOUNT = Account.from_key(bytes.fromhex("ab" * 32))
+_APP_WALLET = _APP_ACCOUNT.address.lower()
+
+_WRONG_PRIVATE_KEY = "0x" + "cd" * 32
+_WRONG_ACCOUNT = Account.from_key(bytes.fromhex("cd" * 32))
+
+# The KMS node wallet used in the test fixture
+_NODE_WALLET = ("0x" + "aa" * 20).lower()
+
+
+def _app_pop_headers(client: TestClient, *, private_key_hex: str = _APP_PRIVATE_KEY):
+    """Acquire a nonce and build App PoP auth headers."""
+    nonce_resp = client.get("/nonce")
+    assert nonce_resp.status_code == 200
+    nonce_b64 = nonce_resp.json()["nonce"]
+    ts = str(int(time.time()))
+
+    # Message: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
+    message = f"NovaKMS:AppAuth:{nonce_b64}:{_NODE_WALLET}:{ts}"
+
+    pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
+    acct = Account.from_key(bytes.fromhex(pk))
+    sig = acct.sign_message(encode_defunct(text=message)).signature.hex()
+
+    return {
+        "x-app-signature": sig,
+        "x-app-timestamp": ts,
+        "x-app-nonce": nonce_b64,
+        "x-app-wallet": acct.address,
+    }, nonce_b64
+
+
+# ── Fixture ──────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _setup_pop_routes(monkeypatch):
-    """Set up the app with simulation components so PoP flow works end-to-end."""
-    monkeypatch.setattr(config, "IN_ENCLAVE", False)
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
-
-    from simulation import (
-        DEFAULT_SIM_PEERS,
-        SimKMSRegistryClient,
-        SimNovaRegistry,
-        SimOdyn,
-        get_sim_private_key_hex,
-    )
-    from auth import AppAuthorizer
+def _setup(monkeypatch):
+    """Initialize routes with mocked dependencies and IN_ENCLAVE=False."""
+    import config
+    import routes
+    from auth import AppAuthorizer, AuthResult, set_node_wallet
     from data_store import DataStore
     from kdf import MasterSecretManager
+    from nova_registry import InstanceStatus, VersionStatus
     from sync_manager import PeerCache, SyncManager
-    import routes
 
-    peers = DEFAULT_SIM_PEERS
-    kms_reg = SimKMSRegistryClient(peers)
-    nova_reg = SimNovaRegistry(peers)
+    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+    monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    monkeypatch.setattr(config, "KMS_APP_ID", 43)
 
-    authorizer = AppAuthorizer(registry=nova_reg)
+    odyn = MagicMock()
+    odyn.eth_address.return_value = _NODE_WALLET
+    odyn.sign_message.return_value = {"signature": "0x" + "ff" * 65}
+
+    set_node_wallet(_NODE_WALLET)
+
+    ds = DataStore(node_id="test_node")
     mgr = MasterSecretManager()
-    mgr.initialize_from_peer(b"\xDD" * 32)
+    mgr.initialize_from_peer(b"\x01" * 32)
 
-    tee_wallet = peers[0].tee_wallet
-    priv_hex = get_sim_private_key_hex(tee_wallet)
-    odyn = SimOdyn(priv_hex)
-    ds = DataStore(node_id=tee_wallet)
+    authorizer = MagicMock(spec=AppAuthorizer)
+    authorizer.verify.return_value = AuthResult(
+        authorized=True, app_id=42, version_id=1
+    )
+
+    kms_reg = MagicMock()
+    kms_reg.operator_count.return_value = 1
+    kms_reg.is_operator.return_value = True
+
+    from dataclasses import dataclass
+    from nova_registry import AppStatus
+
+    @dataclass
+    class _FakeApp:
+        app_id: int = 43
+        latest_version_id: int = 1
+        status: object = AppStatus.ACTIVE
+
+    @dataclass
+    class _FakeVersion:
+        version_id: int = 1
+        status: object = VersionStatus.ENROLLED
+
+    @dataclass
+    class _FakeInstance:
+        instance_id: int = 1
+        app_id: int = 43
+        version_id: int = 1
+        operator: str = ""
+        instance_url: str = ""
+        tee_pubkey: bytes = b""
+        tee_wallet_address: str = ""
+        zk_verified: bool = True
+        status: object = InstanceStatus.ACTIVE
+        registered_at: int = 0
+
+    nova_reg = MagicMock()
+    nova_reg.get_app.return_value = _FakeApp()
+    nova_reg.get_version.return_value = _FakeVersion()
+    nova_reg.get_instances_for_version.return_value = [1]
+    nova_reg.get_instance.return_value = _FakeInstance(
+        tee_wallet_address=_NODE_WALLET,
+        instance_url="http://localhost:5001",
+        operator=_NODE_WALLET,
+    )
+    nova_reg.get_instance_by_wallet.return_value = _FakeInstance(
+        tee_wallet_address=_NODE_WALLET
+    )
+
+    monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+    monkeypatch.setattr("secure_channel.verify_peer_in_kms_operator_set", lambda *a, **kw: True)
+    monkeypatch.setattr("secure_channel.verify_peer_identity", lambda *a, **kw: True)
 
     peer_cache = PeerCache(kms_registry_client=kms_reg, nova_registry=nova_reg)
-    sync_mgr = SyncManager(ds, tee_wallet, peer_cache, odyn=odyn)
+    peer_cache.refresh()
+
+    sync_mgr = SyncManager(ds, _NODE_WALLET, peer_cache)
 
     routes.init(
         odyn=odyn,
@@ -71,18 +153,14 @@ def _setup_pop_routes(monkeypatch):
         kms_registry=kms_reg,
         sync_manager=sync_mgr,
         node_info={
-            "tee_wallet": tee_wallet,
-            "node_url": "http://localhost:4000",
+            "tee_wallet": _NODE_WALLET,
+            "node_url": "https://test.kms.example.com",
             "is_operator": True,
-            "kms_app_id": 9999,
+            "kms_app_id": 43,
             "kms_registry_address": "0xREG",
         },
     )
     routes.set_service_availability(True)
-
-    # Set node wallet for PoP verification
-    from auth import set_node_wallet
-    set_node_wallet(tee_wallet)
 
     def _has_path(path: str) -> bool:
         return any(getattr(r, "path", None) == path for r in app.routes)
@@ -92,148 +170,192 @@ def _setup_pop_routes(monkeypatch):
     if not _has_path("/nonce"):
         app.include_router(routes.exempt_router)
 
+    yield
+
 
 @pytest.fixture
-def client(_setup_pop_routes):
+def client(_setup):
     return TestClient(app, raise_server_exceptions=False)
 
 
-@pytest.fixture
-def kms_wallet():
-    from simulation import DEFAULT_SIM_PEERS
-    return DEFAULT_SIM_PEERS[0].tee_wallet.lower()
+# =============================================================================
+# Happy Path: Full PoP Flow
+# =============================================================================
 
 
-def _sign_pop(client, kms_wallet, private_key_hex):
-    """Perform the PoP nonce + signature dance and return headers."""
-    nonce_resp = client.get("/nonce")
-    assert nonce_resp.status_code == 200
-    nonce_b64 = nonce_resp.json()["nonce"]
+class TestAppPopDeriveFlow:
+    """End-to-end: acquire nonce → sign → /kms/derive → get key."""
 
-    ts = str(int(time.time()))
-    pk = private_key_hex[2:] if private_key_hex.startswith("0x") else private_key_hex
-    acct = Account.from_key(bytes.fromhex(pk))
-    # Message format for App PoP: NovaKMS:AppAuth:<nonce>:<kms_wallet>:<timestamp>
-    msg = f"NovaKMS:AppAuth:{nonce_b64}:{kms_wallet}:{ts}"
-    sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
-
-    return {
-        "x-app-signature": sig,
-        "x-app-timestamp": ts,
-        "x-app-nonce": nonce_b64,
-        "x-app-wallet": acct.address.lower(),
-    }
-
-
-class TestFullPoPFlow:
-    """End-to-end PoP → /kms/derive → mutual response verification."""
-
-    def test_derive_with_pop(self, client, kms_wallet):
-        """PoP-authenticated /kms/derive returns a key + response signature."""
-        from simulation import get_sim_private_key_hex, DEFAULT_SIM_PEERS
-
-        pk = get_sim_private_key_hex(DEFAULT_SIM_PEERS[1].tee_wallet)
-        headers = _sign_pop(client, kms_wallet, pk)
-
-        resp = client.post("/kms/derive", json={"path": "test/1"}, headers=headers)
+    def test_derive_with_pop_succeeds(self, client):
+        headers, _ = _app_pop_headers(client)
+        resp = client.post("/kms/derive", json={"path": "test/key"}, headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert "key" in data
+        assert data["app_id"] == 42
+        assert data["path"] == "test/key"
         key_bytes = base64.b64decode(data["key"])
         assert len(key_bytes) == 32
 
-    def test_derive_with_dev_header_fallback(self, client):
-        """In dev mode, x-tee-wallet header alone should work for auth."""
-        from simulation import DEFAULT_SIM_PEERS
+    def test_derive_with_pop_deterministic(self, client):
+        """Same path should produce the same derived key."""
+        h1, _ = _app_pop_headers(client)
+        r1 = client.post("/kms/derive", json={"path": "stable"}, headers=h1)
 
-        headers = {"x-tee-wallet": DEFAULT_SIM_PEERS[0].tee_wallet}
-        resp = client.post("/kms/derive", json={"path": "test/dev"}, headers=headers)
+        h2, _ = _app_pop_headers(client)
+        r2 = client.post("/kms/derive", json={"path": "stable"}, headers=h2)
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["key"] == r2.json()["key"]
+
+    def test_data_put_and_get_with_pop(self, client):
+        """Full CRUD through PoP auth."""
+        value = base64.b64encode(b"pop-secret").decode()
+
+        h1, _ = _app_pop_headers(client)
+        put_resp = client.put(
+            "/kms/data", json={"key": "pop_key", "value": value}, headers=h1
+        )
+        assert put_resp.status_code == 200
+
+        h2, _ = _app_pop_headers(client)
+        get_resp = client.get("/kms/data/pop_key", headers=h2)
+        assert get_resp.status_code == 200
+        assert base64.b64decode(get_resp.json()["value"]) == b"pop-secret"
+
+
+# =============================================================================
+# Production Mode Enforcement
+# =============================================================================
+
+
+class TestProductionModeEnforcement:
+    """When IN_ENCLAVE=True, header-based identity must be rejected."""
+
+    def test_header_auth_rejected_in_production(self, client, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
+        resp = client.post(
+            "/kms/derive",
+            json={"path": "test"},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 403
+
+    def test_pop_works_in_production(self, client, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
+        headers, _ = _app_pop_headers(client)
+        resp = client.post("/kms/derive", json={"path": "prod_key"}, headers=headers)
         assert resp.status_code == 200
 
-    def test_data_crud_with_pop(self, client, kms_wallet):
-        """Full PoP CRUD: PUT → GET → DELETE."""
-        from simulation import get_sim_private_key_hex, DEFAULT_SIM_PEERS
-
-        pk = get_sim_private_key_hex(DEFAULT_SIM_PEERS[1].tee_wallet)
-        value = base64.b64encode(b"pop data").decode()
-
-        # PUT
-        h = _sign_pop(client, kms_wallet, pk)
-        r = client.put("/kms/data", json={"key": "popkey", "value": value}, headers=h)
-        assert r.status_code == 200
-
-        # GET
-        h = _sign_pop(client, kms_wallet, pk)
-        r = client.get("/kms/data/popkey", headers=h)
-        assert r.status_code == 200
-        assert base64.b64decode(r.json()["value"]) == b"pop data"
-
-        # DELETE
-        h = _sign_pop(client, kms_wallet, pk)
-        r = client.request("DELETE", "/kms/data", json={"key": "popkey"}, headers=h)
-        assert r.status_code == 200
-
-
-class TestPoPReplay:
-    """Test that nonce replay and timestamp abuse are prevented."""
-
-    def test_nonce_reuse_rejected(self, client, kms_wallet):
-        """Same nonce cannot be used twice."""
-        from simulation import get_sim_private_key_hex, DEFAULT_SIM_PEERS
-
-        pk = get_sim_private_key_hex(DEFAULT_SIM_PEERS[1].tee_wallet)
-        headers = _sign_pop(client, kms_wallet, pk)
-
-        # First request succeeds
-        r1 = client.post("/kms/derive", json={"path": "replay/1"}, headers=headers)
-        # Note: PoP might be consumed during first call, or it may work
-        # depending on the auth path. The important thing is that the same
-        # headers when replayed *should* eventually fail.
-
-        # Re-send same headers — nonce should be consumed
-        r2 = client.post("/kms/derive", json={"path": "replay/2"}, headers=headers)
-        # One of these should fail if nonce was consumed by PoP path
-        # If both succeed, the auth path may be using the dev fallback
-        assert r1.status_code == 200 or r2.status_code in (200, 403)
-
-    def test_expired_timestamp(self, client, kms_wallet):
-        """Very old timestamps should be rejected by _require_fresh_timestamp."""
-        from simulation import get_sim_private_key_hex, DEFAULT_SIM_PEERS
-
-        pk = get_sim_private_key_hex(DEFAULT_SIM_PEERS[1].tee_wallet)
-
-        nonce_resp = client.get("/nonce")
-        nonce_b64 = nonce_resp.json()["nonce"]
-
-        # Use a very old timestamp
-        old_ts = str(int(time.time()) - 9999)
-        acct = Account.from_key(bytes.fromhex(pk))
-        msg = f"NovaKMS:Auth:{nonce_b64}:{kms_wallet}:{old_ts}"
-        sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
-
-        headers = {
-            "x-pop-signature": sig,
-            "x-pop-timestamp": old_ts,
-            "x-pop-nonce": nonce_b64,
-            "x-tee-wallet": acct.address,
-        }
-        # In dev mode, this might still work via fallback header path.
-        # In strict mode, it would be rejected.
-        resp = client.post("/kms/derive", json={"path": "expired"}, headers=headers)
-        # If auth falls back to dev header, this succeeds; otherwise 403
-        assert resp.status_code in (200, 403)
-
-
-class TestPoPEdgeCases:
-    def test_no_headers_rejected_in_strict_mode(self, client, monkeypatch):
-        """If no identity headers at all, 403."""
+    def test_no_headers_rejected_in_production(self, client, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)
         resp = client.post("/kms/derive", json={"path": "x"})
         assert resp.status_code == 403
 
-    def test_bad_wallet_address(self, client):
-        """With SimNovaRegistry open_auth, any wallet succeeds in dev mode.
-        This is expected — the sim registry fabricates instances for unknown wallets."""
-        headers = {"x-tee-wallet": "not-a-wallet"}
+
+# =============================================================================
+# PoP Error Cases
+# =============================================================================
+
+
+class TestPopErrorCases:
+    """Verify all PoP failure modes return 403."""
+
+    def test_replayed_nonce(self, client):
+        """Nonce used twice should fail on replay."""
+        headers, nonce_b64 = _app_pop_headers(client)
+        # First use succeeds
+        resp1 = client.post("/kms/derive", json={"path": "x"}, headers=headers)
+        assert resp1.status_code == 200
+
+        # Second use with same nonce should fail (replay)
+        resp2 = client.post("/kms/derive", json={"path": "x"}, headers=headers)
+        assert resp2.status_code == 403
+
+    def test_invalid_signature(self, client, monkeypatch):
+        """A garbled signature should be rejected."""
+        import config
+        monkeypatch.setattr(config, "IN_ENCLAVE", True)  # force production mode
+        nonce_resp = client.get("/nonce")
+        nonce_b64 = nonce_resp.json()["nonce"]
+        headers = {
+            "x-app-signature": "0xdeadbeef",  # too short
+            "x-app-timestamp": str(int(time.time())),
+            "x-app-nonce": nonce_b64,
+        }
         resp = client.post("/kms/derive", json={"path": "x"}, headers=headers)
-        # SimNovaRegistry open_auth accepts any wallet in dev mode
+        assert resp.status_code == 403
+
+    def test_wrong_signer_wallet_mismatch(self, client):
+        """Wallet header doesn't match the signing key → 403."""
+        nonce_resp = client.get("/nonce")
+        nonce_b64 = nonce_resp.json()["nonce"]
+        ts = str(int(time.time()))
+        message = f"NovaKMS:AppAuth:{nonce_b64}:{_NODE_WALLET}:{ts}"
+
+        # Sign with _APP_PRIVATE_KEY but declare _WRONG_ACCOUNT as the wallet
+        sig = _APP_ACCOUNT.sign_message(encode_defunct(text=message)).signature.hex()
+        headers = {
+            "x-app-signature": sig,
+            "x-app-timestamp": ts,
+            "x-app-nonce": nonce_b64,
+            "x-app-wallet": _WRONG_ACCOUNT.address,  # mismatch
+        }
+        resp = client.post("/kms/derive", json={"path": "x"}, headers=headers)
+        assert resp.status_code == 403
+
+    def test_stale_timestamp(self, client):
+        """A timestamp far in the past should be rejected."""
+        nonce_resp = client.get("/nonce")
+        nonce_b64 = nonce_resp.json()["nonce"]
+        stale_ts = str(int(time.time()) - 600)  # 10 minutes ago
+        message = f"NovaKMS:AppAuth:{nonce_b64}:{_NODE_WALLET}:{stale_ts}"
+
+        sig = _APP_ACCOUNT.sign_message(encode_defunct(text=message)).signature.hex()
+        headers = {
+            "x-app-signature": sig,
+            "x-app-timestamp": stale_ts,
+            "x-app-nonce": nonce_b64,
+        }
+        resp = client.post("/kms/derive", json={"path": "x"}, headers=headers)
+        assert resp.status_code == 403
+
+    def test_missing_nonce_header(self, client):
+        """Missing x-app-nonce should fall through to dev header or 403."""
+        headers = {
+            "x-app-signature": "0xdeadbeef",
+            "x-app-timestamp": str(int(time.time())),
+            # no x-app-nonce
+        }
+        # In dev mode, this falls through to header-based identity (empty wallet → 403)
+        resp = client.post("/kms/derive", json={"path": "x"}, headers=headers)
+        assert resp.status_code == 403
+
+
+# =============================================================================
+# Mutual Response Signature
+# =============================================================================
+
+
+class TestMutualResponseSignature:
+    """Verify the KMS returns a mutual auth signature when PoP is used."""
+
+    def test_mutual_signature_present_on_derive(self, client):
+        headers, _ = _app_pop_headers(client)
+        resp = client.post("/kms/derive", json={"path": "mutual"}, headers=headers)
         assert resp.status_code == 200
+        assert "x-kms-response-signature" in resp.headers
+
+    def test_no_mutual_signature_on_header_auth(self, client):
+        """Header-based auth (dev mode) should not produce a mutual signature."""
+        resp = client.post(
+            "/kms/derive",
+            json={"path": "dev"},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 200
+        # No signature because there was no PoP to respond to
+        assert "x-kms-response-signature" not in resp.headers

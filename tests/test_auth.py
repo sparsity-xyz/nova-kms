@@ -2,7 +2,7 @@
 Tests for auth.py — Authentication + Authorization.
 
 Covers:
-  - identity_from_headers (dev/sim mode)
+  - identity_from_headers (dev mode)
   - identity_from_headers blocked in production
   - _NonceStore (issue, validate, replay, expiry, capacity)
   - AppAuthorizer.verify (all authorization steps and branches)
@@ -122,17 +122,12 @@ class TestIdentityFromHeaders:
             att = identity_from_headers({})
             assert att.tee_wallet == ""
 
+
     def test_disabled_in_production(self):
-        with patch("auth.config.IN_ENCLAVE", True), \
-             patch("auth.config.SIMULATION_MODE", False):
+        """When IN_ENCLAVE is True, header-based identity should be disabled."""
+        with patch("auth.config.IN_ENCLAVE", True):
             with pytest.raises(RuntimeError, match="disabled in production"):
                 identity_from_headers({"x-tee-wallet": "0xAA"})
-
-    def test_allowed_in_sim_mode(self):
-        with patch("auth.config.IN_ENCLAVE", True), \
-             patch("auth.config.SIMULATION_MODE", True):
-            att = identity_from_headers({"x-tee-wallet": "0xBB"})
-            assert att.tee_wallet == "0xBB"
 
 
 # =============================================================================
@@ -459,8 +454,7 @@ class TestAuthenticateApp:
             assert result.tee_wallet == "0xDEV"
 
     def test_production_mode_requires_pop(self):
-        with patch("auth.config.IN_ENCLAVE", True), \
-             patch("auth.config.SIMULATION_MODE", False):
+        with patch("auth.config.IN_ENCLAVE", True):
             req = MagicMock()
             req.headers = {}  # empty dict — no PoP headers present
             with pytest.raises(RuntimeError):

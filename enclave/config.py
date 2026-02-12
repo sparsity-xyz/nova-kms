@@ -4,12 +4,12 @@ Centralized configuration for the Nova KMS enclave application.
 
 This file defines the runtime configuration. In production (Nitro Enclave), these values
 are typically "baked in" to the enclave image to ensure security and immutability.
-Environment variables are sparingly used, primarily for local simulation adjustments.
+Environment variables are sparingly used, primarily for local debugging and overrides.
 
 Key Design Principles:
-1. **Security by Default**: Defaults are set for the hardened Enclave environment.
-2. **Immutability**: Critical addresses (Contracts) are hardcoded to act as trust roots.
-3. **Simulation Support**: `IN_ENCLAVE` flag switches strictly between Production and Simulation behavior.
+  1. Security by Default: Defaults are set for the hardened Enclave environment.
+  2. Immutability: Critical addresses (Contracts) are hardcoded to act as trust roots.
+  3. Environment Support: `IN_ENCLAVE` flag switches strictly between Enclave and Local behavior.
 """
 
 from __future__ import annotations
@@ -21,24 +21,20 @@ import os
 # =============================================================================
 
 # Logging
-# Logging
 # Hardcoded to DEBUG to expose internal state transitions as requested.
 # To reduce verbosity, change this to "INFO".
 LOG_LEVEL = "DEBUG"
 
 # IN_ENCLAVE: The master switch for security modes.
-# - True (Production):
+# - True (Production / Enclave):
 #     - Enforces PoP (Proof of Possession) authentication.
 #     - Disables text/plain master secret exchange (requires sealed ECDH).
 #     - Enforces HTTPS for peer communication.
-#     - Disables simulation shortcuts (e.g., fake registries).
 #
-# - False (Simulation/Dev):
+# - False (Local Development):
 #     - Allows HTTP.
 #     - Allows plaintext master secret (for debugging).
 #     - Enables header-based identity injection (X-Tee-Wallet).
-#
-# Helper scripts (scripts/) set IN_ENCLAVE=false to enable simulation.
 _in_enclave_env = os.getenv("IN_ENCLAVE", "").strip().lower()
 if _in_enclave_env in ("1", "true", "yes"):
     IN_ENCLAVE: bool = True
@@ -72,15 +68,6 @@ KMS_REGISTRY_ADDRESS: str = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
 KMS_APP_ID: int = 43
 
 # =============================================================================
-# Simulation Config
-# =============================================================================
-# These settings are ONLY active when IN_ENCLAVE is False.
-
-SIMULATION_MODE: bool = False
-SIM_PEERS: list = []
-SIM_MASTER_SECRET_HEX: str = ""
-
-# =============================================================================
 # Security & Authentication
 # =============================================================================
 
@@ -104,7 +91,11 @@ ALLOW_PLAINTEXT_FALLBACK: bool = False
 # Tolerance for Last-Write-Wins conflict resolution.
 # Peer updates claiming a timestamp too far in the future are rejected to prevent
 # clock-skewed nodes from permanently overwriting data.
-MAX_CLOCK_SKEW_MS: int = 30000  # 30 seconds
+# Note: This skew applies to peer/node clocks during sync, not end-user clients.
+# A 15-minute window is a deliberate tradeoff to tolerate enclave/host and cross-region
+# clock drift in heterogeneous deployments, at the cost of a larger window in which a
+# malicious or misconfigured node could propose slightly future-dated writes.
+MAX_CLOCK_SKEW_MS: int = 900000  # 15 minutes (node clock skew tolerance during sync)
 
 # MAX_SYNC_PAYLOAD_BYTES:
 # DDoS protection for the /sync endpoint.

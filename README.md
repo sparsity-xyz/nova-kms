@@ -105,22 +105,9 @@ nova-kms/
 └── Makefile             # Developer commands
 ```
 
-## Quick Start (Simulation)
+## Quick Start
 
-To run a local simulation (no Enclave, mocked Registry):
-
-```bash
-# 1. Setup
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r enclave/requirements.txt
-
-# 2. Run
-make simulation
-# Listens on localhost:4000
-
-# 3. Verify
-curl http://localhost:4000/status
-```
+See `docs/development.md` for local development instructions. Note that `nova-kms` is designed to run within a Nitro Enclave environment.
 
 ## Client Integration
 

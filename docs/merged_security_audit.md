@@ -79,7 +79,7 @@ This prevents a class of MitM “re-encryption” attacks where an attacker subs
 
 - **Eventual consistency** for KV sync: last-writer-wins semantics can drop concurrent writes.
 - **Registry cache TTL** means authorization changes (revocations) may take up to the cache window to fully propagate.
-- **Dev/simulation shortcuts** exist (e.g., header-based identity), but are blocked when running in production enclave mode.
+- **Dev shortcuts** exist (e.g., header-based identity), but are blocked when running in production enclave mode.
 
 ---
 

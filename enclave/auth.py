@@ -6,9 +6,9 @@ This repository no longer uses RA-TLS / Nitro attestation documents for HTTP
 request authentication.
 
 Security modes:
-    - Production (IN_ENCLAVE=True, SIMULATION_MODE=False): require lightweight
+    - Production (IN_ENCLAVE=True): require lightweight
         Proof-of-Possession (PoP) signatures (EIP-191) for app requests.
-    - Dev / Sim (IN_ENCLAVE=False or SIMULATION_MODE=True): allow convenience
+    - Dev (IN_ENCLAVE=False): allow convenience
         header (x-tee-wallet) to stand in for identity.
 
 Authorization is always enforced via NovaAppRegistry lookups in AppAuthorizer.
@@ -67,8 +67,8 @@ def set_node_wallet(wallet: str):
 
 
 def is_production_mode() -> bool:
-    """Return True when running in an enclave (non-simulation)."""
-    return bool(config.IN_ENCLAVE) and not bool(config.SIMULATION_MODE)
+    """Return True when running in an enclave."""
+    return bool(config.IN_ENCLAVE)
 
 
 # =============================================================================
@@ -81,7 +81,7 @@ class ClientIdentity:
     Represents the verified identity of a requesting app.
 
     In production, fields are recovered from PoP (EIP-191) signatures.
-    In dev/sim mode, they can be injected via HTTP headers for testing.
+    In dev mode, they can be injected via HTTP headers for testing.
     """
 
     tee_wallet: str                  # Ethereum address of the instance
@@ -164,7 +164,7 @@ def issue_nonce() -> bytes:
 
 def identity_from_headers(headers: dict) -> ClientIdentity:
     """
-    Build a ClientIdentity from HTTP headers (dev / sim mode).
+    Build a ClientIdentity from HTTP headers (dev mode).
 
     This helper provides a convenience shim for local development.
 
@@ -178,7 +178,7 @@ def identity_from_headers(headers: dict) -> ClientIdentity:
         )
     tee_wallet = headers.get("x-tee-wallet", "")
     if tee_wallet:
-        logger.debug("Using header-based identity (dev/sim mode)")
+        logger.debug("Using header-based identity (dev mode)")
     return ClientIdentity(tee_wallet=tee_wallet)
 
 
@@ -250,7 +250,7 @@ def authenticate_app(request, headers: dict) -> ClientIdentity:
     Unified app authentication.
 
     - In production mode: require PoP signature.
-    - In dev/sim mode: try PoP first, then fall back to header-based identity.
+    - In dev mode: try PoP first, then fall back to header-based identity.
     """
     # Try PoP signature first (works in both production and dev mode)
     try:
@@ -269,7 +269,7 @@ def authenticate_app(request, headers: dict) -> ClientIdentity:
             "Missing PoP authentication. "
             "Provide X-App-Signature / X-App-Nonce / X-App-Timestamp headers."
         )
-    # Dev/sim mode: headers are acceptable as fallback
+    # Dev mode: headers are acceptable as fallback
     return identity_from_headers(headers)
 
 

@@ -7,8 +7,6 @@ Entry point for the distributed Key Management Service running in
 a TEE (Nitro Enclave on Nova Platform).  Follows the Nova app-template
 pattern (FastAPI + Uvicorn).
 
-Supports two modes:
-
 **Production** (default):
   1. Wait for Helios light-client RPC
   2. Initialize Odyn SDK → get TEE wallet address
@@ -16,11 +14,6 @@ Supports two modes:
     4. Initialize or receive master secret (via sealed ECDH key exchange)
   5. Start background sync scheduler
   6. Mount API routes with rate limiting and body size limits
-
-**Simulation** (``SIMULATION_MODE=1``):
-  Skips Helios/Odyn, uses in-memory fake registries and a deterministic
-  master secret.  Suitable for local development and multi-node testing.
-  **Cannot be activated when running inside an enclave** (IN_ENCLAVE=true).
 
 KMS nodes may submit a one-time on-chain transaction during bootstrap to set
 `KMSRegistry.masterSecretHash` when it is currently zero (cluster coordination).
@@ -69,83 +62,6 @@ if config.LOG_LEVEL == "DEBUG":
 # =============================================================================
 
 master_secret_mgr = MasterSecretManager()
-
-# =============================================================================
-# Lifespan — Simulation Mode
-# =============================================================================
-
-
-def _startup_simulation() -> dict:
-    """
-    Build all components from simulation fakes.  Returns a dict with
-    everything the lifespan needs to wire up.
-    """
-    from simulation import build_sim_components, get_sim_port
-
-    def data_key_callback(app_id: int) -> bytes:
-        return master_secret_mgr.derive(app_id, "data_key")
-
-    sim = build_sim_components()
-
-    tee_wallet = sim["tee_wallet"]
-    node_url = sim["node_url"]
-    kms_registry = sim["kms_registry"]
-    nova_registry = sim["nova_registry"]
-    authorizer = sim["authorizer"]
-    odyn = sim["odyn"]
-    from auth import set_node_wallet
-    set_node_wallet(tee_wallet)
-
-    node_info = {
-        "tee_wallet": tee_wallet,
-        "node_url": node_url,
-        "is_operator": True,
-        "kms_app_id": config.KMS_APP_ID or 9999,
-        "kms_registry_address": "simulation",
-        "simulation_mode": True,
-    }
-
-    data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
-    peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, node_info=node_info)
-
-    # Master secret: try peers first, fall back to deterministic sim secret
-    peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
-    healthy_peer = find_healthy_peer(
-        [{"node_url": p["node_url"], "tee_wallet_address": p["tee_wallet_address"]} for p in peers],
-        exclude_wallet=tee_wallet,
-        timeout=2,
-    )
-    if healthy_peer:
-        logger.info(f"[SIM] Requesting master secret from peer {healthy_peer['node_url']}")
-        result = sync_manager.request_master_secret(healthy_peer["node_url"])
-        if result:
-            if isinstance(result, dict):
-                # Sealed ECDH envelope — decrypt it
-                from kdf import unseal_master_secret
-                from secure_channel import generate_ecdh_keypair
-                ecdh_key, _ = generate_ecdh_keypair()
-                secret = unseal_master_secret(result, ecdh_key)
-                master_secret_mgr.initialize_from_peer(secret, peer_url=healthy_peer["node_url"])
-            else:
-                master_secret_mgr.initialize_from_peer(result, peer_url=healthy_peer["node_url"])
-            sync_manager.request_snapshot(healthy_peer["node_url"])
-
-    if not master_secret_mgr.is_initialized:
-        master_secret_mgr.initialize_from_peer(sim["master_secret"])
-        logger.info("[SIM] Master secret initialized from simulation config")
-
-
-
-    return {
-        "odyn": odyn,
-        "data_store": data_store,
-        "authorizer": authorizer,
-        "kms_registry": kms_registry,
-        "sync_manager": sync_manager,
-        "node_info": node_info,
-    }
-
 
 # =============================================================================
 # Lifespan — Production Mode
@@ -273,25 +189,9 @@ def _startup_production() -> dict:
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
 
-    from simulation import is_simulation_mode
+    logger.info("=== Nova KMS starting ===")
 
-    sim_mode = is_simulation_mode()
-    mode_label = "SIMULATION" if sim_mode else "PRODUCTION"
-
-    # Safety guard: refuse simulation mode inside a real enclave
-    if sim_mode and config.IN_ENCLAVE:
-        logger.critical(
-            "SECURITY: SIMULATION_MODE=1 is forbidden when IN_ENCLAVE=true. "
-            "Refusing to start.  Disable SIMULATION_MODE or run outside the enclave."
-        )
-        raise RuntimeError("Simulation mode cannot be used inside an enclave")
-
-    logger.info(f"=== Nova KMS starting ({mode_label}) ===")
-
-    if sim_mode:
-        components = _startup_simulation()
-    else:
-        components = _startup_production()
+    components = _startup_production()
 
     # 8. Initialize routes
     routes.init(
@@ -313,21 +213,12 @@ async def lifespan(app: FastAPI):
 
     # 10. Background scheduler (single job)
     # Run one tick immediately so service availability is correct on startup.
-    # A second tick is needed when the first tick sets the on-chain hash
-    # (e.g., simulation): the second tick sees the non-zero hash and transitions
-    # the service to online.
+    # Note: a seed node (chain hash == 0) will remain offline until the next
+    # scheduled tick confirms the on-chain hash was set.
     try:
         components["sync_manager"].node_tick(master_secret_mgr)
     except Exception as exc:
         logger.warning(f"Initial node tick failed: {exc}")
-
-    # Second tick: in simulation mode the first tick writes the master secret
-    # hash on-chain (zero → non-zero) and stays offline.  A second tick picks
-    # up the non-zero hash and brings the service online.
-    try:
-        components["sync_manager"].node_tick(master_secret_mgr)
-    except Exception as exc:
-        logger.warning(f"Second node tick failed: {exc}")
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(
@@ -337,7 +228,7 @@ async def lifespan(app: FastAPI):
         args=[master_secret_mgr],
     )
     scheduler.start()
-    logger.info(f"=== Nova KMS started successfully ({mode_label}) ===")
+    logger.info("=== Nova KMS started successfully ===")
 
     yield
 
@@ -383,7 +274,4 @@ app.add_middleware(RateLimitMiddleware)
 # =============================================================================
 
 if __name__ == "__main__":
-    from simulation import is_simulation_mode, get_sim_port
-
-    port = get_sim_port() if is_simulation_mode() else 8000
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
