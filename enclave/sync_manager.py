@@ -276,6 +276,10 @@ class SyncManager:
         self._last_push_deltas_at: float = 0.0
         self._last_push_ms: int = 0
         self._sync_key: Optional[bytes] = None
+        # Store the active MasterSecretManager reference provided by node_tick.
+        # This avoids relying on importing a global singleton from an 'app' module,
+        # which can be ambiguous depending on how the service is launched.
+        self._master_secret_mgr = None
 
     def set_sync_key(self, sync_key: bytes) -> None:
         """Set the HMAC key used for signing sync messages."""
@@ -371,6 +375,10 @@ class SyncManager:
         """
 
         import routes as routes_module
+
+        # Persist the reference so /sync handlers can answer master_secret_request
+        # using the same manager instance the lifecycle tick is evaluating.
+        self._master_secret_mgr = master_secret_mgr
 
         def _set_unavailable(reason: str) -> None:
             try:
@@ -996,9 +1004,15 @@ class SyncManager:
     def _handle_master_secret_request(self, body: dict) -> dict:
         """Handle a master secret request, using sealed ECDH if peer provides a pubkey."""
         from kdf import MasterSecretManager, seal_master_secret
-        import app as app_module
 
-        mgr: MasterSecretManager = getattr(app_module, "master_secret_mgr", None)
+        mgr: MasterSecretManager = self._master_secret_mgr
+        if mgr is None:
+            # Backward compatible fallback (should not be needed in normal operation).
+            try:
+                import app as app_module
+                mgr = getattr(app_module, "master_secret_mgr", None)
+            except Exception:
+                mgr = None
         if not mgr or not mgr.is_initialized:
             return {"status": "error", "reason": "Master secret not initialized"}
 
