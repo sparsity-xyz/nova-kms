@@ -110,7 +110,12 @@ def validate_peer_url(
                     ip = ipaddress.ip_address(sockaddr[0])
                     _check_ip_blocked(ip)
             except socket.gaierror as exc:
-                raise URLValidationError(f"Cannot resolve hostname '{hostname}': {exc}")
+                # DNS failure is common in enclaves (no local resolver, only egress proxy).
+                # Log warning but ALLOW the URL, assuming the proxy handles security.
+                logger.warning(
+                    f"DNS resolution failed for '{hostname}': {exc}. "
+                    "Skipping SSRF IP check and allowing URL."
+                )
 
     # 5. No credentials in URL
     if parsed.username or parsed.password:

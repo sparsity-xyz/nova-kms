@@ -148,11 +148,13 @@ class PeerCache:
 
             app = self.nova_registry.get_app(kms_app_id)
             latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
+            logger.debug(f"Peer discovery: App {kms_app_id} has latest version {latest_version_id}")
 
             peers: List[dict] = []
             seen_wallets: set[str] = set()
 
             for version_id in range(1, latest_version_id + 1):
+                logger.debug(f"Peer discovery: Scanning version {version_id}...")
                 try:
                     ver = self.nova_registry.get_version(kms_app_id, version_id)
                 except Exception:
@@ -163,6 +165,7 @@ class PeerCache:
 
                 try:
                     instance_ids = self.nova_registry.get_instances_for_version(kms_app_id, version_id) or []
+                    logger.debug(f"Peer discovery: Version {version_id} has {len(instance_ids)} instances")
                 except Exception as exc:
                     logger.debug(f"Instances lookup failed for version {version_id}: {exc}")
                     continue
@@ -175,13 +178,18 @@ class PeerCache:
                         continue
 
                     if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
+                        logger.debug(f"Skipping instance {instance_id}: status is {instance.status} (expected ACTIVE)")
                         continue
 
                     wallet = (getattr(instance, "tee_wallet_address", "") or "").lower()
                     if not wallet or wallet in seen_wallets:
+                        if not wallet:
+                            logger.debug(f"Skipping instance {instance_id}: no wallet address")
+                        else:
+                            logger.debug(f"Skipping instance {instance_id}: wallet {wallet} already seen")
                         continue
 
-                    # Validate peer URL before adding to cache
+                    # Validate peer URL before making request
                     try:
                         validate_peer_url(instance.instance_url)
                     except URLValidationError as url_err:
@@ -202,6 +210,7 @@ class PeerCache:
                         }
                     )
                     seen_wallets.add(wallet)
+                    logger.debug(f"Added peer {wallet} from instance {instance_id}")
             self._peers = peers
             self._last_refresh = time.time()
             logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
@@ -359,6 +368,8 @@ class SyncManager:
             logger.warning(f"Peer cache refresh failed: {exc}")
 
         peers = self.peer_cache.get_peers()
+        logger.debug(f"Node tick: found {len(peers)} peers in cache")
+
         self_wallet = self.node_wallet.lower()
         kms_wallets = {
             (p.get("tee_wallet_address") or "").lower() for p in peers if p.get("tee_wallet_address")
@@ -366,8 +377,11 @@ class SyncManager:
 
         # 1) If self not in kms node list -> offline and do nothing.
         if self_wallet not in kms_wallets:
+            logger.debug(f"Node tick: self ({self_wallet}) not in KMS node list. Peers: {kms_wallets}")
             _set_unavailable("self not in KMS node list")
             return
+        
+        logger.debug("Node tick: Self is in KMS node list. Proceeding to check master secret.")
 
         # 2) Read on-chain master secret hash
         kms_reg = self.peer_cache.kms_registry
@@ -379,6 +393,7 @@ class SyncManager:
             return
 
         chain_hash_is_zero = (chain_hash == b"\x00" * 32)
+        logger.debug(f"Node tick: masterSecretHash on-chain is {'ZERO' if chain_hash_is_zero else 'SET'}")
 
         def _local_secret_hash() -> Optional[bytes]:
             if not master_secret_mgr.is_initialized:
@@ -429,6 +444,7 @@ class SyncManager:
             # 3.2 chain hash non-zero: ensure local secret matches, else sync
             local_hash = _local_secret_hash()
             if local_hash != chain_hash:
+                logger.debug(f"Node tick: Local hash {local_hash.hex() if local_hash else 'None'} != Chain hash {chain_hash.hex()}")
                 # Need to sync master secret from peers
                 if master_secret_mgr.is_initialized:
                     logger.warning("Local master secret hash mismatch; attempting to resync from peers")
@@ -668,7 +684,10 @@ class SyncManager:
         since_ms = self._last_push_ms
         deltas = self.data_store.get_deltas_since(since_ms)
         if not deltas:
+            logger.debug("Push deltas: No new deltas to push")
             return 0
+        
+        logger.debug(f"Push deltas: Found {len(deltas)} records since {since_ms}")
 
         # Serialize
         payload = self._serialize_deltas(deltas)
@@ -687,6 +706,7 @@ class SyncManager:
             if resp and resp.status_code == 200:
                 success_count += 1
             elif resp:
+                logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
                 logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
 
         self._last_push_ms = int(time.time() * 1000)
@@ -707,6 +727,7 @@ class SyncManager:
             "type": "snapshot_request",
             "sender_wallet": self.node_wallet,
         }
+        logger.debug(f"Requesting snapshot from {peer_url}...")
         resp = self._make_request(url, body, timeout=30)
         if not resp:
             return 0
@@ -792,6 +813,8 @@ class SyncManager:
         p_nonce_b64 = kms_pop.get("nonce")
 
         p_wallet = kms_pop.get("wallet")
+
+        logger.debug(f"Incoming sync from {p_wallet}: type={body.get('type')}")
 
         if not all([p_sig, p_ts, p_nonce_b64]):
             return {"status": "error", "reason": "Incomplete PoP headers"}

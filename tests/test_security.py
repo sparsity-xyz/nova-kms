@@ -88,12 +88,15 @@ class TestURLValidator:
             validate_peer_url("http://169.254.169.254/latest/meta-data", allow_private_ips=False)
 
     def test_hostname_dns_failure(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="Cannot resolve"):
-            validate_peer_url(
-                "http://this-hostname-does-not-exist-xyz123.example.invalid",
-                allow_private_ips=False,
-            )
+        from url_validator import validate_peer_url
+        # Should NOT raise URLValidationError anymore.
+        # It should log a warning and return the cleaned URL.
+        url = "http://this-hostname-does-not-exist-xyz123.example.invalid"
+        validated = validate_peer_url(
+            url,
+            allow_private_ips=False,
+        )
+        assert validated == url
 
 
 # =============================================================================

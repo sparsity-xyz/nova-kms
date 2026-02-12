@@ -20,6 +20,12 @@ import os
 # Environment Detection
 # =============================================================================
 
+# Logging
+# Logging
+# Hardcoded to DEBUG to expose internal state transitions as requested.
+# To reduce verbosity, change this to "INFO".
+LOG_LEVEL = "DEBUG"
+
 # IN_ENCLAVE: The master switch for security modes.
 # - True (Production):
 #     - Enforces PoP (Proof of Possession) authentication.

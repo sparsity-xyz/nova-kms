@@ -501,6 +501,8 @@ def derive_key(request: Request, response: Response, body: dict = None):
     path = req_data.get("path", "")
     context = req_data.get("context", "")
     length = req_data.get("length", 32)
+    
+    logger.debug(f"derive_key request: app_id={app_id} path={path} length={length}")
 
     if not path:
         raise HTTPException(status_code=400, detail="Missing 'path' field")
@@ -533,6 +535,8 @@ def get_data(key: str, request: Request, response: Response):
     app_id = auth_info["app_id"]
     app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
+
+    logger.debug(f"get_data request: app_id={app_id} key={key}")
 
     from data_store import DataKeyUnavailableError, DecryptionError
 
@@ -589,6 +593,8 @@ def put_data(request: Request, response: Response, body: dict = None):
     key = req_data.get("key", "")
     value_b64 = req_data.get("value", "")
     ttl_ms = req_data.get("ttl_ms", 0)
+
+    logger.debug(f"put_data request: app_id={app_id} key={key} ttl={ttl_ms}")
 
     if not key:
         raise HTTPException(status_code=400, detail="Missing 'key' field")
@@ -673,6 +679,9 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
         "timestamp": request.headers.get("x-kms-timestamp"),
         "nonce": request.headers.get("x-kms-nonce"),
     }
+    
+    sender_wallet = kms_pop.get("wallet") or "unknown"
+    logger.info(f"Received /sync request from {sender_wallet}")
 
     # Get sender's teePubkey from the envelope for response encryption (if encrypted)
     sender_tee_pubkey = body.get("sender_tee_pubkey") if _is_encrypted_envelope(body) else None
