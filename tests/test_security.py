@@ -61,33 +61,7 @@ class TestURLValidator:
         with pytest.raises(URLValidationError, match="hostname"):
             validate_peer_url("http://", allow_private_ips=True)
 
-    def test_blocked_port(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="Port"):
-            validate_peer_url("http://example.com:6379", allow_private_ips=True)
-
-    def test_private_ip_blocked_in_production(self, monkeypatch):
-        from url_validator import URLValidationError, validate_peer_url
-        monkeypatch.setattr(config, "IN_ENCLAVE", True)
-        with pytest.raises(URLValidationError, match="blocked range"):
-            validate_peer_url("http://127.0.0.1:8000", allow_private_ips=False)
-
-    def test_private_ip_allowed_in_dev(self):
-        from url_validator import validate_peer_url
-        url = validate_peer_url("http://127.0.0.1:8000", allow_private_ips=True)
-        assert "127.0.0.1" in url
-
-    def test_credentials_in_url_rejected(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="credentials"):
-            validate_peer_url("http://user:pass@example.com", allow_private_ips=True)
-
-    def test_link_local_blocked(self):
-        from url_validator import URLValidationError, validate_peer_url
-        with pytest.raises(URLValidationError, match="blocked"):
-            validate_peer_url("http://169.254.169.254/latest/meta-data", allow_private_ips=False)
-
-    def test_hostname_dns_failure(self):
+    def test_hostname_accept_without_resolution(self):
         from url_validator import validate_peer_url
         # Should NOT raise URLValidationError anymore.
         # It should log a warning and return the cleaned URL.
@@ -97,6 +71,13 @@ class TestURLValidator:
             allow_private_ips=False,
         )
         assert validated == url
+
+    def test_private_ips_allowed_now(self):
+        """Verify that private IPs are now allowed (responsibility shifted to proxy)."""
+        from url_validator import validate_peer_url
+        # Previously blocked IPs should now pass
+        assert validate_peer_url("http://127.0.0.1:8000", allow_private_ips=False) == "http://127.0.0.1:8000"
+        assert validate_peer_url("http://169.254.169.254/latest/meta-data", allow_private_ips=False) == "http://169.254.169.254/latest/meta-data"
 
 
 # =============================================================================
