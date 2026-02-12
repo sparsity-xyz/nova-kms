@@ -54,6 +54,8 @@ class Odyn:
         return self._call("GET", "/v1/eth/address")["address"]
 
     def sign_tx(self, tx: dict) -> dict:
+        if "kind" not in tx:
+            tx["kind"] = "transaction"
         return self._call("POST", "/v1/eth/sign-tx", {"payload": tx})
 
     def sign_message(self, message: str, include_attestation: bool = False) -> dict:

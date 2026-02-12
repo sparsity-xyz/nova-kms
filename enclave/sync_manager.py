@@ -537,8 +537,8 @@ class SyncManager:
                 return False
             master_secret_mgr.initialize_from_peer(result, peer_url=peer_url)
             self.request_snapshot(peer_url)
+            logger.info(f"Master secret received via plaintext from {peer_url}")
             return True
-
         return False
 
     def _sign_payload(self, payload_json: str) -> Optional[str]:
