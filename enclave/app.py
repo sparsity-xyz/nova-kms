@@ -61,6 +61,8 @@ logger = logging.getLogger("nova-kms")
 if config.LOG_LEVEL == "DEBUG":
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("web3").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
 # =============================================================================
 # Module-level singletons (accessible from sync_manager for master secret)
