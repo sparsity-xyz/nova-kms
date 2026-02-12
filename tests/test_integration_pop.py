@@ -279,7 +279,6 @@ class TestPopErrorCases:
         """A garbled signature should be rejected."""
         import config
         monkeypatch.setattr(config, "IN_ENCLAVE", True)  # force production mode
-        
         nonce_resp = client.get("/nonce")
         nonce_b64 = nonce_resp.json()["nonce"]
         headers = {
