@@ -264,7 +264,7 @@ class TestProductionModeEnforcement:
 class TestPopErrorCases:
     """Verify all PoP failure modes return 403."""
 
-    def test_expired_nonce(self, client):
+    def test_replayed_nonce(self, client):
         """Nonce used twice should fail on replay."""
         headers, nonce_b64 = _app_pop_headers(client)
         # First use succeeds
