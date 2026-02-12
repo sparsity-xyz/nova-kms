@@ -107,7 +107,7 @@ def _startup_simulation() -> dict:
 
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, node_info=node_info)
 
     # Master secret: try peers first, fall back to deterministic sim secret
     peers = peer_cache.get_peers(exclude_wallet=tee_wallet)
@@ -244,7 +244,7 @@ def _startup_production() -> dict:
     # 5. Initialize data store & sync
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
     peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
-    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn)
+    sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, node_info=node_info)
 
     # 6. Master secret and sync are handled by the single periodic node tick.
     # Startup should not block on initialization.
@@ -305,6 +305,7 @@ async def lifespan(app: FastAPI):
         node_info=components["node_info"],
     )
     app.include_router(routes.router)
+    app.include_router(routes.exempt_router)
 
     # 9. Set sync HMAC key if master secret is available
     if master_secret_mgr.is_initialized:

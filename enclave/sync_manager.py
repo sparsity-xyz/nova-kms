@@ -239,12 +239,14 @@ class SyncManager:
         peer_cache: PeerCache,
         *,
         odyn=None,
+        node_info: Optional[dict] = None,
         http_timeout: int = 15,
     ):
         self.data_store = data_store
         self.node_wallet = node_wallet
         self.peer_cache = peer_cache
         self.odyn = odyn
+        self.node_info = node_info
         self.http_timeout = http_timeout
 
         # Periodic node-tick state
@@ -378,9 +380,13 @@ class SyncManager:
         # 1) If self not in kms node list -> offline and do nothing.
         if self_wallet not in kms_wallets:
             logger.debug(f"Node tick: self ({self_wallet}) not in KMS node list. Peers: {kms_wallets}")
+            if self.node_info is not None:
+                self.node_info["is_operator"] = False
             _set_unavailable("self not in KMS node list")
             return
         
+        if self.node_info is not None:
+            self.node_info["is_operator"] = True
         logger.debug("Node tick: Self is in KMS node list. Proceeding to check master secret.")
 
         # 2) Read on-chain master secret hash

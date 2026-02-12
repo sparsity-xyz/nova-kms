@@ -86,10 +86,13 @@ def encrypt_envelope(
     # Encrypt using receiver's teePubkey
     result = odyn.encrypt(plaintext, receiver_tee_pubkey_hex)
 
+    # Some Odyn versions return 'encrypted_data', others 'ciphertext'
+    ciphertext = result.get("ciphertext") or result.get("encrypted_data") or ""
+
     return {
         "sender_tee_pubkey": sender_pubkey_hex,
         "nonce": result.get("nonce", "").lstrip("0x"),
-        "ciphertext": result.get("ciphertext", "").lstrip("0x"),
+        "ciphertext": ciphertext.lstrip("0x"),
     }
 
 
@@ -119,7 +122,8 @@ def decrypt_envelope(
     """
     sender_pubkey_hex = envelope.get("sender_tee_pubkey", "")
     nonce_hex = envelope.get("nonce", "")
-    ciphertext_hex = envelope.get("ciphertext", "")
+    # Check for both standard names
+    ciphertext_hex = envelope.get("ciphertext") or envelope.get("encrypted_data") or ""
 
     if not all([sender_pubkey_hex, nonce_hex, ciphertext_hex]):
         raise ValueError("Malformed envelope: missing required fields")

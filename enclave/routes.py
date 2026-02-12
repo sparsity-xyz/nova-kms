@@ -117,6 +117,11 @@ def _require_service_available(request: Request) -> None:
 
 router = APIRouter(tags=["kms"], dependencies=[Depends(_require_service_available)])
 
+# Diagnostic and sync routes are exempt from the service availability gate.
+# This prevents deadlocks (e.g. node A won't sync to node B because node B is 
+# "unavailable" while waiting for the secret) and allows status monitoring.
+exempt_router = APIRouter(tags=["kms"])
+
 _nonce_rate_limiter = TokenBucket(config.NONCE_RATE_LIMIT_PER_MINUTE)
 
 
@@ -321,7 +326,7 @@ def api_overview():
         ],
     }
 
-@router.get("/health")
+@exempt_router.get("/health")
 def health_check():
     return {"status": "healthy"}
 
@@ -330,7 +335,7 @@ def health_check():
 # /nonce  (PoP challenge)
 # =============================================================================
 
-@router.get("/nonce")
+@exempt_router.get("/nonce")
 def get_nonce(request: Request):
     """
     Issue a one-time nonce for Proof-of-Possession (PoP) challenge-response.
@@ -351,7 +356,7 @@ def get_nonce(request: Request):
 # /status
 # =============================================================================
 
-@router.get("/status")
+@exempt_router.get("/status")
 def get_status():
     """Return node status and cluster overview."""
     cluster_info = {}
@@ -405,7 +410,7 @@ def get_status():
 # /nodes
 # =============================================================================
 
-@router.get("/nodes")
+@exempt_router.get("/nodes")
 def list_operators():
     """List KMS instances from NovaAppRegistry (PeerCache).
 
