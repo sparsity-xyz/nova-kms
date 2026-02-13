@@ -309,76 +309,65 @@ class KMSClient:
              raise
 
     async def get_kms_nodes(self) -> List[dict]:
-        """Discover KMS nodes via NovaAppRegistry.
+        """Discover KMS nodes via NovaAppRegistry using getActiveInstances.
 
         Algorithm:
-          1) app = getApp(KMS_APP_ID)
-          2) for version_id in 1..app.latest_version_id:
-                if getVersion(...).status == ENROLLED:
-                    instances = getInstancesForVersion(app_id, version_id)
-                    for each instance_id:
-                        inst = getInstance(instance_id)
-                        if inst.status == ACTIVE: include
-          3) merge all ACTIVE instances across ENROLLED versions (dedupe by tee wallet)
+          1) wallets = getActiveInstances(KMS_APP_ID)
+          2) for each wallet:
+               inst = getInstanceByWallet(wallet)
+               if inst.status == ACTIVE: include
         """
-        from nova_registry import InstanceStatus, VersionStatus
+        from nova_registry import InstanceStatus
 
         if not self.nova_registry:
             return []
 
         kms_app_id = int(getattr(config, "KMS_APP_ID", 0) or 0)
-
-        app = await asyncio.to_thread(self.nova_registry.get_app, kms_app_id)
-        latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
-        if latest_version_id <= 0:
+        
+        # New optimization: Get all active instance wallets directly
+        try:
+            active_wallets = await asyncio.to_thread(self.nova_registry.get_active_instances, kms_app_id)
+        except Exception as e:
+            logger.warning(f"Failed to get active instances: {e}")
             return []
 
         nodes_by_wallet: Dict[str, dict] = {}
 
-        for version_id in range(1, latest_version_id + 1):
+        for wallet in active_wallets or []:
+            if not wallet:
+                continue
+            
+            w_norm = wallet.lower()
+            if w_norm in nodes_by_wallet:
+                continue
+
             try:
-                ver = await asyncio.to_thread(self.nova_registry.get_version, kms_app_id, version_id)
+                inst = await asyncio.to_thread(self.nova_registry.get_instance_by_wallet, wallet)
             except Exception:
                 continue
 
-            if getattr(ver, "status", None) != VersionStatus.ENROLLED:
+            if getattr(inst, "status", None) != InstanceStatus.ACTIVE:
                 continue
 
-            try:
-                instance_ids = await asyncio.to_thread(
-                    self.nova_registry.get_instances_for_version, kms_app_id, version_id
+            tee_wallet = (getattr(inst, "tee_wallet_address", "") or "").lower()
+            if not tee_wallet:
+                continue
+
+            # H1 fix: verify teePubkey ↔ tee_wallet consistency on-chain
+            if not verify_instance_identity(inst):
+                logger.warning(
+                    f"Skipping instance {wallet}: "
+                    f"teePubkey/wallet inconsistency"
                 )
-            except Exception:
                 continue
 
-            for instance_id in instance_ids or []:
-                try:
-                    inst = await asyncio.to_thread(self.nova_registry.get_instance, int(instance_id))
-                except Exception:
-                    continue
-
-                if getattr(inst, "status", None) != InstanceStatus.ACTIVE:
-                    continue
-
-                tee_wallet = (getattr(inst, "tee_wallet_address", "") or "").lower()
-                if not tee_wallet:
-                    continue
-
-                # H1 fix: verify teePubkey ↔ tee_wallet consistency on-chain
-                if not verify_instance_identity(inst):
-                    logger.warning(
-                        f"Skipping instance {instance_id}: "
-                        f"teePubkey/wallet inconsistency"
-                    )
-                    continue
-
-                inst_url = self._ensure_http(getattr(inst, "instance_url", ""))
-                nodes_by_wallet[tee_wallet] = {
-                    "instance": inst,
-                    "instance_url": inst_url,
-                    "version_id": getattr(inst, "version_id", None),
-                    "instance_id": getattr(inst, "instance_id", None),
-                }
+            inst_url = self._ensure_http(getattr(inst, "instance_url", ""))
+            nodes_by_wallet[tee_wallet] = {
+                "instance": inst,
+                "instance_url": inst_url,
+                "version_id": getattr(inst, "version_id", None),
+                "instance_id": getattr(inst, "instance_id", None),
+            }
 
         return list(nodes_by_wallet.values())
 

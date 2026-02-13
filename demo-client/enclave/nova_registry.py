@@ -198,6 +198,13 @@ _NOVA_REGISTRY_ABI = [
         "type": "function",
     },
     {
+        "inputs": [{"internalType": "uint256", "name": "appId", "type": "uint256"}],
+        "name": "getActiveInstances",
+        "outputs": [{"internalType": "address[]", "name": "", "type": "address[]"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "inputs": [
             {"internalType": "uint256", "name": "appId", "type": "uint256"},
             {"internalType": "uint256", "name": "versionId", "type": "uint256"},
@@ -325,4 +332,9 @@ class NovaRegistry:
     def get_instances_for_version(self, app_id: int, version_id: int) -> List[int]:
         result = self._call("getInstancesForVersion", [app_id, version_id])
         # result is list of uint256
+        return result
+
+    def get_active_instances(self, app_id: int) -> List[str]:
+        """Returns list of wallet addresses for active instances."""
+        result = self._call("getActiveInstances", [app_id])
         return result

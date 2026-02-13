@@ -129,14 +129,17 @@ class Chain:
 # Module-level singleton
 # =============================================================================
 
-_chain = Chain()
+_chain: Optional[Chain] = None
 
 
 def wait_for_helios(timeout: int = 300) -> bool:
-    return _chain.wait_for_helios(timeout)
+    return get_chain().wait_for_helios(timeout)
 
 
 def get_chain() -> Chain:
+    global _chain
+    if _chain is None:
+        _chain = Chain()
     return _chain
 
 

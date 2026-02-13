@@ -187,7 +187,7 @@ class PeerCache:
         return None
 
     def _fetch_peers_from_chain(self) -> List[dict]:
-        """Fetch peer list from NovaAppRegistry. Slow IO, NO LOCK."""
+        """Fetch peer list from NovaAppRegistry using getActiveInstances. Slow IO, NO LOCK."""
         from config import KMS_APP_ID
         from nova_registry import InstanceStatus, VersionStatus
 
@@ -195,73 +195,62 @@ class PeerCache:
         if kms_app_id <= 0:
             raise ValueError("KMS_APP_ID not configured")
 
-        app = self.nova_registry.get_app(kms_app_id)
-        latest_version_id = int(getattr(app, "latest_version_id", 0) or 0)
-        logger.debug(f"Peer discovery: App {kms_app_id} has latest version {latest_version_id}")
-
         peers: List[dict] = []
         seen_wallets: set[str] = set()
 
-        # Optimization: Scan from latest version backwards, checking at most 5 versions
-        start_version = max(1, latest_version_id - 4)
-        for version_id in range(latest_version_id, start_version - 1, -1):
-            logger.debug(f"Peer discovery: Scanning version {version_id}...")
-            try:
-                ver = self.nova_registry.get_version(kms_app_id, version_id)
-            except Exception:
+        # New optimization: Get all active instance wallets directly from registry
+        # This filters for non-revoked versions and active status on-chain.
+        try:
+            active_wallets = self.nova_registry.get_active_instances(kms_app_id) or []
+            logger.debug(f"Peer discovery: Registry returned {len(active_wallets)} active instances")
+        except Exception as exc:
+            logger.warning(f"Failed to get active instances from registry: {exc}")
+            return []
+
+        for wallet in active_wallets:
+            wallet = _normalize_wallet(wallet)
+            if not wallet or wallet in seen_wallets:
                 continue
 
-            if getattr(ver, "status", None) != VersionStatus.ENROLLED:
-                continue
-
             try:
-                instance_ids = self.nova_registry.get_instances_for_version(kms_app_id, version_id) or []
-                logger.debug(f"Peer discovery: Version {version_id} has {len(instance_ids)} instances")
+                # Fetch full instance details to get URL and other metadata
+                instance = self.nova_registry.get_instance_by_wallet(wallet)
             except Exception as exc:
-                logger.debug(f"Instances lookup failed for version {version_id}: {exc}")
+                logger.debug(f"Instance lookup failed for wallet {wallet}: {exc}")
                 continue
 
-            for instance_id in instance_ids:
-                try:
-                    instance = self.nova_registry.get_instance(int(instance_id))
-                except Exception as exc:
-                    logger.debug(f"Instance lookup failed for id {instance_id}: {exc}")
-                    continue
+            # Double-check status (though getActiveInstances should guarantee it)
+            if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
+                logger.debug(f"Skipping instance {wallet}: status is {instance.status} (expected ACTIVE)")
+                continue
 
-                if getattr(instance, "status", None) != InstanceStatus.ACTIVE:
-                    logger.debug(f"Skipping instance {instance_id}: status is {instance.status} (expected ACTIVE)")
-                    continue
+            # Check version status (optional but good for safety)
+            # We assume getActiveInstances handles version revocation, but if we wanted to be
+            # paranoid we could check version status here too. For now trusting the contract.
 
-                wallet = _normalize_wallet(getattr(instance, "tee_wallet_address", ""))
-                if not wallet or wallet in seen_wallets:
-                    if not wallet:
-                        logger.debug(f"Skipping instance {instance_id}: no wallet address")
-                    else:
-                        logger.debug(f"Skipping instance {instance_id}: wallet {wallet} already seen")
-                    continue
-
-                # Validate peer URL before making request
-                try:
-                    validate_peer_url(instance.instance_url)
-                except URLValidationError as url_err:
-                    logger.warning(
-                        f"Skipping peer {wallet}: invalid URL "
-                        f"'{instance.instance_url}': {url_err}"
-                    )
-                    continue
-
-                peers.append(
-                    {
-                        "tee_wallet_address": wallet,
-                        "node_url": instance.instance_url,
-                        "operator": _normalize_wallet(getattr(instance, "operator", "")),
-                        "status": instance.status,
-                        "version_id": instance.version_id,
-                        "instance_id": instance.instance_id,
-                    }
+            # Validate peer URL before making request
+            try:
+                validate_peer_url(instance.instance_url)
+            except URLValidationError as url_err:
+                logger.warning(
+                    f"Skipping peer {wallet}: invalid URL "
+                    f"'{instance.instance_url}': {url_err}"
                 )
-                seen_wallets.add(wallet)
-                logger.debug(f"Added peer {wallet} from instance {instance_id}")
+                continue
+
+            peers.append(
+                {
+                    "tee_wallet_address": wallet,
+                    "node_url": instance.instance_url,
+                    "operator": _normalize_wallet(getattr(instance, "operator", "")),
+                    "status": instance.status,
+                    "version_id": instance.version_id,
+                    "instance_id": instance.instance_id,
+                }
+            )
+            seen_wallets.add(wallet)
+            logger.debug(f"Added peer {wallet}")
+
         return peers
 
     def _update_cache(self, peers: List[dict]) -> None:

@@ -217,6 +217,22 @@ class TestGetInstancesForVersion:
         assert ids == []
 
 
+class TestGetActiveInstances:
+    def test_returns_list_of_addresses(self):
+        reg, nova_mod = _make_registry()
+        addrs = ["0x" + "11" * 20, "0x" + "22" * 20]
+        with _mock_decode(nova_mod, (addrs,)):
+            result = reg.get_active_instances(1)
+        assert result == addrs
+
+    def test_empty_list(self):
+        reg, nova_mod = _make_registry()
+        with _mock_decode(nova_mod, ([],)):
+            result = reg.get_active_instances(1)
+        assert result == []
+
+
+
 # =============================================================================
 # CachedNovaRegistry
 # =============================================================================
@@ -306,6 +322,15 @@ class TestCachedNovaRegistry:
         cached.get_instances_for_version(1, 1)
         cached.get_instances_for_version(1, 1)
         assert mock_inner.get_instances_for_version.call_count == 2
+    def test_caches_active_instances(self):
+        mock_inner = MagicMock()
+        mock_inner.get_active_instances.return_value = ["0xAA", "0xBB"]
+
+        cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
+        r1 = cached.get_active_instances(1)
+        r2 = cached.get_active_instances(1)
+        assert r1 == ["0xAA", "0xBB"]
+        assert mock_inner.get_active_instances.call_count == 1
 
     def test_address_proxy(self):
         mock_inner = MagicMock()

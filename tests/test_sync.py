@@ -128,7 +128,7 @@ def nova_reg():
             status=InstanceStatus.ACTIVE,
         )
 
-    reg.get_instances_for_version.return_value = list(instances.keys())
+    reg.get_active_instances.return_value = list(_PEER_WALLETS)
     reg.get_instance.side_effect = lambda iid: instances[iid]
 
     # Counter for dynamic instance IDs
@@ -289,7 +289,7 @@ class TestPeerCache:
     def test_refresh_handles_instance_lookup_error(self, peer_cache, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         monkeypatch.setattr(config, "KMS_APP_ID", 43)
-        nova_reg.get_instance.side_effect = RuntimeError("chain error")
+        nova_reg.get_instance_by_wallet.side_effect = RuntimeError("chain error")
         peer_cache.refresh()
         assert len(peer_cache._peers) == 0
 
