@@ -79,7 +79,7 @@ def _setup(monkeypatch):
     # Mock encryption to pass mandatory checks
     monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
     monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
-    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk, enc=True: data)
+    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk, request_was_encrypted=True: data)
     
     # Force service availability
     monkeypatch.setattr(routes, "_service_available", True)
@@ -162,6 +162,25 @@ def _setup(monkeypatch):
     peer_cache.refresh()
 
     sync_mgr = SyncManager(ds, _NODE_WALLET, peer_cache)
+
+    import asyncio
+    # Mock asyncio in routes to use a transient loop
+    mock_asyncio = MagicMock()
+    
+    def _run_shim(coro):
+        """Run coroutine in a fresh loop."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    mock_loop = MagicMock()
+    mock_loop.run_until_complete.side_effect = _run_shim
+    # Return our mock loop when routes calls get_event_loop()
+    mock_asyncio.get_event_loop.return_value = mock_loop
+    
+    monkeypatch.setattr(routes, "asyncio", mock_asyncio)
 
     routes.init(
         odyn=odyn,

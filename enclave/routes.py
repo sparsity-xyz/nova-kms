@@ -28,6 +28,7 @@ import base64
 import logging
 import re
 import threading
+import asyncio
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -508,7 +509,6 @@ def derive_key(request: Request, response: Response, body: dict = None):
     import json
     # Parse body manually to support both encrypted and plaintext
     if body is None:
-        import asyncio
         body = asyncio.get_event_loop().run_until_complete(request.json())
 
     auth_info = _authorize_app(request)
@@ -603,7 +603,6 @@ def list_keys(request: Request, response: Response):
 @router.put("/kms/data")
 def put_data(request: Request, response: Response, body: dict = None):
     """Write a key-value pair to the app's KV namespace (E2E encrypted)."""
-    import asyncio
     if body is None:
         body = asyncio.get_event_loop().run_until_complete(request.json())
 
@@ -651,7 +650,6 @@ def put_data(request: Request, response: Response, body: dict = None):
 @router.delete("/kms/data")
 def delete_data(request: Request, response: Response, body: dict = None):
     """Delete a key from the app's KV namespace (E2E encrypted)."""
-    import asyncio
     if body is None:
         body = asyncio.get_event_loop().run_until_complete(request.json())
 
@@ -690,7 +688,6 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     Request body is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
     Response is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
     """
-    import asyncio
     if body is None:
         body = asyncio.get_event_loop().run_until_complete(request.json())
 
