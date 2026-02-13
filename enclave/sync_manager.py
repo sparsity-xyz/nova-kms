@@ -103,6 +103,7 @@ class PeerCache:
         self._peers: List[dict] = []
         self._last_refresh: float = 0
         self._lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
 
     @property
     def kms_registry(self):
@@ -162,12 +163,11 @@ class PeerCache:
         # Optimized: Check staleness with a read lock (or just access atomic float)
         # If stale and refresh_if_stale is True, perform refresh efficiently.
         if refresh_if_stale and self._is_stale():
-            # Double-check pattern not needed for _is_stale check itself, 
-            # but we want to avoid multiple threads hammering the chain.
-            # strict consistency isn't required here, so we can just call refresh().
-            # Since refresh() is now optimized to do IO outside the lock, 
-            # calling it here is safer than before, but still blocks THIS caller.
-            self.refresh()
+            # Double check locking pattern to prevent multiple threads 
+            # from hitting the chain simultaneously for the same refresh.
+            with self._refresh_lock:
+                if self._is_stale():
+                    self.refresh()
 
         with self._lock:
             peers = list(self._peers)

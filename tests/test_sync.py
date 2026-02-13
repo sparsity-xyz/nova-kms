@@ -38,9 +38,22 @@ from sync_manager import (
 # =============================================================================
 
 @pytest.fixture(autouse=True)
-def _plaintext_fallback(monkeypatch):
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+def _setup_encryption(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    
+    # Mock encryption helpers to bypass real ECIES logic
+    import secure_channel
+    monkeypatch.setattr(secure_channel, "encrypt_json_envelope", lambda odyn, data, pk: data)
+    monkeypatch.setattr(secure_channel, "decrypt_json_envelope", lambda odyn, body: body)
+    
+    # Mock identity verification for peers
+    monkeypatch.setattr(secure_channel, "verify_peer_identity", lambda *a, **kw: True)
+    monkeypatch.setattr(secure_channel, "get_tee_pubkey_hex_for_wallet", lambda *a: "01"*32)
+
+    # Mock DataStore encryption to avoid AES errors with fake data
+    from data_store import DataStore, _Namespace
+    monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+    monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
 
 
 from nova_registry import AppStatus, InstanceStatus, VersionStatus
@@ -69,6 +82,7 @@ class _FakeInstance:
     operator: str = ""
     status: object = InstanceStatus.ACTIVE
     zk_verified: bool = True
+    tee_pubkey: bytes = b"\x01" * 32
 
 
 # Peer definitions reused across fixtures

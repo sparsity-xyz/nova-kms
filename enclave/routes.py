@@ -206,7 +206,6 @@ def _normalize_hex(s: str) -> str:
 def _decrypt_request_body(body: dict, app_tee_pubkey: Optional[str]) -> tuple[dict, bool]:
     """
     Decrypt the request body if it's an encrypted envelope.
-    Falls back to plaintext if ALLOW_PLAINTEXT_FALLBACK is True.
     
     SECURITY: Verifies that sender_tee_pubkey matches the on-chain registered
     teePubkey for the authenticated wallet. This prevents MITM attacks where
@@ -238,9 +237,6 @@ def _decrypt_request_body(body: dict, app_tee_pubkey: Optional[str]) -> tuple[di
             return decrypt_json_envelope(_odyn, body), True
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Failed to decrypt request: {exc}")
-    elif config.ALLOW_PLAINTEXT_FALLBACK:
-        # Plaintext fallback for development/testing
-        return body, False
     else:
         raise HTTPException(
             status_code=400,
@@ -251,18 +247,14 @@ def _decrypt_request_body(body: dict, app_tee_pubkey: Optional[str]) -> tuple[di
 def _encrypt_response(data: dict, app_tee_pubkey: Optional[str], request_was_encrypted: bool = True) -> dict:
     """
     Encrypt the response if app_tee_pubkey is available AND request was encrypted.
-    Falls back to plaintext if request was plaintext or ALLOW_PLAINTEXT_FALLBACK is True.
     """
     from secure_channel import encrypt_json_envelope
 
-    if app_tee_pubkey and request_was_encrypted:
+    if app_tee_pubkey:
         try:
             return encrypt_json_envelope(_odyn, data, app_tee_pubkey)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to encrypt response: {exc}")
-    elif config.ALLOW_PLAINTEXT_FALLBACK or not request_was_encrypted:
-        # Plaintext fallback for development/testing, or request was plaintext
-        return data
     else:
         raise HTTPException(
             status_code=400,
@@ -755,8 +747,6 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
             decrypted_body = decrypt_json_envelope(_odyn, body)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Failed to decrypt request: {exc}")
-    elif config.ALLOW_PLAINTEXT_FALLBACK:
-        decrypted_body = body
     else:
         raise HTTPException(
             status_code=400,
@@ -790,8 +780,6 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
             return encrypt_json_envelope(_odyn, result, sender_tee_pubkey)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to encrypt response: {exc}")
-    elif config.ALLOW_PLAINTEXT_FALLBACK:
-        return result
     else:
         raise HTTPException(
             status_code=400,

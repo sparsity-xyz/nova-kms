@@ -52,19 +52,75 @@ def _setup_routes(monkeypatch):
     from nova_registry import InstanceStatus, VersionStatus
     from sync_manager import PeerCache, SyncManager
 
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
     monkeypatch.setattr(config, "KMS_APP_ID", 43)
 
+    # Mock encryption helpers
+    monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
+    monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
+    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk, enc=True: data)
+    
+    # Patch logger to see errors
+    logger_mock = MagicMock()
+    logger_mock.error = lambda msg: print(f"DEBUG_ERROR: {msg}")
+    monkeypatch.setattr(routes, "logger", logger_mock)
+    
+    # Mock asyncio for body reading
+    # Patch sys.modules so local 'import asyncio' gets our mock
+    import sys
+    import importlib
+    mock_loop = MagicMock()
+    mock_loop.run_until_complete.side_effect = lambda coro: coro
+    mock_asyncio = MagicMock()
+    mock_asyncio.get_event_loop.return_value = mock_loop
+    
+    # Patch sys.modules so local 'import asyncio' gets our mock
+    import sys
+    import importlib
+    mock_loop = MagicMock()
+    mock_loop.run_until_complete.side_effect = lambda coro: coro
+    mock_asyncio = MagicMock()
+    mock_asyncio.get_event_loop.return_value = mock_loop
+    
+    # Manually patch via monkeypatch (safer than patch.dict context manager with yield)
+    monkeypatch.setitem(sys.modules, "asyncio", mock_asyncio)
+    importlib.reload(routes)
+    
+    # Force service availability
+    monkeypatch.setattr(routes, "_service_available", True)
+    
+    yield
+    
+    # Teardown: reload routes to restore original asyncio import
+    importlib.reload(routes)
+
+    import secure_channel
+    monkeypatch.setattr(secure_channel, "decrypt_json_envelope", lambda odyn, body: body)
+    monkeypatch.setattr(secure_channel, "encrypt_json_envelope", lambda odyn, data, pk: data)
+
+    # Mock DataStore encryption to bypass key management
+    from data_store import _Namespace
+    monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+    monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
+
     odyn = MagicMock()
     odyn.eth_address.return_value = "0x" + "aa" * 20
+    
+    # Mock mutual signature to avoid odyn dependency issues
+    monkeypatch.setattr(routes, "_add_mutual_signature", lambda resp, sig: None)
 
     ds = DataStore(node_id="test_node")
     mgr = MasterSecretManager()
     mgr.initialize_from_peer(b"\x01" * 32)
 
     authorizer = MagicMock(spec=AppAuthorizer)
-    authorizer.verify.return_value = AuthResult(authorized=True, app_id=42, version_id=1)
+    ident = ClientIdentity(tee_wallet="0x" + "ee" * 20)
+    authorizer.verify.return_value = AuthResult(
+        authorized=True, 
+        app_id=42, 
+        version_id=1, 
+        tee_pubkey=bytes.fromhex("ee" * 64)
+    )
 
     kms_reg = MagicMock()
     kms_reg.operator_count.return_value = 3
@@ -407,6 +463,7 @@ class TestSync:
             json={
                 "type": "delta",
                 "sender_wallet": sender_wallet,
+                "sender_tee_pubkey": "0xSenderPubkey", # Required by strict envelope check
                 "data": {
                     "10": [{
                         "key": "synced",
@@ -429,7 +486,7 @@ class TestSync:
         )
         resp = client.post(
             "/sync",
-            json={"type": "snapshot_request", "sender_wallet": sender_wallet},
+            json={"type": "snapshot_request", "sender_wallet": sender_wallet, "sender_tee_pubkey": "0xSenderPubkey"},
             headers=headers,
         )
         assert resp.status_code == 200

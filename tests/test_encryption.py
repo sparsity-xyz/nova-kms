@@ -14,8 +14,8 @@ import config
 
 @pytest.fixture(autouse=True)
 def _strict_encryption(monkeypatch):
-    """Force encryption — no plaintext fallback."""
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
+    """Force encryption."""
+
 
 
 class TestEncryptionTransparency:
@@ -63,7 +63,7 @@ class TestEncryptionTransparency:
         assert ns1.records["k"].value != ns2.records["k"].value
 
     def test_without_callback_raises(self):
-        """Without key_callback and ALLOW_PLAINTEXT_FALLBACK=False, put should raise."""
+        """Without key_callback, put should raise."""
         from data_store import DataKeyUnavailableError, DataStore
 
         ds = DataStore(node_id="no_key")

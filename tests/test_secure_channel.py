@@ -793,8 +793,6 @@ class TestSenderTeePubkeyMismatchProtection:
         import routes
         import config
         
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
-        
         # Create matching teePubkey
         pubkey_hex = p384_der.hex()
         
@@ -817,10 +815,9 @@ class TestSenderTeePubkeyMismatchProtection:
     def test_mismatched_pubkey_rejected(self, p384_der, monkeypatch):
         """Request decryption fails when sender_tee_pubkey differs from on-chain."""
         import routes
+        import routes
         import config
         from fastapi import HTTPException
-        
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
         
         # Create two different teePubkeys
         envelope_pubkey_hex = p384_der.hex()
@@ -843,25 +840,12 @@ class TestSenderTeePubkeyMismatchProtection:
         assert exc_info.value.status_code == 403
         assert "does not match on-chain" in exc_info.value.detail
 
-    def test_plaintext_fallback_bypasses_check(self, monkeypatch):
-        """Plaintext requests bypass the pubkey check (for testing)."""
-        import routes
-        import config
-        
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
-        
-        plaintext_body = {"path": "test"}
-        
-        result, was_encrypted = routes._decrypt_request_body(plaintext_body, "0x1234")
-        assert was_encrypted is False
-        assert result == {"path": "test"}
+
 
     def test_no_onchain_pubkey_allows_decryption(self, p384_der, monkeypatch):
         """If on-chain pubkey is empty/None, decryption proceeds without check."""
         import routes
         import config
-        
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
         
         pubkey_hex = p384_der.hex()
         
@@ -887,8 +871,6 @@ class TestSenderTeePubkeyMismatchProtection:
         """Pubkey comparison normalizes hex (lowercase, no 0x prefix)."""
         import routes
         import config
-        
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
         
         pubkey_hex = p384_der.hex()
         
