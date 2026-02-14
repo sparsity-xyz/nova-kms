@@ -228,15 +228,9 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     function _isEligibleHashSetter(
         address sender
     ) internal view returns (bool) {
-        if (_novaAppRegistryAddr == address(0)) return false;
-        if (kmsAppId == 0) return false;
+        if (_novaAppRegistryAddr == address(0) || kmsAppId == 0) return false;
 
-        // getInstanceByWallet(address) returns a struct-wrapped tuple (word[0]=0x20 offset).
-        // We only need:
-        //   word[2] appId
-        //   word[3] versionId
-        //   word[7] teeWalletAddress
-        //   word[9] instanceStatus
+        // getInstanceByWallet(address) returns a struct-wrapped tuple.
         (bool ok1, bytes memory instRet) = _novaAppRegistryAddr.staticcall(
             abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender)
         );
@@ -247,9 +241,11 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
         address teeWallet = address(uint160(_loadWord(instRet, 7)));
         uint8 instanceStatus = uint8(_loadWord(instRet, 9));
 
-        if (teeWallet != sender) return false;
-        if (appId != kmsAppId) return false;
-        if (instanceStatus != _INSTANCE_STATUS_ACTIVE) return false;
+        if (
+            teeWallet != sender ||
+            appId != kmsAppId ||
+            instanceStatus != _INSTANCE_STATUS_ACTIVE
+        ) return false;
 
         // getVersion(appId, versionId) struct-wrapped; version status at word[8].
         (bool ok2, bytes memory verRet) = _novaAppRegistryAddr.staticcall(
@@ -257,8 +253,7 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
         );
         if (!ok2 || verRet.length < 32 * 11) return false;
 
-        uint8 versionStatus = uint8(_loadWord(verRet, 8));
-        return versionStatus == _VERSION_STATUS_ENROLLED;
+        return uint8(_loadWord(verRet, 8)) == _VERSION_STATUS_ENROLLED;
     }
 
     // ========== Internal Functions ==========

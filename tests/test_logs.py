@@ -33,7 +33,6 @@ def _render_table(headers: List[str], rows: List[List[str]]) -> str:
     caps = {
         "Wallet": 42,
         "URL": 48,
-        "DeriveHex": 24,
         "Readback": 22,
         "Error": 32,
     }
@@ -106,7 +105,7 @@ def _format_scan_summary(entry: dict) -> str:
         ])
     nodes_table = _render_table(["#", "Wallet", "URL", "Status", "ZK", "Conn", "VersionId"], node_rows)
 
-    # 2) Write section
+    # 3) Write section
     write = details.get("write") or {}
     if not write.get("performed"):
         write_block = "3. KV Write:\n  (not performed)"
@@ -120,7 +119,7 @@ def _format_scan_summary(entry: dict) -> str:
             + (f"  error: {write.get('error')}\n" if write.get("error") else "")
         ).rstrip("\n")
 
-    # 2) Combined derive + data readback
+    # 4) Combined derive + data readback
     combined_rows: List[List[str]] = []
     for idx, r in enumerate(results, start=1):
         inst = r.get("instance") or {}

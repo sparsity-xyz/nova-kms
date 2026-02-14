@@ -267,7 +267,7 @@ class _Namespace:
                 if not r.tombstone and not r.is_expired
             ]
 
-    def merge_record(self, incoming: DataRecord) -> bool:
+    def merge_record(self, incoming: DataRecord, evict: bool = True) -> bool:
         """
         Merge an incoming record (from sync).  Returns True if the local
         store was updated.
@@ -329,7 +329,8 @@ class _Namespace:
                 self.records[incoming.key] = incoming
                 self._total_bytes += incoming.value_size()
                 self.records.move_to_end(incoming.key) # Mark as recently used
-                self._evict_lru()
+                if evict and self._total_bytes > config.MAX_APP_STORAGE:
+                    self._evict_lru()
                 return True
 
             # If incoming happened-after existing, accept
@@ -337,7 +338,8 @@ class _Namespace:
                 self._total_bytes += incoming.value_size() - existing.value_size()
                 self.records[incoming.key] = incoming
                 self.records.move_to_end(incoming.key) # Mark as recently used
-                self._evict_lru()
+                if evict and self._total_bytes > config.MAX_APP_STORAGE:
+                    self._evict_lru()
                 return True
 
             # Concurrent → LWW
@@ -346,7 +348,8 @@ class _Namespace:
                     self._total_bytes += incoming.value_size() - existing.value_size()
                     self.records[incoming.key] = incoming
                     self.records.move_to_end(incoming.key) # Mark as recently used
-                    self._evict_lru()
+                    if evict and self._total_bytes > config.MAX_APP_STORAGE:
+                        self._evict_lru()
                     return True
 
             return False
@@ -424,12 +427,12 @@ class DataStore:
     # Sync
     # ------------------------------------------------------------------
 
-    def merge_record(self, app_id: int, record: DataRecord) -> bool:
+    def merge_record(self, app_id: int, record: DataRecord, evict: bool = True) -> bool:
         """
         Merge a record from a peer. Note that record.value is already 
         encrypted if coming from a peer with the same master secret.
         """
-        return self._ns(app_id).merge_record(record)
+        return self._ns(app_id).merge_record(record, evict=evict)
 
     def get_deltas_since(self, since_ms: int) -> Dict[int, List[DataRecord]]:
         """
@@ -459,10 +462,13 @@ class DataStore:
         merged = 0
         for app_id_str, records in snapshot.items():
             app_id = int(app_id_str)
+            ns = self._ns(app_id)
             for rec_dict in records:
                 rec = DataRecord.from_dict(rec_dict)
-                if self.merge_record(app_id, rec):
+                if ns.merge_record(rec, evict=False):
                     merged += 1
+            # Evict once after merging all records for this namespace
+            ns._evict_lru()
         return merged
 
     # ------------------------------------------------------------------
