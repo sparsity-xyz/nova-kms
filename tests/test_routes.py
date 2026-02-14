@@ -44,7 +44,6 @@ def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_h
 @pytest.fixture(autouse=True)
 def _setup_routes(monkeypatch):
     """Initialize routes with mocked dependencies."""
-    import sys
     import importlib
     import asyncio
     

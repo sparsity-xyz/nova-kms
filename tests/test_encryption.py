@@ -12,9 +12,7 @@ import pytest
 import config
 
 
-@pytest.fixture(autouse=True)
-def _strict_encryption(monkeypatch):
-    """Force encryption."""
+
 
 
 

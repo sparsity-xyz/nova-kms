@@ -507,7 +507,7 @@ def list_operators():
 def derive_key(request: Request, response: Response, body: dict = None):
     """Derive a deterministic key for the requesting app (E2E encrypted)."""
     import json
-    # Parse body manually to support both encrypted and plaintext
+    # Parse body manually to work with the encrypted request envelope (no plaintext fallback)
     if body is None:
         body = asyncio.get_event_loop().run_until_complete(request.json())
 
@@ -520,7 +520,7 @@ def derive_key(request: Request, response: Response, body: dict = None):
         raise HTTPException(status_code=503, detail="Master secret not initialized")
 
     # Decrypt request
-    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+    req_data, _ = _decrypt_request_body(body, app_tee_pubkey)
 
     # Validate request fields
     path = req_data.get("path", "")
@@ -612,7 +612,7 @@ def put_data(request: Request, response: Response, body: dict = None):
     _add_mutual_signature(response, auth_info.get("client_sig"))
 
     # Decrypt request
-    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+    req_data, _ = _decrypt_request_body(body, app_tee_pubkey)
 
     key = req_data.get("key", "")
     value_b64 = req_data.get("value", "")
@@ -659,7 +659,7 @@ def delete_data(request: Request, response: Response, body: dict = None):
     _add_mutual_signature(response, auth_info.get("client_sig"))
 
     # Decrypt request
-    req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
+    req_data, _ = _decrypt_request_body(body, app_tee_pubkey)
 
     key = req_data.get("key", "")
     if not key:

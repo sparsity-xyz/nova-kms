@@ -815,7 +815,6 @@ class TestSenderTeePubkeyMismatchProtection:
     def test_mismatched_pubkey_rejected(self, p384_der, monkeypatch):
         """Request decryption fails when sender_tee_pubkey differs from on-chain."""
         import routes
-        import routes
         import config
         from fastapi import HTTPException
         

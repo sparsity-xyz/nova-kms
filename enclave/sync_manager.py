@@ -28,6 +28,8 @@ import json
 import logging
 import threading
 import time
+
+from config import PEER_CACHE_TTL_SECONDS
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -87,7 +89,7 @@ def _verify_hmac(sync_key: bytes, payload: bytes, signature: str) -> bool:
 # Peer Cache
 # =============================================================================
 
-from config import PEER_CACHE_TTL_SECONDS
+
 
 
 class PeerCache:

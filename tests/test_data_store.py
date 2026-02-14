@@ -147,7 +147,7 @@ class TestDataRecord:
 
 
 class TestDataStore:
-    """Basic CRUD tests with ALLOW_PLAINTEXT_FALLBACK=True."""
+    """Basic CRUD tests with encryption bypassed via monkeypatching."""
 
     @pytest.fixture(autouse=True)
     def _mock_encryption(self, monkeypatch):

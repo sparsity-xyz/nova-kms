@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -130,6 +131,7 @@ class Chain:
 # =============================================================================
 
 _chain: Optional[Chain] = None
+_chain_lock = threading.Lock()
 
 
 def wait_for_helios(timeout: int = 300) -> bool:
@@ -139,7 +141,9 @@ def wait_for_helios(timeout: int = 300) -> bool:
 def get_chain() -> Chain:
     global _chain
     if _chain is None:
-        _chain = Chain()
+        with _chain_lock:
+            if _chain is None:
+                _chain = Chain()
     return _chain
 
 
