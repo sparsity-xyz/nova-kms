@@ -190,6 +190,7 @@ def _setup_routes(monkeypatch):
     nova_reg.get_app.return_value = _FakeApp()
     nova_reg.get_version.return_value = _FakeVersion()
     nova_reg.get_instances_for_version.return_value = list(_instances.keys())
+    nova_reg.get_active_instances.return_value = [inst.tee_wallet_address for inst in _instances.values()]
     nova_reg.get_instance.side_effect = lambda iid: _instances[iid]
     nova_reg.get_instance_by_wallet.side_effect = _get_instance_by_wallet
 
