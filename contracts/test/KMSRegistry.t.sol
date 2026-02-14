@@ -112,13 +112,20 @@ contract KMSRegistryTest is Test {
 
     // ========== Admin/Ownership Tests ==========
 
-    function test_transferOwnership() public {
+    function test_transferOwnership_revert_notSupported() public {
         vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSignature("OwnershipTransferNotSupported()")
+        );
         registry.transferOwnership(randomUser);
-        // Ownable2Step requires acceptance
-        vm.prank(randomUser);
-        registry.acceptOwnership();
-        assertEq(registry.owner(), randomUser);
+    }
+
+    function test_renounceOwnership_revert_notSupported() public {
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSignature("OwnershipTransferNotSupported()")
+        );
+        registry.renounceOwnership();
     }
 
     // ========== View Tests ==========

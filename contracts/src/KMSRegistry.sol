@@ -2,7 +2,6 @@
 pragma solidity ^0.8.33;
 
 import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
-import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Minimal interface to query required NovaAppRegistry views.
@@ -50,7 +49,7 @@ interface INovaAppRegistryView {
  * @notice On-chain operator list for KMS nodes, implementing INovaAppInterface.
  * @dev Non-upgradeable version. Managed by NovaAppRegistry callbacks.
  */
-contract KMSRegistry is INovaAppInterface, Ownable2Step {
+contract KMSRegistry is INovaAppInterface, Ownable {
     // ========== State Variables ==========
 
     address private _novaAppRegistryAddr;
@@ -60,10 +59,14 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     ///         0x0 means unset (not yet initialized or reset by owner).
     bytes32 public masterSecretHash;
 
+    struct OperatorInfo {
+        bool exists;
+        uint96 index;
+    }
+
     /// @notice Operator set – managed by addOperator / removeOperator callbacks
-    mapping(address => bool) private _operators;
+    mapping(address => OperatorInfo) private _operatorData;
     address[] private _operatorList;
-    mapping(address => uint256) private _operatorIndex;
 
     // ========== Errors ==========
 
@@ -73,6 +76,7 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     error MasterSecretHashAlreadySet();
     error NotAuthorizedToSetHash();
     error AppIdAlreadySet();
+    error OwnershipTransferNotSupported();
 
     // ========== Events ==========
 
@@ -148,6 +152,20 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     }
 
     /**
+     * @notice Ownership transfer is NOT supported.
+     */
+    function transferOwnership(address) public virtual override onlyOwner {
+        revert OwnershipTransferNotSupported();
+    }
+
+    /**
+     * @notice Ownership renouncement is NOT supported.
+     */
+    function renounceOwnership() public virtual override onlyOwner {
+        revert OwnershipTransferNotSupported();
+    }
+
+    /**
      * @notice Set the master secret hash once, when it is currently unset (0x0).
      * @dev Caller must be an ACTIVE KMS node for this appId and an ENROLLED version
      *      according to NovaAppRegistry.
@@ -189,7 +207,7 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     // ========== Operator View Functions ==========
 
     function isOperator(address account) public view returns (bool) {
-        return _operators[account];
+        return _operatorData[account].exists;
     }
 
     function operatorCount() public view returns (uint256) {
@@ -259,31 +277,30 @@ contract KMSRegistry is INovaAppInterface, Ownable2Step {
     // ========== Internal Functions ==========
 
     function _addOperatorInternal(address operator) internal {
-        if (_operators[operator]) return;
-        _operators[operator] = true;
-        _operatorIndex[operator] = _operatorList.length;
+        if (_operatorData[operator].exists) return;
+        // casting to 'uint96' is safe because operator count will not exceed 2^96
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint96 index = uint96(_operatorList.length);
+        _operatorData[operator] = OperatorInfo({exists: true, index: index});
         _operatorList.push(operator);
     }
 
     function _removeOperatorInternal(address operator) internal {
-        if (!_operators[operator]) return;
+        OperatorInfo storage info = _operatorData[operator];
+        if (!info.exists) return;
 
-        uint256 index = _operatorIndex[operator];
+        uint256 index = info.index;
         uint256 lastIndex = _operatorList.length - 1;
 
         if (index != lastIndex) {
             address lastOperator = _operatorList[lastIndex];
             _operatorList[index] = lastOperator;
-            _operatorIndex[lastOperator] = index;
+            // casting to 'uint96' is safe because index is derived from array length
+            // forge-lint: disable-next-line(unsafe-typecast)
+            _operatorData[lastOperator].index = uint96(index);
         }
 
         _operatorList.pop();
-        delete _operatorIndex[operator];
-        delete _operators[operator];
+        delete _operatorData[operator];
     }
-
-    /**
-     * @dev Reserved storage space to allow for layout changes in the future.
-     */
-    uint256[44] private _gap;
 }

@@ -4,8 +4,7 @@
 
 # Install dependencies
 install:
-	@echo "Installing dependencies..."
-	@mkdir -p lib
+	@echo "Installing dependencies (forge-std, openzeppelin)..."
 	@[ -d lib/forge-std ] || forge install foundry-rs/forge-std --no-git
 	@[ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts --no-git
 
