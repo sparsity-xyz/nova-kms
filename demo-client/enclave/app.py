@@ -4,6 +4,7 @@ Nova KMS Client - Example Application
 import asyncio
 import base64
 import logging
+import random
 import re
 import time
 from collections import deque
@@ -40,7 +41,7 @@ def _canonical_eth_wallet(wallet: str) -> str:
     return w
 
 # In-memory log storage (keep last N runs)
-MAX_LOGS = 10
+MAX_LOGS = 20
 request_logs = deque(maxlen=MAX_LOGS)
 
 
@@ -649,7 +650,7 @@ class KMSClient:
                 # 5) Write new timestamp KV to one reachable node
                 write_result: dict = {"performed": False}
                 if reachable:
-                    target = min(reachable, key=lambda n: int(n.get("instance_id") or 0))
+                    target = random.choice(reachable)
                     write_result = {
                         "performed": True,
                         "node_url": target["url"],
