@@ -112,14 +112,8 @@ class Odyn:
         return self._call("POST", "/v1/encryption/encrypt", payload)
 
     def decrypt(self, nonce: str, client_public_key: str, encrypted_data: str) -> str:
-        nonce_hex = nonce[2:] if nonce.startswith("0x") else nonce
-        try:
-            nonce_bytes = bytes.fromhex(nonce_hex)
-            if len(nonce_bytes) > 12:
-                nonce_hex = nonce_bytes[:12].hex()
-        except Exception:
-            nonce_hex = nonce_hex[:24]
-        nonce = f"0x{nonce_hex}"
+        if not nonce.startswith("0x"):
+            nonce = f"0x{nonce}"
         if not client_public_key.startswith("0x"):
             client_public_key = f"0x{client_public_key}"
         if not encrypted_data.startswith("0x"):

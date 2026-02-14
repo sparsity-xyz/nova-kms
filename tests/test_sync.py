@@ -38,9 +38,22 @@ from sync_manager import (
 # =============================================================================
 
 @pytest.fixture(autouse=True)
-def _plaintext_fallback(monkeypatch):
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+def _setup_encryption(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    
+    # Mock encryption helpers to bypass real ECIES logic
+    import secure_channel
+    monkeypatch.setattr(secure_channel, "encrypt_json_envelope", lambda odyn, data, pk: data)
+    monkeypatch.setattr(secure_channel, "decrypt_json_envelope", lambda odyn, body: body)
+    
+    # Mock identity verification for peers
+    monkeypatch.setattr(secure_channel, "verify_peer_identity", lambda *a, **kw: True)
+    monkeypatch.setattr(secure_channel, "get_tee_pubkey_hex_for_wallet", lambda *a: "01"*32)
+
+    # Mock DataStore encryption to avoid AES errors with fake data
+    from data_store import DataStore, _Namespace
+    monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+    monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
 
 
 from nova_registry import AppStatus, InstanceStatus, VersionStatus
@@ -69,6 +82,7 @@ class _FakeInstance:
     operator: str = ""
     status: object = InstanceStatus.ACTIVE
     zk_verified: bool = True
+    tee_pubkey: bytes = b"\x01" * 32
 
 
 # Peer definitions reused across fixtures
@@ -114,7 +128,7 @@ def nova_reg():
             status=InstanceStatus.ACTIVE,
         )
 
-    reg.get_instances_for_version.return_value = list(instances.keys())
+    reg.get_active_instances.return_value = list(_PEER_WALLETS)
     reg.get_instance.side_effect = lambda iid: instances[iid]
 
     # Counter for dynamic instance IDs
@@ -275,7 +289,7 @@ class TestPeerCache:
     def test_refresh_handles_instance_lookup_error(self, peer_cache, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         monkeypatch.setattr(config, "KMS_APP_ID", 43)
-        nova_reg.get_instance.side_effect = RuntimeError("chain error")
+        nova_reg.get_instance_by_wallet.side_effect = RuntimeError("chain error")
         peer_cache.refresh()
         assert len(peer_cache._peers) == 0
 

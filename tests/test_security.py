@@ -188,7 +188,6 @@ class TestChainFinality:
 
 class TestClockSkewProtection:
     def test_future_record_rejected(self, monkeypatch):
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
         monkeypatch.setattr(config, "IN_ENCLAVE", False)
         monkeypatch.setattr(config, "MAX_CLOCK_SKEW_MS", 5000)
         from data_store import DataRecord, DataStore, VectorClock
@@ -201,7 +200,6 @@ class TestClockSkewProtection:
         assert not merged
 
     def test_normal_skew_accepted(self, monkeypatch):
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
         monkeypatch.setattr(config, "IN_ENCLAVE", False)
         monkeypatch.setattr(config, "MAX_CLOCK_SKEW_MS", 30000)
         from data_store import DataRecord, DataStore, VectorClock

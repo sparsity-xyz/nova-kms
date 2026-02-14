@@ -30,9 +30,8 @@ The only secure way to discover KMS nodes is by querying the on-chain `NovaAppRe
 
 1.  **Input:** `KMS_APP_ID` (The App ID of the KMS service).
 2.  **Steps:**
-    *   Get the `App` record for `KMS_APP_ID`.
-    *   Iterate through `ENROLLED` versions.
-    *   Find all `ACTIVE` instances for those versions.
+    *   Call `getActiveInstances(KMS_APP_ID)` on the registry.
+    *   (Optional) Verify returned instances are valid/active if not implicitly trusted from the contract call.
 3.  **Output:** A list of active KMS instances, including their:
     *   `instanceUrl` (e.g. `https://kms-node-1.example.com`)
     *   `teeWalletAddress` (The verified EVM identity of the enclave)

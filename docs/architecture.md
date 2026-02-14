@@ -6,7 +6,7 @@ Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, 
 
 Peer discovery in the current implementation is sourced directly from **NovaAppRegistry** (via an in-enclave `PeerCache`):
 
-- `KMS_APP_ID` → ENROLLED versions → ACTIVE instances
+- `KMS_APP_ID` → `getActiveInstances()` → Active KMS instances
 
 The repository also includes a dedicated **KMSRegistry** contract. In addition to receiving operator callbacks from `NovaAppRegistry`, it stores a cluster-wide `masterSecretHash`. During cluster bootstrap, a KMS node may submit a one-time on-chain transaction to set `masterSecretHash` when it is unset.
 
@@ -15,9 +15,9 @@ Request authentication uses **lightweight Proof-of-Possession (PoP) signatures**
 ```mermaid
 graph TB
     subgraph "Nova Platform"
-        App1[Nova App 1<br/>AppId: 101]
-        App2[Nova App 2<br/>AppId: 202]
-        App3[Nova App 3<br/>AppId: 101]
+        App1[Nova App Instance 1<br/>AppId: 101]
+        App2[Nova App Instance 2<br/>AppId: 202]
+        App3[Nova App Instance 3<br/>AppId: 202]
     end
     
     subgraph "KMS Cluster"
@@ -35,12 +35,16 @@ graph TB
     App2 -- "PoP Signature / Instance Wallet" --> KMS2
     App3 -- "PoP Signature / Instance Wallet" --> KMS1
     
+    App1 -. "Peer discovery (getActiveInstances(KMS_APP_ID))" .-> Registry
+    App2 -. "Peer discovery" .-> Registry
+    App3 -. "Peer discovery" .-> Registry
+    
     KMS1 -- "PoP Sync" --- KMS2
     KMS2 -- "PoP Sync" --- KMS3
     KMS1 -- "PoP Sync" --- KMS3
     
     Registry -- "addOperator / removeOperator" --> KMSContract
-    KMS1 -- "Peer discovery (KMS_APP_ID → versions → instances)" --> Registry
+    KMS1 -- "Peer discovery (getActiveInstances(KMS_APP_ID))" --> Registry
     KMS1 -- "Read masterSecretHash / optional bootstrap write" --> KMSContract
     KMS1 -- "Verify instance + app + version" --> Registry
 ```

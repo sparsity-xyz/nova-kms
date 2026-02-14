@@ -147,12 +147,14 @@ class TestDataRecord:
 
 
 class TestDataStore:
-    """Basic CRUD tests with ALLOW_PLAINTEXT_FALLBACK=True."""
+    """Basic CRUD tests with encryption bypassed via monkeypatching."""
 
     @pytest.fixture(autouse=True)
-    def _allow_plaintext(self, monkeypatch):
-        import config
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+    def _mock_encryption(self, monkeypatch):
+        # Mock DataStore encryption to bypass key management
+        from data_store import _Namespace
+        monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+        monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
 
     def test_put_and_get(self):
         ds = DataStore(node_id="node1")
@@ -220,9 +222,12 @@ class TestDataStore:
 
 class TestSyncOperations:
     @pytest.fixture(autouse=True)
-    def _allow_plaintext(self, monkeypatch):
+    def _mock_encryption(self, monkeypatch):
+        from data_store import _Namespace
+        monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+        monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
+        
         import config
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
         monkeypatch.setattr(config, "IN_ENCLAVE", False)
 
     def test_merge_record_lww(self):
@@ -319,7 +324,6 @@ class TestEncryption:
     def test_fail_closed_without_key_in_production(self, monkeypatch):
         import config
         monkeypatch.setattr(config, "IN_ENCLAVE", True)
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", False)
 
         ds = DataStore(node_id="node1")
         with pytest.raises(DataKeyUnavailableError):
@@ -347,9 +351,10 @@ class TestEncryption:
 
 class TestEviction:
     @pytest.fixture(autouse=True)
-    def _allow_plaintext(self, monkeypatch):
-        import config
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
+    def _mock_encryption(self, monkeypatch):
+        from data_store import _Namespace
+        monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+        monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
 
     def test_eviction_decrements_total_bytes(self):
         """Regression: _evict_lru must properly decrement _total_bytes."""
@@ -377,10 +382,14 @@ class TestEviction:
 
 class TestClockSkewProtection:
     @pytest.fixture(autouse=True)
-    def _allow_plaintext(self, monkeypatch):
+    def _mock_encryption(self, monkeypatch):
+        from data_store import _Namespace
+        monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+        monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
+        
         import config
-        monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
         monkeypatch.setattr(config, "IN_ENCLAVE", False)
+        monkeypatch.setattr(config, "MAX_CLOCK_SKEW_MS", 60_000)
 
     def test_rejects_far_future_timestamp(self):
         ds = DataStore(node_id="node1")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -129,14 +130,20 @@ class Chain:
 # Module-level singleton
 # =============================================================================
 
-_chain = Chain()
+_chain: Optional[Chain] = None
+_chain_lock = threading.Lock()
 
 
 def wait_for_helios(timeout: int = 300) -> bool:
-    return _chain.wait_for_helios(timeout)
+    return get_chain().wait_for_helios(timeout)
 
 
 def get_chain() -> Chain:
+    global _chain
+    if _chain is None:
+        with _chain_lock:
+            if _chain is None:
+                _chain = Chain()
     return _chain
 
 
@@ -154,7 +161,7 @@ def encode_uint256(val: int) -> str:
 
 
 def encode_address(addr: str) -> str:
-    return addr.lower().replace("0x", "").zfill(64)
+    return addr.lower().removeprefix("0x").zfill(64)
 
 
 """

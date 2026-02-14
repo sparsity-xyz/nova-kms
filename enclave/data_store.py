@@ -152,8 +152,6 @@ class _Namespace:
         import os
         key = self._get_key()
         if not key:
-            if config.ALLOW_PLAINTEXT_FALLBACK:
-                return value  # Dev-only fallback
             raise DataKeyUnavailableError(f"Encryption key unavailable for app {self.app_id}")
         aesgcm = AESGCM(key)
         nonce = os.urandom(12)
@@ -165,8 +163,6 @@ class _Namespace:
             return None
         key = self._get_key()
         if not key:
-            if config.ALLOW_PLAINTEXT_FALLBACK:
-                return ciphertext  # Dev-only fallback
             raise DataKeyUnavailableError(f"Decryption key unavailable for app {self.app_id}")
         try:
             aesgcm = AESGCM(key)

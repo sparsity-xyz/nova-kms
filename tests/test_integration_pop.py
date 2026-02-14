@@ -73,9 +73,21 @@ def _setup(monkeypatch):
     from nova_registry import InstanceStatus, VersionStatus
     from sync_manager import PeerCache, SyncManager
 
-    monkeypatch.setattr(config, "ALLOW_PLAINTEXT_FALLBACK", True)
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
     monkeypatch.setattr(config, "KMS_APP_ID", 43)
+
+    # Mock encryption to pass mandatory checks
+    monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
+    monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
+    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk: data)
+    
+    # Force service availability
+    monkeypatch.setattr(routes, "_service_available", True)
+
+    # Mock DataStore encryption
+    from data_store import _Namespace
+    monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+    monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
 
     odyn = MagicMock()
     odyn.eth_address.return_value = _NODE_WALLET
@@ -86,10 +98,16 @@ def _setup(monkeypatch):
     ds = DataStore(node_id="test_node")
     mgr = MasterSecretManager()
     mgr.initialize_from_peer(b"\x01" * 32)
+    
+    # Needs to be patched into kdf since app uses global instance
+    monkeypatch.setattr("app.master_secret_mgr", mgr)
 
     authorizer = MagicMock(spec=AppAuthorizer)
     authorizer.verify.return_value = AuthResult(
-        authorized=True, app_id=42, version_id=1
+        authorized=True, 
+        app_id=42, 
+        version_id=1,
+        tee_pubkey=bytes.fromhex("ee" * 64)
     )
 
     kms_reg = MagicMock()
@@ -144,6 +162,25 @@ def _setup(monkeypatch):
     peer_cache.refresh()
 
     sync_mgr = SyncManager(ds, _NODE_WALLET, peer_cache)
+
+    import asyncio
+    # Mock asyncio in routes to use a transient loop
+    mock_asyncio = MagicMock()
+    
+    def _run_shim(coro):
+        """Run coroutine in a fresh loop."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    mock_loop = MagicMock()
+    mock_loop.run_until_complete.side_effect = _run_shim
+    # Return our mock loop when routes calls get_event_loop()
+    mock_asyncio.get_event_loop.return_value = mock_loop
+    
+    monkeypatch.setattr(routes, "asyncio", mock_asyncio)
 
     routes.init(
         odyn=odyn,

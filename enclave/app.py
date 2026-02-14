@@ -186,7 +186,11 @@ def _startup_production() -> dict:
 
     # 7. CA & auth
 
-    authorizer = AppAuthorizer(registry=nova_registry)
+    # Use CachedNovaRegistry for high-frequency API authorization checks
+    from nova_registry import CachedNovaRegistry
+    cached_registry = CachedNovaRegistry(nova_registry) if nova_registry else None
+    
+    authorizer = AppAuthorizer(registry=cached_registry)
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
     return {
