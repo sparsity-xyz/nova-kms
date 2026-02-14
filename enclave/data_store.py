@@ -181,6 +181,12 @@ class _Namespace:
             try:
                 # 3. Decrypt on-the-fly
                 # Return a copy with decrypted value so we don't store plaintext in memory
+                
+                # H2 fix: Guard against malformed records (non-tombstone with null value)
+                if req.value is None:
+                    logger.warning(f"Malformed record for {self.app_id}:{key}: non-tombstone has no value")
+                    raise DecryptionError(f"Malformed record: null value for live key")
+
                 decrypted_val = self._decrypt(req.value)
                 return DataRecord(
                     key=req.key,
@@ -378,11 +384,20 @@ class _Namespace:
         # OrderedDict stores items in insertion order. 
         # move_to_end() ensures recently accessed/updated items are at the end.
         # Thus the first items in the dict are the oldest.
-        while self._total_bytes > limit and self.records:
-            # Pop the first item (oldest)
-            key, record = self.records.popitem(last=False)
-            self._total_bytes -= record.value_size()
-            logger.info(f"LRU Evicted {self.app_id}:{key} ({record.value_size()} bytes)")
+        # Thus the first items in the dict are the oldest.
+        # H2 fix: Skip tombstones during eviction to prevent "resurrection" during sync.
+        # We only evict live records that contribute to _total_bytes.
+        keys_to_evict = []
+        for key, record in self.records.items():
+            if self._total_bytes <= limit:
+                break
+            if not record.tombstone:
+                keys_to_evict.append(key)
+                self._total_bytes -= record.value_size()
+        
+        for key in keys_to_evict:
+            del self.records[key]
+            logger.debug(f"LRU Evicted {self.app_id}:{key}")
 
 
 # =============================================================================
@@ -468,7 +483,9 @@ class DataStore:
                 if ns.merge_record(rec, evict=False):
                     merged += 1
             # Evict once after merging all records for this namespace
-            ns._evict_lru()
+            # H2 fix: Ensure eviction is thread-safe (acquire ns._lock)
+            with ns._lock:
+                ns._evict_lru()
         return merged
 
     # ------------------------------------------------------------------
