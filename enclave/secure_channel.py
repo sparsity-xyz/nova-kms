@@ -89,10 +89,18 @@ def encrypt_envelope(
     # Odyn returns 'encrypted_data'
     encrypted_data = result.get("encrypted_data") or ""
 
+    nonce_hex = result.get("nonce", "")
+    if nonce_hex.startswith("0x"):
+        nonce_hex = nonce_hex[2:]
+
+    enc_data_hex = encrypted_data
+    if enc_data_hex.startswith("0x"):
+        enc_data_hex = enc_data_hex[2:]
+
     return {
         "sender_tee_pubkey": sender_pubkey_hex,
-        "nonce": result.get("nonce", "").lstrip("0x"),
-        "encrypted_data": encrypted_data.lstrip("0x"),
+        "nonce": nonce_hex,
+        "encrypted_data": enc_data_hex,
     }
 
 

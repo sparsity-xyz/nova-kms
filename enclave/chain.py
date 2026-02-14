@@ -157,7 +157,7 @@ def encode_uint256(val: int) -> str:
 
 
 def encode_address(addr: str) -> str:
-    return addr.lower().replace("0x", "").zfill(64)
+    return addr.lower().removeprefix("0x").zfill(64)
 
 
 """

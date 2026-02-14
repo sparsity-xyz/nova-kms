@@ -126,35 +126,18 @@ class Odyn:
         return self._call("POST", "/v1/encryption/encrypt", payload)
 
     def decrypt(self, nonce: str, client_public_key: str, encrypted_data: str) -> str:
-        nonce_hex = nonce[2:] if nonce.startswith("0x") else nonce
-        try:
-            nonce_bytes = bytes.fromhex(nonce_hex)
-            if len(nonce_bytes) > 12:
-                # Some AES modes use 16-byte nonces; enclaver currently expects 12.
-                # If we received 16 bytes, we take the prefix.
-                nonce_hex = nonce_bytes[:12].hex()
-        except Exception:
-            nonce_hex = nonce_hex[:24]
-        
-        final_nonce = f"0x{nonce_hex}"
+        if not nonce.startswith("0x"):
+            nonce = f"0x{nonce}"
         if not client_public_key.startswith("0x"):
             client_public_key = f"0x{client_public_key}"
         if not encrypted_data.startswith("0x"):
             encrypted_data = f"0x{encrypted_data}"
         
         payload = {
-            "nonce": final_nonce,
+            "nonce": nonce,
             "client_public_key": client_public_key,
             "encrypted_data": encrypted_data,
         }
-        
-        # Log basic info about the call (vague for security, but enough for debugging)
-        import logging
-        odyn_logger = logging.getLogger("nova-kms.odyn")
-        odyn_logger.debug(
-            f"Odyn.decrypt: nonce={final_nonce}, pubkey={client_public_key[:16]}..., "
-            f"data_len={len(encrypted_data)}"
-        )
         
         return self._call("POST", "/v1/encryption/decrypt", payload)["plaintext"]
 

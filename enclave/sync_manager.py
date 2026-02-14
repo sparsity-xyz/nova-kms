@@ -712,12 +712,7 @@ class SyncManager:
         # 2. E2E encrypt the body using peer's teePubkey
         from secure_channel import encrypt_json_envelope
         try:
-            logger.debug(f"Encrypting sync request for {peer_wallet} using peer_pubkey={peer_tee_pubkey_hex[:16]}...")
             encrypted_body = encrypt_json_envelope(self.odyn, body, peer_tee_pubkey_hex)
-            logger.debug(
-                f"Sync request envelope: nonce={encrypted_body.get('nonce')}, "
-                f"data_len={len(encrypted_body.get('encrypted_data', ''))}"
-            )
         except Exception as exc:
             logger.warning(f"Failed to encrypt sync request body: {exc}")
             return None
@@ -761,21 +756,13 @@ class SyncManager:
                 logger.warning(f"KMS Peer response signature verification failed for {peer_wallet}")
                 return None
 
-            logger.debug(f"Mutual PoP verified for {peer_wallet}")
-
             # 5. Decrypt the response body (E2E)
             try:
                 from secure_channel import decrypt_json_envelope
                 resp_data = resp.json()
                 # Check if response is encrypted envelope
                 if all(k in resp_data for k in ("sender_tee_pubkey", "nonce", "encrypted_data")):
-                    logger.debug(
-                        f"Decrypting sync response from {peer_wallet}: "
-                        f"nonce={resp_data.get('nonce')}, "
-                        f"sender_pubkey={resp_data.get('sender_tee_pubkey', '')[:16]}..."
-                    )
                     decrypted_data = decrypt_json_envelope(self.odyn, resp_data)
-                    logger.debug(f"Successfully decrypted sync response from {peer_wallet}")
                     # Create a new response-like object with decrypted data
                     resp._decrypted_json = decrypted_data
             except Exception as exc:
