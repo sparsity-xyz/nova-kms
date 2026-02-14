@@ -141,14 +141,25 @@ class _NonceStore:
         return True
 
     def _purge(self, now: Optional[float] = None) -> None:
-        import time
-
+        """Remove expired nonces. $O(M)$ where M is number of expired nonces."""
         if now is None:
             now = time.time()
-        # Preserve insertion order for FIFO eviction.
-        for n in list(self._nonces.keys()):
-            if self._nonces.get(n, 0) < now:
-                self._nonces.pop(n, None)
+        
+        # Since OrderedDict preserves insertion order, and we always append
+        # fresh nonces to the end, the oldest entries are at the beginning.
+        to_remove = []
+        for n, expiry in self._nonces.items():
+            if expiry < now:
+                to_remove.append(n)
+            else:
+                # First non-expired nonce found; all subsequent ones are also fresh.
+                break
+        
+        for n in to_remove:
+            self._nonces.pop(n, None)
+            
+        if to_remove:
+            logger.debug(f"Purged {len(to_remove)} expired nonces")
 
 
 _nonce_store = _NonceStore(

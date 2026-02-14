@@ -104,6 +104,7 @@ class PeerCache:
         self._nova_registry = nova_registry
         self._peers: List[dict] = []
         self._last_refresh: float = 0
+        self._blacklist: Dict[str, float] = {}  # wallet -> expiry_ts
         self._lock = threading.Lock()
         self._refresh_lock = threading.Lock()
 
@@ -149,6 +150,29 @@ class PeerCache:
             self._peers = [p for p in self._peers if p["tee_wallet_address"].lower() != lower]
             logger.info(f"Removed peer {wallet} from cache")
 
+    def blacklist_peer(self, wallet: str, duration: Optional[int] = None) -> None:
+        """Temporarily blacklist a peer by wallet address."""
+        from config import PEER_BLACKLIST_DURATION_SECONDS
+        if duration is None:
+            duration = PEER_BLACKLIST_DURATION_SECONDS
+            
+        lower = wallet.lower()
+        expiry = time.time() + duration
+        with self._lock:
+            self._blacklist[lower] = expiry
+            # Also remove from active list immediately
+            self._peers = [p for p in self._peers if p["tee_wallet_address"].lower() != lower]
+            logger.info(f"Blacklisted peer {wallet} for {duration}s")
+
+    def _purge_blacklist(self) -> None:
+        """Remove expired entries from the blacklist. REQUIRES LOCK."""
+        now = time.time()
+        expired = [w for w, exp in self._blacklist.items() if exp < now]
+        for w in expired:
+            del self._blacklist[w]
+        if expired:
+            logger.debug(f"Purged {len(expired)} expired entries from peer blacklist")
+
     def _is_stale(self) -> bool:
         """Check if the cache needs refreshing."""
         with self._lock:
@@ -174,7 +198,8 @@ class PeerCache:
                     self.refresh()
 
         with self._lock:
-            peers = list(self._peers)
+            self._purge_blacklist()
+            peers = [p for p in self._peers if p["tee_wallet_address"].lower() not in self._blacklist]
 
         if exclude_wallet:
             exclude = exclude_wallet.lower()
@@ -374,9 +399,9 @@ class SyncManager:
                 logger.warning(f"NovaAppRegistry check failed for {peer_wallet}: {exc}")
 
             if not is_valid:
-                # 4.3 Remove invalid peer from cache
-                logger.warning(f"Peer {peer_wallet} is not a valid KMS instance — removing")
-                self.peer_cache.remove_peer(peer_wallet)
+                # 4.3 Blacklist invalid peer
+                logger.warning(f"Peer {peer_wallet} is not a valid KMS instance — blacklisting")
+                self.peer_cache.blacklist_peer(peer_wallet)
                 continue
 
             # 4.3 Peer is verified
@@ -681,8 +706,9 @@ class SyncManager:
         if not verify_peer_identity(peer_wallet, self.peer_cache.nova_registry):
             logger.warning(
                 f"Refusing sync request to {url}: peer {peer_wallet} failed "
-                "teePubkey verification"
+                "teePubkey verification — blacklisting"
             )
+            self.peer_cache.blacklist_peer(peer_wallet)
             return None
 
         # Get peer's teePubkey for E2E encryption

@@ -183,7 +183,6 @@ def _format_scan_summary(entry: dict) -> str:
         combined_rows.append([
             str(idx),
             str(wallet),
-            str(derive_hex or ""),
             str(derive_http) if derive_http is not None else "",
             str(derive_ok) if derive_ok is not None else "",
             str(data_val or ""),
@@ -192,7 +191,7 @@ def _format_scan_summary(entry: dict) -> str:
             str(row_err),
         ])
     combined_table = _render_table(
-        ["#", "Wallet", "DeriveHex", "DeriveHTTP", "DeriveOK", "Readback", "ReadbackHTTP", "ReadbackOK", "Error"],
+        ["#", "Wallet", "DeriveHTTP", "DeriveOK", "Readback", "ReadbackHTTP", "ReadbackOK", "Error"],
         combined_rows,
     )
 

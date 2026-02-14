@@ -91,6 +91,26 @@ def derive_sync_key(master_secret: bytes) -> bytes:
 
 
 # =============================================================================
+# Helper Primitives
+# =============================================================================
+
+def encrypt_data(data: bytes, key: bytes) -> bytes:
+    """Encrypt data using AES-GCM with a random 12-byte nonce."""
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key)
+    return nonce + aesgcm.encrypt(nonce, data, None)
+
+
+def decrypt_data(ciphertext: bytes, key: bytes) -> bytes:
+    """Decrypt data using AES-GCM (nonce must be first 12 bytes)."""
+    if len(ciphertext) < 12:
+        raise ValueError("Ciphertext too short (missing nonce)")
+    nonce = ciphertext[:12]
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ciphertext[12:], None)
+
+
+# =============================================================================
 # Master Secret Management
 # =============================================================================
 

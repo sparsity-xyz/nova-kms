@@ -244,3 +244,11 @@ PEER_CACHE_TTL_SECONDS: int = 180
 # Used in: nova_registry.py (CachedNovaRegistry default TTL)
 REGISTRY_CACHE_TTL_SECONDS: int = 180
 
+
+# PEER_BLACKLIST_DURATION_SECONDS:
+# The duration for which a peer is temporarily ignored if it fails verification
+# (e.g. invalid teePubkey). Prevents continuous probing of known-bad hosts.
+#
+# Used in: sync_manager.py (PeerCache.blacklist_peer)
+PEER_BLACKLIST_DURATION_SECONDS: int = 600
+
