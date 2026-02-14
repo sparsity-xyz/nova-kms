@@ -272,4 +272,4 @@ def unseal_master_secret(sealed: dict, my_private_key: ec.EllipticCurvePrivateKe
 
 
 
-master_secret_mgr = MasterSecretManager()
+

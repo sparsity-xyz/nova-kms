@@ -515,6 +515,7 @@ class KMSClient:
           2) For ACTIVE instances, probe /health and request /kms/derive
           3) Read back from all reachable instances (from previous cycle)
           4) Write new timestamp KV to one reachable node (for next cycle)
+        """
         from nova_registry import InstanceStatus
 
         fixed_path = "nova-kms-client/fixed-derive"

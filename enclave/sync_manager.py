@@ -134,7 +134,8 @@ class PeerCache:
             # 2. Update cache (fast, exclusive lock)
             with self._lock:
                 self._update_cache(new_peers)
-                logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
+            
+            logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
                 
         except Exception as exc:
             logger.warning(f"Failed to refresh peer cache: {exc}")
@@ -148,7 +149,8 @@ class PeerCache:
 
     def _is_stale(self) -> bool:
         """Check if the cache needs refreshing."""
-        return (time.time() - self._last_refresh) > PEER_CACHE_TTL_SECONDS
+        with self._lock:
+            return (time.time() - self._last_refresh) > PEER_CACHE_TTL_SECONDS
 
     def get_peers(self, exclude_wallet: Optional[str] = None, refresh_if_stale: bool = True) -> List[dict]:
         """
@@ -189,7 +191,7 @@ class PeerCache:
     def _fetch_peers_from_chain(self) -> List[dict]:
         """Fetch peer list from NovaAppRegistry using getActiveInstances. Slow IO, NO LOCK."""
         from config import KMS_APP_ID
-        from nova_registry import InstanceStatus, VersionStatus
+        from nova_registry import InstanceStatus
 
         kms_app_id = int(KMS_APP_ID or 0)
         if kms_app_id <= 0:

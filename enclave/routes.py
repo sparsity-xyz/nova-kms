@@ -245,9 +245,9 @@ def _decrypt_request_body(body: dict, app_tee_pubkey: Optional[str]) -> tuple[di
         )
 
 
-def _encrypt_response(data: dict, app_tee_pubkey: Optional[str], request_was_encrypted: bool = True) -> dict:
+def _encrypt_response(data: dict, app_tee_pubkey: Optional[str]) -> dict:
     """
-    Encrypt the response if app_tee_pubkey is available AND request was encrypted.
+    Encrypt the response if app_tee_pubkey is available.
     """
     from secure_channel import encrypt_json_envelope
 
@@ -519,7 +519,7 @@ def derive_key(request: Request, response: Response, body: dict = None):
     if not _master_secret_mgr or not _master_secret_mgr.is_initialized:
         raise HTTPException(status_code=503, detail="Master secret not initialized")
 
-    # Decrypt request (or use plaintext fallback)
+    # Decrypt request
     req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
 
     # Validate request fields
@@ -536,7 +536,7 @@ def derive_key(request: Request, response: Response, body: dict = None):
         app_id, path, length=length, context=context
     )
 
-    # Encrypt response (or use plaintext fallback)
+    # Encrypt response
     resp_data = {
         "app_id": app_id,
         "path": path,
@@ -544,7 +544,7 @@ def derive_key(request: Request, response: Response, body: dict = None):
         "length": len(derived),
     }
 
-    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
+    return _encrypt_response(resp_data, app_tee_pubkey)
 
 
 
@@ -581,8 +581,8 @@ def get_data(key: str, request: Request, response: Response):
         "updated_at_ms": record.updated_at_ms,
     }
 
-    # GET request has no body, so request_was_encrypted=False (plaintext fallback)
-    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted=False)
+    # GET request has no body.
+    return _encrypt_response(resp_data, app_tee_pubkey)
 
 
 @router.get("/kms/data")
@@ -596,8 +596,8 @@ def list_keys(request: Request, response: Response):
     keys = _data_store.keys(app_id)
     resp_data = {"app_id": app_id, "keys": keys, "count": len(keys)}
 
-    # GET request has no body, so request_was_encrypted=False (plaintext fallback)
-    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted=False)
+    # GET request has no body.
+    return _encrypt_response(resp_data, app_tee_pubkey)
 
 
 @router.put("/kms/data")
@@ -611,7 +611,7 @@ def put_data(request: Request, response: Response, body: dict = None):
     app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
 
-    # Decrypt request (or use plaintext fallback)
+    # Decrypt request
     req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
 
     key = req_data.get("key", "")
@@ -644,7 +644,7 @@ def put_data(request: Request, response: Response, body: dict = None):
         "updated_at_ms": record.updated_at_ms,
     }
 
-    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
+    return _encrypt_response(resp_data, app_tee_pubkey)
 
 
 @router.delete("/kms/data")
@@ -658,7 +658,7 @@ def delete_data(request: Request, response: Response, body: dict = None):
     app_tee_pubkey = auth_info.get("app_tee_pubkey")
     _add_mutual_signature(response, auth_info.get("client_sig"))
 
-    # Decrypt request (or use plaintext fallback)
+    # Decrypt request
     req_data, request_was_encrypted = _decrypt_request_body(body, app_tee_pubkey)
 
     key = req_data.get("key", "")
@@ -671,7 +671,7 @@ def delete_data(request: Request, response: Response, body: dict = None):
 
     resp_data = {"app_id": app_id, "key": key, "deleted": True}
 
-    return _encrypt_response(resp_data, app_tee_pubkey, request_was_encrypted)
+    return _encrypt_response(resp_data, app_tee_pubkey)
 
 
 # =============================================================================
@@ -685,8 +685,8 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     Verified via lightweight Proof-of-Possession (PoP) signatures as described
     in docs/kms-core-workflows.md.
     
-    Request body is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
-    Response is E2E encrypted using the sender's teePubkey (or plaintext in dev mode).
+    Request body is E2E encrypted using the sender's teePubkey.
+    Response is E2E encrypted using the sender's teePubkey.
     """
     if body is None:
         body = asyncio.get_event_loop().run_until_complete(request.json())
@@ -737,7 +737,7 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
                 logger.warning(f"Failed to verify sync sender_tee_pubkey: {exc}")
                 # Continue - verification will happen in handle_incoming_sync anyway
 
-    # Decrypt request or use plaintext fallback
+    # Decrypt request
     if _is_encrypted_envelope(body):
         from secure_channel import decrypt_json_envelope
         try:
@@ -770,7 +770,7 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     if resp_sig:
         response.headers["X-KMS-Peer-Signature"] = resp_sig
 
-    # Encrypt the response (or use plaintext fallback)
+    # Encrypt the response
     if sender_tee_pubkey:
         from secure_channel import encrypt_json_envelope
         try:

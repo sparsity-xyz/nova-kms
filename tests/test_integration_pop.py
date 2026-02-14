@@ -100,7 +100,7 @@ def _setup(monkeypatch):
     mgr.initialize_from_peer(b"\x01" * 32)
     
     # Needs to be patched into kdf since app uses global instance
-    monkeypatch.setattr("kdf.master_secret_mgr", mgr)
+    monkeypatch.setattr("app.master_secret_mgr", mgr)
 
     authorizer = MagicMock(spec=AppAuthorizer)
     authorizer.verify.return_value = AuthResult(

@@ -328,7 +328,7 @@ class TestCachedNovaRegistry:
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
         r1 = cached.get_active_instances(1)
-        r2 = cached.get_active_instances(1)
+        cached.get_active_instances(1)
         assert r1 == ["0xAA", "0xBB"]
         assert mock_inner.get_active_instances.call_count == 1
 
