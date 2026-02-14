@@ -4,9 +4,8 @@
 
 # Install dependencies
 install:
-	@echo "Installing dependencies (forge-std, openzeppelin)..."
+	@echo "Installing dependencies (forge-std)..."
 	@[ -d lib/forge-std ] || forge install foundry-rs/forge-std --no-git
-	@[ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts --no-git
 
 # Build all contracts
 build:

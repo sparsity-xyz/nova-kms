@@ -2,56 +2,17 @@
 pragma solidity ^0.8.33;
 
 import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-
-// Minimal interface to query required NovaAppRegistry views.
-interface INovaAppRegistryView {
-    function getInstanceByWallet(
-        address wallet
-    )
-        external
-        view
-        returns (
-            uint256 id,
-            uint256 appId,
-            uint256 versionId,
-            address operator,
-            string memory instanceUrl,
-            bytes memory teePubkey,
-            address teeWalletAddress,
-            bool zkVerified,
-            uint8 status,
-            uint256 registeredAt
-        );
-
-    function getVersion(
-        uint256 appId,
-        uint256 versionId
-    )
-        external
-        view
-        returns (
-            uint256 id,
-            string memory versionName,
-            bytes32 codeMeasurement,
-            string memory imageUri,
-            string memory auditUrl,
-            string memory auditHash,
-            string memory githubRunId,
-            uint8 status,
-            uint256 enrolledAt,
-            address enrolledBy
-        );
-}
+import {INovaAppRegistryView} from "./interfaces/INovaAppRegistryView.sol";
 
 /**
  * @title KMSRegistry
  * @notice On-chain operator list for KMS nodes, implementing INovaAppInterface.
  * @dev Non-upgradeable version. Managed by NovaAppRegistry callbacks.
  */
-contract KMSRegistry is INovaAppInterface, Ownable {
+contract KMSRegistry is INovaAppInterface {
     // ========== State Variables ==========
 
+    address public immutable OWNER;
     address private _novaAppRegistryAddr;
     uint256 public kmsAppId;
 
@@ -70,13 +31,13 @@ contract KMSRegistry is INovaAppInterface, Ownable {
 
     // ========== Errors ==========
 
+    error NotOwner();
     error OnlyNovaAppRegistry();
     error InvalidRegistryAddress();
     error AppIdMismatch();
     error MasterSecretHashAlreadySet();
     error NotAuthorizedToSetHash();
     error AppIdAlreadySet();
-    error OwnershipTransferNotSupported();
 
     // ========== Events ==========
 
@@ -99,6 +60,15 @@ contract KMSRegistry is INovaAppInterface, Ownable {
 
     // ========== Modifiers ==========
 
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    function _checkOwner() internal view {
+        if (msg.sender != OWNER) revert NotOwner();
+    }
+
     modifier onlyNovaAppRegistryMod() {
         _checkOnlyNovaAppRegistry();
         _;
@@ -110,11 +80,9 @@ contract KMSRegistry is INovaAppInterface, Ownable {
 
     // ========== Constructor ==========
 
-    constructor(
-        address initialOwner,
-        address appRegistry_
-    ) Ownable(initialOwner) {
+    constructor(address initialOwner, address appRegistry_) {
         if (appRegistry_ == address(0)) revert InvalidRegistryAddress();
+        OWNER = initialOwner;
         _novaAppRegistryAddr = appRegistry_;
     }
 
@@ -149,20 +117,6 @@ contract KMSRegistry is INovaAppInterface, Ownable {
     function resetMasterSecretHash() external onlyOwner {
         masterSecretHash = bytes32(0);
         emit MasterSecretHashReset(msg.sender);
-    }
-
-    /**
-     * @notice Ownership transfer is NOT supported.
-     */
-    function transferOwnership(address) public virtual override onlyOwner {
-        revert OwnershipTransferNotSupported();
-    }
-
-    /**
-     * @notice Ownership renouncement is NOT supported.
-     */
-    function renounceOwnership() public virtual override onlyOwner {
-        revert OwnershipTransferNotSupported();
     }
 
     /**
@@ -225,53 +179,37 @@ contract KMSRegistry is INovaAppInterface, Ownable {
 
     // ========== NovaAppRegistry Validation ==========
 
-    // VersionStatus.ENROLLED == 0, InstanceStatus.ACTIVE == 0 (per NovaAppRegistry enums)
-    uint8 private constant _VERSION_STATUS_ENROLLED = 0;
-    uint8 private constant _INSTANCE_STATUS_ACTIVE = 0;
-
-    bytes4 private constant _SEL_GET_INSTANCE_BY_WALLET =
-        bytes4(keccak256("getInstanceByWallet(address)"));
-    bytes4 private constant _SEL_GET_VERSION =
-        bytes4(keccak256("getVersion(uint256,uint256)"));
-
-    function _loadWord(
-        bytes memory data,
-        uint256 index
-    ) private pure returns (uint256 v) {
-        assembly {
-            v := mload(add(data, add(32, mul(index, 32))))
-        }
-    }
-
     function _isEligibleHashSetter(
         address sender
     ) internal view returns (bool) {
         if (_novaAppRegistryAddr == address(0) || kmsAppId == 0) return false;
 
-        // getInstanceByWallet(address) returns a struct-wrapped tuple.
-        (bool ok1, bytes memory instRet) = _novaAppRegistryAddr.staticcall(
-            abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender)
+        INovaAppRegistryView registry = INovaAppRegistryView(
+            _novaAppRegistryAddr
         );
-        if (!ok1 || instRet.length < 32 * 11) return false;
 
-        uint256 appId = _loadWord(instRet, 2);
-        uint256 versionId = _loadWord(instRet, 3);
-        address teeWallet = address(uint160(_loadWord(instRet, 7)));
-        uint8 instanceStatus = uint8(_loadWord(instRet, 9));
+        // Standard interface call (struct return avoids stack-too-deep)
+        try registry.getInstanceByWallet(sender) returns (
+            INovaAppRegistryView.RuntimeInstance memory inst
+        ) {
+            if (
+                inst.teeWalletAddress != sender ||
+                inst.appId != kmsAppId ||
+                inst.status != INovaAppRegistryView.InstanceStatus.ACTIVE
+            ) return false;
 
-        if (
-            teeWallet != sender ||
-            appId != kmsAppId ||
-            instanceStatus != _INSTANCE_STATUS_ACTIVE
-        ) return false;
-
-        // getVersion(appId, versionId) struct-wrapped; version status at word[8].
-        (bool ok2, bytes memory verRet) = _novaAppRegistryAddr.staticcall(
-            abi.encodeWithSelector(_SEL_GET_VERSION, appId, versionId)
-        );
-        if (!ok2 || verRet.length < 32 * 11) return false;
-
-        return uint8(_loadWord(verRet, 8)) == _VERSION_STATUS_ENROLLED;
+            // Standard interface call for version status
+            try registry.getVersion(inst.appId, inst.versionId) returns (
+                INovaAppRegistryView.AppVersion memory ver
+            ) {
+                return
+                    ver.status == INovaAppRegistryView.VersionStatus.ENROLLED;
+            } catch {
+                return false;
+            }
+        } catch {
+            return false;
+        }
     }
 
     // ========== Internal Functions ==========

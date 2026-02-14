@@ -3,7 +3,6 @@ pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract KMSRegistryTest is Test {
     KMSRegistry public registry;
@@ -35,7 +34,7 @@ contract KMSRegistryTest is Test {
     function test_constructor_setsState() public view {
         assertEq(registry.novaAppRegistry(), mockAppRegistry);
         assertEq(registry.kmsAppId(), KMS_APP_ID);
-        assertEq(registry.owner(), admin);
+        assertEq(registry.OWNER(), admin);
         assertEq(registry.operatorCount(), 0);
     }
 
@@ -50,12 +49,7 @@ contract KMSRegistryTest is Test {
 
     function test_setNovaAppRegistry_revert_notOwner() public {
         vm.prank(randomUser);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Ownable.OwnableUnauthorizedAccount.selector,
-                randomUser
-            )
-        );
+        vm.expectRevert(abi.encodeWithSignature("NotOwner()"));
         registry.setNovaAppRegistry(address(0xBEEF));
     }
 
@@ -71,12 +65,7 @@ contract KMSRegistryTest is Test {
         // First reset the registry to one without an appId set for testing the error priority
         KMSRegistry freshRegistry = new KMSRegistry(admin, mockAppRegistry);
         vm.prank(randomUser);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Ownable.OwnableUnauthorizedAccount.selector,
-                randomUser
-            )
-        );
+        vm.expectRevert(abi.encodeWithSignature("NotOwner()"));
         freshRegistry.setKmsAppId(999);
     }
 
@@ -111,22 +100,6 @@ contract KMSRegistryTest is Test {
     }
 
     // ========== Admin/Ownership Tests ==========
-
-    function test_transferOwnership_revert_notSupported() public {
-        vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSignature("OwnershipTransferNotSupported()")
-        );
-        registry.transferOwnership(randomUser);
-    }
-
-    function test_renounceOwnership_revert_notSupported() public {
-        vm.prank(admin);
-        vm.expectRevert(
-            abi.encodeWithSignature("OwnershipTransferNotSupported()")
-        );
-        registry.renounceOwnership();
-    }
 
     // ========== View Tests ==========
 

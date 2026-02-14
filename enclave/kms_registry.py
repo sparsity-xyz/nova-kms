@@ -50,112 +50,10 @@ _KMS_REGISTRY_ABI = [
     },
     {
         "inputs": [],
-        "name": "AppIdAlreadySet",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "AppIdMismatch",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "InvalidRegistryAddress",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "MasterSecretHashAlreadySet",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "NotAuthorizedToSetHash",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "OnlyNovaAppRegistry",
-        "type": "error"
-    },
-    {
-        "inputs": [{"internalType": "address", "name": "owner", "type": "address"}],
-        "name": "OwnableInvalidOwner",
-        "type": "error"
-    },
-    {
-        "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
-        "name": "OwnableUnauthorizedAccount",
-        "type": "error"
-    },
-    {
-        "inputs": [],
-        "name": "OwnershipTransferNotSupported",
-        "type": "error"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"}
-        ],
-        "name": "KmsAppIdSet",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "address", "name": "resetter", "type": "address"}
-        ],
-        "name": "MasterSecretHashReset",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "bytes32", "name": "hash", "type": "bytes32"},
-            {"indexed": True, "internalType": "address", "name": "setter", "type": "address"}
-        ],
-        "name": "MasterSecretHashSet",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "address", "name": "registry", "type": "address"}
-        ],
-        "name": "NovaAppRegistrySet",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "address", "name": "operator", "type": "address"},
-            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "versionId", "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "instanceId", "type": "uint256"}
-        ],
-        "name": "OperatorAdded",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "address", "name": "operator", "type": "address"},
-            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "versionId", "type": "uint256"},
-            {"indexed": False, "internalType": "uint256", "name": "instanceId", "type": "uint256"}
-        ],
-        "name": "OperatorRemoved",
-        "type": "event"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {"indexed": True, "internalType": "address", "name": "previousOwner", "type": "address"},
-            {"indexed": True, "internalType": "address", "name": "newOwner", "type": "address"}
-        ],
-        "name": "OwnershipTransferred",
-        "type": "event"
+        "name": "OWNER",
+        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function"
     },
     {
         "inputs": [
@@ -219,13 +117,6 @@ _KMS_REGISTRY_ABI = [
         "type": "function"
     },
     {
-        "inputs": [],
-        "name": "owner",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
         "inputs": [
             {"internalType": "address", "name": "teeWalletAddress", "type": "address"},
             {"internalType": "uint256", "name": "appId", "type": "uint256"},
@@ -233,13 +124,6 @@ _KMS_REGISTRY_ABI = [
             {"internalType": "uint256", "name": "instanceId", "type": "uint256"}
         ],
         "name": "removeOperator",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "renounceOwnership",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
@@ -273,12 +157,67 @@ _KMS_REGISTRY_ABI = [
         "type": "function"
     },
     {
-        "inputs": [{"internalType": "address", "name": "newOwner", "type": "address"}],
-        "name": "transferOwnership",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    }
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"}
+        ],
+        "name": "KmsAppIdSet",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "resetter", "type": "address"}
+        ],
+        "name": "MasterSecretHashReset",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "bytes32", "name": "hash", "type": "bytes32"},
+            {"indexed": True, "internalType": "address", "name": "setter", "type": "address"}
+        ],
+        "name": "MasterSecretHashSet",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "registry", "type": "address"}
+        ],
+        "name": "NovaAppRegistrySet",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "operator", "type": "address"},
+            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "versionId", "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "instanceId", "type": "uint256"}
+        ],
+        "name": "OperatorAdded",
+        "type": "event"
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "internalType": "address", "name": "operator", "type": "address"},
+            {"indexed": True, "internalType": "uint256", "name": "appId", "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "versionId", "type": "uint256"},
+            {"indexed": False, "internalType": "uint256", "name": "instanceId", "type": "uint256"}
+        ],
+        "name": "OperatorRemoved",
+        "type": "event"
+    },
+    {"inputs": [], "name": "AppIdAlreadySet", "type": "error"},
+    {"inputs": [], "name": "AppIdMismatch", "type": "error"},
+    {"inputs": [], "name": "InvalidRegistryAddress", "type": "error"},
+    {"inputs": [], "name": "MasterSecretHashAlreadySet", "type": "error"},
+    {"inputs": [], "name": "NotAuthorizedToSetHash", "type": "error"},
+    {"inputs": [], "name": "NotOwner", "type": "error"},
+    {"inputs": [], "name": "OnlyNovaAppRegistry", "type": "error"}
 ]
 
 
