@@ -7,7 +7,7 @@ install:
 	@echo "Installing dependencies..."
 	@mkdir -p lib
 	@[ -d lib/forge-std ] || forge install foundry-rs/forge-std --no-git
-	@[ -d lib/openzeppelin-contracts-upgradeable ] || forge install OpenZeppelin/openzeppelin-contracts-upgradeable --no-git
+	@[ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts --no-git
 
 # Build all contracts
 build:
@@ -40,25 +40,13 @@ deploy:
 		--private-key $(PRIVATE_KEY) \
 		--broadcast
 
-# Upgrade KMSRegistry implementation
-upgrade:
-	@echo "======================================"
-	@echo "Upgrading KMSRegistry"
-	@echo "======================================"
-	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS not set"; exit 1; fi; \
-	echo "Required env vars: PROXY_ADDRESS, PRIVATE_KEY"
-	forge script script/UpgradeKMSRegistry.s.sol --tc UpgradeKMSRegistry \
-		--rpc-url $(RPC_URL) \
-		--private-key $(PRIVATE_KEY) \
-		--broadcast
-
 # Verify KMSRegistry implementation on Blockscout
 verify-blockscout:
-	@if [ -z "$(IMPL_ADDRESS)" ]; then echo "Error: IMPL_ADDRESS not set"; exit 1; fi; \
-	echo "Verifying KMSRegistry Implementation at $(IMPL_ADDRESS) on Blockscout..."; \
+	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
+	echo "Verifying KMSRegistry at $(CONTRACT_ADDRESS) on Blockscout..."; \
 	forge verify-contract \
 		--rpc-url $(RPC_URL) \
-		$(IMPL_ADDRESS) \
+		$(CONTRACT_ADDRESS) \
 		src/KMSRegistry.sol:KMSRegistry \
 		--verifier blockscout \
 		--verifier-url https://base-sepolia.blockscout.com/api/ \
@@ -66,28 +54,28 @@ verify-blockscout:
 
 # Verify KMSRegistry implementation on Basescan
 verify-basescan:
-	@if [ -z "$(IMPL_ADDRESS)" ]; then echo "Error: IMPL_ADDRESS not set"; exit 1; fi; \
-	echo "Verifying KMSRegistry Implementation at $(IMPL_ADDRESS) on Basescan..."; \
+	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
+	echo "Verifying KMSRegistry at $(CONTRACT_ADDRESS) on Basescan..."; \
 	forge verify-contract \
 		--rpc-url $(RPC_URL) \
-		$(IMPL_ADDRESS) \
+		$(CONTRACT_ADDRESS) \
 		src/KMSRegistry.sol:KMSRegistry \
 		--etherscan-api-key $(BASESCAN_API_KEY) \
 		--watch
 
-# Set KMS App ID on the proxy
+# Set KMS App ID
 set-app-id:
-	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS (proxy) not set"; exit 1; fi; \
+	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
 	if [ -z "$(KMS_APP_ID)" ]; then echo "Error: KMS_APP_ID not set"; exit 1; fi; \
-	echo "Setting KMS App ID to $(KMS_APP_ID) on $(PROXY_ADDRESS)..."; \
-	cast send $(PROXY_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
+	echo "Setting KMS App ID to $(KMS_APP_ID) on $(CONTRACT_ADDRESS)..."; \
+	cast send $(CONTRACT_ADDRESS) "setKmsAppId(uint256)" $(KMS_APP_ID) \
 		--rpc-url $(RPC_URL) \
 		--private-key $(PRIVATE_KEY)
 
-# Reset master secret hash on the proxy (owner-only)
+# Reset master secret hash (owner-only)
 reset-secret-hash:
-	@if [ -z "$(PROXY_ADDRESS)" ]; then echo "Error: PROXY_ADDRESS (proxy) not set"; exit 1; fi; \
-	echo "Resetting master secret hash to 0x0 on $(PROXY_ADDRESS)..."; \
-	cast send $(PROXY_ADDRESS) "resetMasterSecretHash()" \
+	@if [ -z "$(CONTRACT_ADDRESS)" ]; then echo "Error: CONTRACT_ADDRESS not set"; exit 1; fi; \
+	echo "Resetting master secret hash to 0x0 on $(CONTRACT_ADDRESS)..."; \
+	cast send $(CONTRACT_ADDRESS) "resetMasterSecretHash()" \
 		--rpc-url $(RPC_URL) \
 		--private-key $(PRIVATE_KEY)

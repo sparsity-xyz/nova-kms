@@ -65,16 +65,16 @@ make deploy
 ```
 
 The script will:
-1. Deploy `KMSRegistry` implementation and proxy.
-2. Initialize with the configured `NOVA_APP_REGISTRY_PROXY`.
-3. Output the deployed **Implementation** address and the **Proxy** address (the proxy is the one you will use for all future configuration and platform integration).
+1. Deploy `KMSRegistry` (Non-Upgradeable).
+2. Initialize it with the configured `NOVA_APP_REGISTRY_PROXY` in the constructor.
+3. Output the deployed **Contract** address.
 
 ### 3. Setup KMS App ID
 
-Once you have the Application ID assigned to Nova KMS by the platform, you **must** set it on the proxy:
+Once you have the Application ID assigned to Nova KMS by the platform, you **must** set it on the contract. **Note: This can only be set ONCE.**
 
 ```bash
-export PROXY_ADDRESS=0x_PROXY_ADDRESS
+export CONTRACT_ADDRESS=0x_CONTRACT_ADDRESS
 export KMS_APP_ID=your_assigned_id
 make set-app-id
 ```
@@ -87,63 +87,22 @@ After deployment and setting the App ID, you **must** register the `KMSRegistry`
 2. Set the `dappContract` field to the address of the newly deployed `KMSRegistry`.
 3. This ensures that when a new KMS node is successfully verified (ZKP), the platform automatically calls `addOperator` on your contract.
 
-## Upgrade Flow
-When you need to update the logic of `KMSRegistry`:
-
-1. **Modify Contract**:
-   Update `src/KMSRegistry.sol`. Remember UUPS constraints (no storage layout changes unless append-only, no `selfdestruct`).
-
-2. **Run Upgrade**:
-   Use the existing proxy address to upgrade to the new implementation:
-   ```bash
-   export PROXY_ADDRESS=0x_YOUR_PROXY_ADDRESS
-   make upgrade
-   ```
-   This will:
-   - Deploy the new implementation.
-   - Call `upgradeToAndCall` on the proxy.
-   - Print the new implementation address.
-
-3. **Verify New Implementation**:
-   You must verify the *new* implementation contract on the block explorer:
-   ```bash
-   export IMPL_ADDRESS=0x_NEW_IMPL_ADDRESS
-   make verify-basescan
-   ```
-   Note: The proxy address remains unchanged.
-
 ## Contract Verification
 
-In the UUPS pattern, you must verify the **Implementation** contract.
+You can verify the deployed contract on the block explorer:
 
-### 1. Verify Implementation
-Find the `KMSRegistry Implementation` address from your deployment output:
 ```bash
-export IMPL_ADDRESS=0x_IMPLEMENTATION_ADDRESS
+export CONTRACT_ADDRESS=0x_CONTRACT_ADDRESS
 make verify-basescan # or verify-blockscout
 ```
 
-### 2. Link Proxy on Explorer
-Once the implementation is verified:
-1. Go to the **Proxy** address on Basescan.
-2. Go to the "Contract" tab.
-3. Click "More Options" -> "Is this a proxy?".
-4. Follow the prompts to verify the Proxy and link it to the implementation.
-
 ### Management Operations
-
-#### Set KMS App ID
-If you need to update the App ID later:
-```bash
-export PROXY_ADDRESS=0x_PROXY_ADDRESS
-export KMS_APP_ID=your_assigned_id
-make set-app-id
-```
 
 #### Reset Master Secret Hash
 If you need to rotate the master secret group or recover from a compromised group, the owner can reset the on-chain hash:
+
 ```bash
-export PROXY_ADDRESS=0x_PROXY_ADDRESS
+export CONTRACT_ADDRESS=0x_CONTRACT_ADDRESS
 make reset-secret-hash
 ```
 

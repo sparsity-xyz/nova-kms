@@ -2,13 +2,14 @@
 pragma solidity ^0.8.33;
 
 import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Minimal interface to query required NovaAppRegistry views.
 interface INovaAppRegistryView {
-    function getInstanceByWallet(address wallet)
+    function getInstanceByWallet(
+        address wallet
+    )
         external
         view
         returns (
@@ -24,7 +25,10 @@ interface INovaAppRegistryView {
             uint256 registeredAt
         );
 
-    function getVersion(uint256 appId, uint256 versionId)
+    function getVersion(
+        uint256 appId,
+        uint256 versionId
+    )
         external
         view
         returns (
@@ -44,9 +48,9 @@ interface INovaAppRegistryView {
 /**
  * @title KMSRegistry
  * @notice On-chain operator list for KMS nodes, implementing INovaAppInterface.
- * @dev UUPS Upgradeable version. Managed by NovaAppRegistry callbacks.
+ * @dev Non-upgradeable version. Managed by NovaAppRegistry callbacks.
  */
-contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeable, UUPSUpgradeable {
+contract KMSRegistry is INovaAppInterface, Ownable2Step {
     // ========== State Variables ==========
 
     address private _novaAppRegistryAddr;
@@ -68,6 +72,7 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     error AppIdMismatch();
     error MasterSecretHashAlreadySet();
     error NotAuthorizedToSetHash();
+    error AppIdAlreadySet();
 
     // ========== Events ==========
 
@@ -75,8 +80,18 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     event KmsAppIdSet(uint256 indexed appId);
     event MasterSecretHashSet(bytes32 indexed hash, address indexed setter);
     event MasterSecretHashReset(address indexed resetter);
-    event OperatorAdded(address indexed operator, uint256 indexed appId, uint256 versionId, uint256 instanceId);
-    event OperatorRemoved(address indexed operator, uint256 indexed appId, uint256 versionId, uint256 instanceId);
+    event OperatorAdded(
+        address indexed operator,
+        uint256 indexed appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
+    event OperatorRemoved(
+        address indexed operator,
+        uint256 indexed appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
 
     // ========== Modifiers ==========
 
@@ -89,23 +104,15 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
         if (msg.sender != _novaAppRegistryAddr) revert OnlyNovaAppRegistry();
     }
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
+    // ========== Constructor ==========
 
-    // ========== Initializer ==========
-
-    function initialize(address initialOwner, address appRegistry_) public initializer {
-        __Ownable_init(initialOwner);
-
+    constructor(
+        address initialOwner,
+        address appRegistry_
+    ) Ownable(initialOwner) {
         if (appRegistry_ == address(0)) revert InvalidRegistryAddress();
         _novaAppRegistryAddr = appRegistry_;
     }
-
-    // ========== Upgrade Authorization ==========
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // ========== INovaAppInterface Implementation ==========
 
@@ -122,10 +129,11 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     }
 
     /**
-     * @notice Updates the KMS App ID.
+     * @notice Updates the KMS App ID. Can only be set once.
      * @param newAppId The new application ID assigned by Nova.
      */
     function setKmsAppId(uint256 newAppId) external onlyOwner {
+        if (kmsAppId != 0) revert AppIdAlreadySet();
         kmsAppId = newAppId;
         emit KmsAppIdSet(newAppId);
     }
@@ -155,20 +163,24 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     }
 
     /// @inheritdoc INovaAppInterface
-    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId)
-        external
-        onlyNovaAppRegistryMod
-    {
+    function addOperator(
+        address teeWalletAddress,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    ) external onlyNovaAppRegistryMod {
         if (appId != kmsAppId) revert AppIdMismatch();
         _addOperatorInternal(teeWalletAddress);
         emit OperatorAdded(teeWalletAddress, appId, versionId, instanceId);
     }
 
     /// @inheritdoc INovaAppInterface
-    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId)
-        external
-        onlyNovaAppRegistryMod
-    {
+    function removeOperator(
+        address teeWalletAddress,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    ) external onlyNovaAppRegistryMod {
         if (appId != kmsAppId) revert AppIdMismatch();
         _removeOperatorInternal(teeWalletAddress);
         emit OperatorRemoved(teeWalletAddress, appId, versionId, instanceId);
@@ -199,16 +211,23 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     uint8 private constant _VERSION_STATUS_ENROLLED = 0;
     uint8 private constant _INSTANCE_STATUS_ACTIVE = 0;
 
-    bytes4 private constant _SEL_GET_INSTANCE_BY_WALLET = bytes4(keccak256("getInstanceByWallet(address)"));
-    bytes4 private constant _SEL_GET_VERSION = bytes4(keccak256("getVersion(uint256,uint256)"));
+    bytes4 private constant _SEL_GET_INSTANCE_BY_WALLET =
+        bytes4(keccak256("getInstanceByWallet(address)"));
+    bytes4 private constant _SEL_GET_VERSION =
+        bytes4(keccak256("getVersion(uint256,uint256)"));
 
-    function _loadWord(bytes memory data, uint256 index) private pure returns (uint256 v) {
+    function _loadWord(
+        bytes memory data,
+        uint256 index
+    ) private pure returns (uint256 v) {
         assembly {
             v := mload(add(data, add(32, mul(index, 32))))
         }
     }
 
-    function _isEligibleHashSetter(address sender) internal view returns (bool) {
+    function _isEligibleHashSetter(
+        address sender
+    ) internal view returns (bool) {
         if (_novaAppRegistryAddr == address(0)) return false;
         if (kmsAppId == 0) return false;
 
@@ -218,8 +237,9 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
         //   word[3] versionId
         //   word[7] teeWalletAddress
         //   word[9] instanceStatus
-        (bool ok1, bytes memory instRet) =
-            _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender));
+        (bool ok1, bytes memory instRet) = _novaAppRegistryAddr.staticcall(
+            abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender)
+        );
         if (!ok1 || instRet.length < 32 * 11) return false;
 
         uint256 appId = _loadWord(instRet, 2);
@@ -232,8 +252,9 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
         if (instanceStatus != _INSTANCE_STATUS_ACTIVE) return false;
 
         // getVersion(appId, versionId) struct-wrapped; version status at word[8].
-        (bool ok2, bytes memory verRet) =
-            _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_VERSION, appId, versionId));
+        (bool ok2, bytes memory verRet) = _novaAppRegistryAddr.staticcall(
+            abi.encodeWithSelector(_SEL_GET_VERSION, appId, versionId)
+        );
         if (!ok2 || verRet.length < 32 * 11) return false;
 
         uint8 versionStatus = uint8(_loadWord(verRet, 8));
