@@ -371,8 +371,10 @@ class AppAuthorizer:
             logger.warning(f"Version lookup failed: {exc}")
             return AuthResult(authorized=False, reason="Version lookup failed")
 
-        if version.status != VersionStatus.ENROLLED:
-            return AuthResult(authorized=False, reason="Version not enrolled")
+        if version.status == VersionStatus.REVOKED:
+            return AuthResult(authorized=False, reason="Version revoked")
+        if version.status not in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED):
+            return AuthResult(authorized=False, reason="Version not enrolled or deprecated")
 
         # Get app's teePubkey for E2E response encryption
         app_tee_pubkey = getattr(instance, "tee_pubkey", b"") or b""

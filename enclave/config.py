@@ -119,7 +119,7 @@ POP_MAX_AGE_SECONDS: int = 120
 # can never be overwritten by correct updates (Last-Write-Wins).
 #
 # Used in: data_store.py (merge_record conflict resolution)
-MAX_CLOCK_SKEW_MS: int = 900000  # 15 minutes
+MAX_CLOCK_SKEW_MS: int = 5000  # 5 seconds
 
 # MAX_SYNC_PAYLOAD_BYTES:
 # The maximum allowed body size for the specific `/sync` endpoint.

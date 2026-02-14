@@ -308,15 +308,17 @@ class _Namespace:
                     )
                     return False
 
-            # Clock skew protection: reject records with implausible timestamps
+            # Clock skew protection: reject records with implausible future timestamps.
+            # We ACCEPT historical records (even if very old) to allow syncing of
+            # existing cluster state to new nodes.
             now_ms = int(time.time() * 1000)
-            skew = abs(incoming.updated_at_ms - now_ms)
-            if config.MAX_CLOCK_SKEW_MS > 0 and skew > config.MAX_CLOCK_SKEW_MS:
-                logger.warning(
-                    f"Rejecting record '{incoming.key}': clock skew {skew}ms "
-                    f"exceeds MAX_CLOCK_SKEW_MS ({config.MAX_CLOCK_SKEW_MS}ms)"
-                )
-                return False
+            if config.MAX_CLOCK_SKEW_MS > 0:
+                if incoming.updated_at_ms > (now_ms + config.MAX_CLOCK_SKEW_MS):
+                    logger.warning(
+                        f"Rejecting record '{incoming.key}': future timestamp {incoming.updated_at_ms}ms "
+                        f"exceeds limit (now={now_ms}ms + max_skew={config.MAX_CLOCK_SKEW_MS}ms)"
+                    )
+                    return False
 
             existing = self.records.get(incoming.key)
             if existing is None:

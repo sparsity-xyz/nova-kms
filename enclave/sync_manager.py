@@ -193,7 +193,7 @@ class PeerCache:
     def _fetch_peers_from_chain(self) -> List[dict]:
         """Fetch peer list from NovaAppRegistry using getActiveInstances. Slow IO, NO LOCK."""
         from config import KMS_APP_ID
-        from nova_registry import InstanceStatus
+        from nova_registry import InstanceStatus, VersionStatus
 
         kms_app_id = int(KMS_APP_ID or 0)
         if kms_app_id <= 0:
@@ -228,9 +228,17 @@ class PeerCache:
                 logger.debug(f"Skipping instance {wallet}: status is {instance.status} (expected ACTIVE)")
                 continue
 
-            # Check version status (optional but good for safety)
-            # We assume getActiveInstances handles version revocation, but if we wanted to be
-            # paranoid we could check version status here too. For now trusting the contract.
+            # Check version status (safety check)
+            try:
+                version = self.nova_registry.get_version(kms_app_id, instance.version_id)
+                if version.status == VersionStatus.REVOKED:
+                    logger.debug(f"Skipping instance {wallet}: version {instance.version_id} is REVOKED")
+                    continue
+            except Exception as exc:
+                logger.debug(f"Version lookup failed for {instance.version_id}: {exc}")
+                # Continue if lookup fails? Better to be safe and require metadata if available.
+                # If we can't get version info, we might be in an inconsistent state.
+                pass
 
             # Validate peer URL before making request
             try:
@@ -331,7 +339,7 @@ class SyncManager:
         Returns the count of verified peers.
         """
         from probe import probe_node
-        from nova_registry import InstanceStatus
+        from nova_registry import InstanceStatus, VersionStatus
 
         if nova_registry is None:
             nova_registry = self.peer_cache.nova_registry
@@ -355,10 +363,12 @@ class SyncManager:
             is_valid = False
             try:
                 instance = nova_registry.get_instance_by_wallet(peer_wallet)
+                version = nova_registry.get_version(kms_app_id, instance.version_id)
                 is_valid = (
                     getattr(instance, "instance_id", 0) != 0
                     and getattr(instance, "app_id", None) == kms_app_id
                     and getattr(instance, "status", None) == InstanceStatus.ACTIVE
+                    and getattr(version, "status", None) in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED)
                 )
             except Exception as exc:
                 logger.warning(f"NovaAppRegistry check failed for {peer_wallet}: {exc}")

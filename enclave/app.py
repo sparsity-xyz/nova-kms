@@ -135,12 +135,16 @@ def _startup_production() -> dict:
                 f"zk_verified={inst_zk}, instance_url={inst_url}"
             )
 
+            version = nova_registry.get_version(kms_app_id, inst.version_id)
             is_active_instance = (
                 inst_id != 0
                 and inst_app_id == kms_app_id
                 and inst_status == InstanceStatus.ACTIVE
+                and version.status in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED)
             )
             if is_active_instance:
+                if version.status == VersionStatus.DEPRECATED:
+                    logger.warning(f"KMS node version {inst.version_id} is DEPRECATED. No new nodes can be deployed.")
                 logger.info("This node is a registered ACTIVE KMS instance")
 
                 # Verify that the registered teePubkey matches our local key.

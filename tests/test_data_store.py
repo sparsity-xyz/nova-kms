@@ -237,7 +237,7 @@ class TestSyncOperations:
         incoming = DataRecord(
             key="key", value=b"peer_value",
             version=VectorClock({"node2": 1}),
-            updated_at_ms=int(time.time() * 1000) + 10_000,
+            updated_at_ms=int(time.time() * 1000) + 3_000,
             tombstone=False,
         )
         merged = ds.merge_record(1, incoming)
@@ -402,16 +402,17 @@ class TestClockSkewProtection:
         )
         assert ds.merge_record(1, incoming) is False
 
-    def test_rejects_far_past_timestamp(self):
+    def test_accepts_far_past_timestamp(self):
         ds = DataStore(node_id="node1")
-        far_past = int(time.time() * 1000) - 120_000
+        far_past = int(time.time() * 1000) - (24 * 3600 * 1000) # 24 hours ago
 
         incoming = DataRecord(
             key="key2", value=b"old_data",
             version=VectorClock({"node2": 1}),
             updated_at_ms=far_past, tombstone=False,
         )
-        assert ds.merge_record(1, incoming) is False
+        assert ds.merge_record(1, incoming) is True
+        assert ds.get(1, "key2").value == b"old_data"
 
     def test_accepts_within_skew_threshold(self):
         ds = DataStore(node_id="node1")

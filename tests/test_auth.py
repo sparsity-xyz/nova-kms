@@ -283,18 +283,17 @@ class TestAppAuthorizer:
         auth = AppAuthorizer(registry=reg)
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
         assert not result.authorized
-        assert "not enrolled" in result.reason
+        assert "revoked" in result.reason
 
-    def test_deprecated_version_rejected(self):
-        """DEPRECATED versions are no longer allowed — only ENROLLED."""
+    def test_deprecated_version_accepted(self):
+        """DEPRECATED versions are allowed for existing instances."""
         inst = _make_instance()
         app_obj = _make_app()
         ver = _make_version(status=VersionStatus.DEPRECATED)
         reg = _mock_registry(instance=inst, app=app_obj, version=ver)
         auth = AppAuthorizer(registry=reg)
         result = auth.verify(ClientIdentity(tee_wallet=inst.tee_wallet_address))
-        assert not result.authorized
-        assert "not enrolled" in result.reason
+        assert result.authorized
 
     def test_version_lookup_exception(self):
         inst = _make_instance()
