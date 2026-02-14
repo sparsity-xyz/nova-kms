@@ -106,7 +106,8 @@ class PeerCache:
         self._last_refresh: float = 0
         self._blacklist: Dict[str, float] = {}  # wallet -> expiry_ts
         self._lock = threading.Lock()
-        self._refresh_lock = threading.Lock()
+        self._refresh_lock = threading.RLock()
+        self._is_refreshing: bool = False
 
     @property
     def kms_registry(self):
@@ -122,14 +123,29 @@ class PeerCache:
             self._nova_registry = NovaRegistry()
         return self._nova_registry
 
-    def refresh(self) -> None:
+    def refresh(self, skip_if_refreshing: bool = False) -> bool:
         """
         Force a refresh of the peer cache from on-chain data.
         
         Optimized to avoid holding the lock during slow network calls.
         1. Fetch data from chain (slow, no lock).
         2. Update cache (fast, with lock).
+        
+        Args:
+            skip_if_refreshing: If True, returns immediately if another thread is already refreshing.
+            
+        Returns:
+            True if a refresh was performed, False otherwise.
         """
+        if skip_if_refreshing:
+            with self._refresh_lock:
+                if self._is_refreshing:
+                    return False
+                self._is_refreshing = True
+        else:
+            with self._refresh_lock:
+                self._is_refreshing = True
+
         try:
             # 1. Fetch from chain (slow IO, no lock)
             new_peers = self._fetch_peers_from_chain()
@@ -137,11 +153,15 @@ class PeerCache:
             # 2. Update cache (fast, exclusive lock)
             with self._lock:
                 self._update_cache(new_peers)
+                self._is_refreshing = False
             
             logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
-                
+            return True
         except Exception as exc:
             logger.warning(f"Failed to refresh peer cache: {exc}")
+            with self._lock:
+                self._is_refreshing = False
+            return False
 
     def remove_peer(self, wallet: str) -> None:
         """Remove a peer from the cache by wallet address (step 4.3)."""
@@ -191,11 +211,16 @@ class PeerCache:
         # Optimized: Check staleness with a read lock (or just access atomic float)
         # If stale and refresh_if_stale is True, perform refresh efficiently.
         if refresh_if_stale and self._is_stale():
-            # Double check locking pattern to prevent multiple threads 
-            # from hitting the chain simultaneously for the same refresh.
-            with self._refresh_lock:
-                if self._is_stale():
-                    self.refresh()
+            # Optimization: Try to acquire the refresh lock without blocking.
+            # If we fail, it means someone else is already refreshing, so 
+            # we just return the stale data to avoid thread starvation.
+            if self._refresh_lock.acquire(blocking=False):
+                try:
+                    # Double check staleness under lock
+                    if self._is_stale():
+                        self.refresh(skip_if_refreshing=False)
+                finally:
+                    self._refresh_lock.release()
 
         with self._lock:
             self._purge_blacklist()

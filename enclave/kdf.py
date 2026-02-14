@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Optional
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -126,10 +127,12 @@ class MasterSecretManager:
         self._secret: Optional[bytes] = None
         self._init_state: str = "uninitialized"  # uninitialized | generated | synced
         self._synced_from: Optional[str] = None
+        self._lock = threading.RLock()
 
     @property
     def is_initialized(self) -> bool:
-        return self._secret is not None
+        with self._lock:
+            return self._secret is not None
 
     @property
     def init_state(self) -> str:
@@ -137,18 +140,21 @@ class MasterSecretManager:
 
         Values: uninitialized | generated | synced
         """
-        return self._init_state
+        with self._lock:
+            return self._init_state
 
     @property
     def synced_from(self) -> Optional[str]:
         """If init_state==synced, optionally record which peer URL provided it."""
-        return self._synced_from
+        with self._lock:
+            return self._synced_from
 
     @property
     def secret(self) -> bytes:
-        if self._secret is None:
-            raise RuntimeError("Master secret not initialized")
-        return self._secret
+        with self._lock:
+            if self._secret is None:
+                raise RuntimeError("Master secret not initialized")
+            return self._secret
 
     @property
     def epoch(self) -> int:
@@ -157,19 +163,23 @@ class MasterSecretManager:
 
     def get_sync_key(self) -> bytes:
         """Derive the HMAC sync key from the master secret."""
-        if self._secret is None:
-            raise RuntimeError("Master secret not initialized")
-        return derive_sync_key(self._secret)
+        with self._lock:
+            if self._secret is None:
+                raise RuntimeError("Master secret not initialized")
+            return derive_sync_key(self._secret)
 
     def initialize_from_random(self, odyn) -> None:
         """Generate a new master secret from Odyn hardware RNG."""
-        self._secret = odyn.get_random_bytes()
+        new_secret = odyn.get_random_bytes()
         # Ensure at least 32 bytes
-        while len(self._secret) < 32:
-            self._secret += odyn.get_random_bytes()
-        self._secret = self._secret[:32]
-        self._init_state = "generated"
-        self._synced_from = None
+        while len(new_secret) < 32:
+            new_secret += odyn.get_random_bytes()
+        new_secret = new_secret[:32]
+
+        with self._lock:
+            self._secret = new_secret
+            self._init_state = "generated"
+            self._synced_from = None
         logger.info("Master secret initialized from hardware RNG")
 
     def initialize_from_peer(self, secret: bytes, peer_url: Optional[str] = None, **_kwargs) -> None:
@@ -180,9 +190,11 @@ class MasterSecretManager:
         """
         if len(secret) < 32:
             raise ValueError("Master secret must be at least 32 bytes")
-        self._secret = secret[:32]
-        self._init_state = "synced"
-        self._synced_from = peer_url
+        
+        with self._lock:
+            self._secret = secret[:32]
+            self._init_state = "synced"
+            self._synced_from = peer_url
         logger.info(
             "Master secret initialized from peer sync"
             + (f" from {peer_url}" if peer_url else "")
@@ -192,7 +204,8 @@ class MasterSecretManager:
         """Convenience wrapper around derive_app_key."""
         # Silently drop legacy 'epoch' kwarg if passed
         kwargs.pop("epoch", None)
-        return derive_app_key(self.secret, app_id, path, **kwargs)
+        with self._lock:
+            return derive_app_key(self.secret, app_id, path, **kwargs)
 
 
 # =============================================================================
