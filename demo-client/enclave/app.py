@@ -146,10 +146,10 @@ def _format_scan_summary(entry: dict) -> str:
     # 2) Write section
     write = details.get("write") or {}
     if not write.get("performed"):
-        write_block = "2. KV Write:\n  (not performed)"
+        write_block = "3. KV Write:\n  (not performed)"
     else:
         write_block = (
-            "2. KV Write:\n"
+            "3. KV Write:\n"
             f"  node: {write.get('node_url')}\n"
             f"  key : {write.get('key')}\n"
             f"  value: {write.get('timestamp')}\n"
@@ -157,7 +157,7 @@ def _format_scan_summary(entry: dict) -> str:
             + (f"  error: {write.get('error')}\n" if write.get("error") else "")
         ).rstrip("\n")
 
-    # 3) Combined derive + data readback
+    # 2) Combined derive + data readback
     combined_rows: List[List[str]] = []
     for idx, r in enumerate(results, start=1):
         inst = r.get("instance") or {}
@@ -203,12 +203,12 @@ def _format_scan_summary(entry: dict) -> str:
     lines.append("1. Nodes:")
     lines.append(nodes_table)
     lines.append("")
-    lines.append(write_block)
-    lines.append("")
-    lines.append("3. Derive + data readback:")
+    lines.append("2. Derive + data readback:")
     if fixed_path:
         lines.append(f"   Derive path: {fixed_path}")
     lines.append(combined_table)
+    lines.append("")
+    lines.append(write_block)
     return "\n".join(lines)
 
 # =============================================================================
@@ -284,6 +284,7 @@ class KMSClient:
         self.odyn = Odyn()
         self.nova_registry: Optional[NovaRegistry] = None
         self._kms_wallet_cache: Dict[str, str] = {}  # base_url -> kms_wallet
+        self._last_written_ts: Optional[str] = None # Added for sync verification
 
         def _is_zero_address(addr: Optional[str]) -> bool:
             if not addr:
@@ -510,12 +511,10 @@ class KMSClient:
         """Scan all KMS nodes and verify consistency + sync.
 
         Cycle:
-                    1) Discover KMS nodes via NovaAppRegistry
-          3) For ACTIVE instances, probe /health
-          4) For reachable instances, request a fixed /kms/derive and compare results
-          5) Randomly choose one reachable instance, write /kms/data with timestamp
-          6) Read that key from all reachable instances and report consistency
-        """
+          1) Discover KMS nodes via NovaAppRegistry
+          2) For ACTIVE instances, probe /health and request /kms/derive
+          3) Read back from all reachable instances (from previous cycle)
+          4) Write new timestamp KV to one reachable node (for next cycle)
         from nova_registry import InstanceStatus
 
         fixed_path = "nova-kms-client/fixed-derive"
@@ -606,29 +605,8 @@ class KMSClient:
                         row["instance"] = {"error": str(exc)}
                         results.append(row)
 
-                # 4) Write timestamp KV to one reachable node
-                write_result: dict = {"performed": False}
-                if reachable:
-                    target = min(reachable, key=lambda n: int(n.get("instance_id") or 0))
-                    write_result = {
-                        "performed": True,
-                        "node_url": target["url"],
-                        "key": data_key,
-                        "timestamp": ts_value,
-                    }
-                    try:
-                        resp = await self._signed_request(
-                            client,
-                            "PUT",
-                            f"{target['url'].rstrip('/')}/kms/data",
-                            json={"key": data_key, "value": ts_b64, "ttl_ms": 0},
-                        )
-                        resp.raise_for_status()
-                        write_result["http_status"] = resp.status_code
-                    except Exception as exc:
-                        write_result["error"] = str(exc)
-
-                # 5) Read from all reachable nodes (retry on 404 to allow sync)
+                # 4) Read from all reachable nodes (retry on 404 to allow sync)
+                # This reads the timestamp written in the PREVIOUS cycle to allow sync time.
                 for row in results:
                     inst = row.get("instance") or {}
                     url = inst.get("instance_url")
@@ -654,7 +632,7 @@ class KMSClient:
                                 read_info.update({
                                     "http_status": r.status_code,
                                     "value": val,
-                                    "matches_written": (val == ts_value) if write_result.get("performed") else None,
+                                    "matches_written": (val == self._last_written_ts) if self._last_written_ts else None,
                                 })
                                 last_exc = None
                                 break
@@ -666,6 +644,30 @@ class KMSClient:
                     except Exception as exc:
                         read_info["error"] = str(exc)
                     row["data"] = read_info
+
+                # 5) Write new timestamp KV to one reachable node
+                write_result: dict = {"performed": False}
+                if reachable:
+                    target = min(reachable, key=lambda n: int(n.get("instance_id") or 0))
+                    write_result = {
+                        "performed": True,
+                        "node_url": target["url"],
+                        "key": data_key,
+                        "timestamp": ts_value,
+                    }
+                    try:
+                        resp = await self._signed_request(
+                            client,
+                            "PUT",
+                            f"{target['url'].rstrip('/')}/kms/data",
+                            json={"key": data_key, "value": ts_b64, "ttl_ms": 0},
+                        )
+                        resp.raise_for_status()
+                        write_result["http_status"] = resp.status_code
+                        # Store for next cycle's read verification
+                        self._last_written_ts = ts_value
+                    except Exception as exc:
+                        write_result["error"] = str(exc)
 
             # 6) Summarize
             mismatched_keys = [
@@ -689,8 +691,8 @@ class KMSClient:
                     "reachable_count": len(reachable),
                     "fixed_derive_path": fixed_path,
                     "expected_derived_key": expected_key,
-                    "write": write_result,
                     "results": results,
+                    "write": write_result,
                 },
             )
         except asyncio.CancelledError:

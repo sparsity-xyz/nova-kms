@@ -32,4 +32,4 @@ REGISTRY_CACHE_TTL_SECONDS: int = 180
 # Scheduler
 # =============================================================================
 
-TEST_CYCLE_INTERVAL_SECONDS: int = 80
+TEST_CYCLE_INTERVAL_SECONDS: int = 120
