@@ -229,12 +229,7 @@ class _Namespace:
                 tombstone=False,
                 ttl_ms=ttl_ms if ttl_ms else config.DEFAULT_TTL_MS,
             )
-            self._total_bytes += new_size - old_size
-            self.records[key] = rec
-            self.records.move_to_end(key) # Mark as recently used
-            
-            if self._total_bytes > config.MAX_APP_STORAGE:
-                self._evict_lru()
+            self._update_record(rec, old)
             
             # Return record with original plaintext value
             return DataRecord(
@@ -341,24 +336,36 @@ class _Namespace:
 
             # If incoming happened-after existing, accept
             if existing.version.happened_before(incoming.version):
-                self._total_bytes += incoming.value_size() - existing.value_size()
-                self.records[incoming.key] = incoming
-                self.records.move_to_end(incoming.key) # Mark as recently used
-                if evict and self._total_bytes > config.MAX_APP_STORAGE:
-                    self._evict_lru()
+                self._update_record(incoming, existing)
                 return True
 
             # Concurrent → LWW
             if existing.version.is_concurrent(incoming.version):
+                # 1. Higher timestamp wins
                 if incoming.updated_at_ms > existing.updated_at_ms:
-                    self._total_bytes += incoming.value_size() - existing.value_size()
-                    self.records[incoming.key] = incoming
-                    self.records.move_to_end(incoming.key) # Mark as recently used
-                    if evict and self._total_bytes > config.MAX_APP_STORAGE:
-                        self._evict_lru()
+                    self._update_record(incoming, existing)
                     return True
-
+                
+                # 2. Equal timestamp: deterministic tie-break (e.g. higher value wins)
+                # This ensures convergence even if clocks are identical.
+                if incoming.updated_at_ms == existing.updated_at_ms:
+                    # Use value comparison as tie-breaker.
+                    # Note: value is bytes (ciphertext), so this is arbitrary but consistent.
+                    # If values are equal, no update needed.
+                    if (incoming.value or b"") > (existing.value or b""):
+                        self._update_record(incoming, existing)
+                        return True
+                        
             return False
+
+    def _update_record(self, incoming: DataRecord, existing: Optional[DataRecord] = None):
+        """Helper to apply update and manage storage limits."""
+        old_size = existing.value_size() if existing and not existing.tombstone else 0
+        self._total_bytes += incoming.value_size() - old_size
+        self.records[incoming.key] = incoming
+        self.records.move_to_end(incoming.key) 
+        if self._total_bytes > config.MAX_APP_STORAGE:
+             self._evict_lru()
 
     def get_deltas_since(self, since_ms: int) -> List[DataRecord]:
         """Return records updated after *since_ms*."""

@@ -89,6 +89,10 @@ class ClientIdentity:
     tee_wallet: str                  # Ethereum address of the instance
     signature: Optional[str] = None  # Original PoP signature (if applicable)
 
+    def __post_init__(self):
+        if self.tee_wallet:
+            self.tee_wallet = self.tee_wallet.lower()
+
 
 class _NonceStore:
     """
@@ -431,7 +435,7 @@ def recover_wallet_from_signature(message: str, signature: str) -> Optional[str]
 
         msghash = encode_defunct(text=message)
         recovered = Account.recover_message(msghash, signature=signature)
-        return recovered
+        return recovered.lower()
     except Exception as exc:
         logger.warning(f"Signature recovery failed: {exc}")
         return None

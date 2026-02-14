@@ -317,6 +317,12 @@ class PeerCache:
 
     def _update_cache(self, peers: List[dict]) -> None:
         """Update internal cache state. Fast, REQUIRES LOCK."""
+        # Enforce normalization on all stored wallet addresses
+        for p in peers:
+            if "tee_wallet_address" in p:
+                p["tee_wallet_address"] = p["tee_wallet_address"].lower()
+            if "operator" in p and p["operator"]:
+                 p["operator"] = p["operator"].lower()
         self._peers = peers
         self._last_refresh = time.time()
 
@@ -743,7 +749,7 @@ class SyncManager:
             return None
 
         # Prevent self-sync: do not send requests to ourselves.
-        if peer_wallet == self.node_wallet:
+        if peer_wallet.lower() == self.node_wallet.lower():
             logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
             return None
         
@@ -1029,7 +1035,7 @@ class SyncManager:
             return {"status": "error", "reason": "Invalid KMS signature"}
 
         # Optional explicit wallet header must match recovered signer.
-        if p_wallet and recovered.lower() != p_wallet:
+        if p_wallet and recovered.lower() != p_wallet.lower():
             logger.warning(
                 f"Peer PoP wallet mismatch | "
                 f"Header='{p_wallet}' | "
