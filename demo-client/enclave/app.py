@@ -768,7 +768,14 @@ app = FastAPI(title="Nova KMS Client", lifespan=lifespan)
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/docs")
+    return {
+        "service": "Nova KMS Client - Demo App",
+        "endpoints": [
+            {"path": "/", "method": "GET", "description": "This overview"},
+            {"path": "/health", "method": "GET", "description": "Health check"},
+            {"path": "/logs", "method": "GET", "description": "View recent KMS interaction logs (plaintext)"},
+        ]
+    }
 
 @app.get("/health")
 def health():
@@ -793,7 +800,7 @@ def get_logs():
                 f"status={e.get('status') if isinstance(e, dict) else ''} "
                 + (f"error={e.get('error')}" if isinstance(e, dict) and e.get("error") else "")
             )
-    separator = "\n" + "=" * 100 + "\n"
+    separator = "\n\n\n" + "=" * 150 + "\n\n\n"
     return separator.join(blocks) if blocks else "(no logs yet)"
 
 if __name__ == "__main__":
