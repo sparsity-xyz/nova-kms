@@ -741,8 +741,15 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     if _is_encrypted_envelope(body):
         from secure_channel import decrypt_json_envelope
         try:
+            logger.debug(
+                f"Decrypting /sync envelope from {sender_wallet}: "
+                f"nonce={body.get('nonce')}, "
+                f"sender_pubkey={body.get('sender_tee_pubkey', '')[:16]}..."
+            )
             decrypted_body = decrypt_json_envelope(_odyn, body)
+            logger.debug(f"Successfully decrypted /sync request from {sender_wallet}")
         except Exception as exc:
+            logger.warning(f"Decryption failed for /sync request from {sender_wallet}: {exc}")
             raise HTTPException(status_code=400, detail=f"Failed to decrypt request: {exc}")
     else:
         raise HTTPException(
