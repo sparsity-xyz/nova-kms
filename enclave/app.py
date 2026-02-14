@@ -144,7 +144,7 @@ def _startup_production() -> dict:
             )
             if is_active_instance:
                 if version.status == VersionStatus.DEPRECATED:
-                    logger.warning(f"KMS node version {inst.version_id} is DEPRECATED. No new nodes can be deployed.")
+                    logger.warning(f"KMS node version {inst.version_id} is DEPRECATED. It should be upgraded to a newer version.")
                 logger.info("This node is a registered ACTIVE KMS instance")
 
                 # Verify that the registered teePubkey matches our local key.
