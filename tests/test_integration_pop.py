@@ -79,7 +79,7 @@ def _setup(monkeypatch):
     # Mock encryption to pass mandatory checks
     monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
     monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
-    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk, request_was_encrypted=True: data)
+    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk: data)
     
     # Force service availability
     monkeypatch.setattr(routes, "_service_available", True)

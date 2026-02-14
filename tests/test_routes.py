@@ -80,7 +80,7 @@ def _setup_routes(monkeypatch):
     # 5. Mock routes encryption helpers AFTER reload
     monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
     monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
-    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk, request_was_encrypted=True: data)
+    monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk: data)
     
     # Patch logger to see errors
     logger_mock = MagicMock()
