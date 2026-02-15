@@ -2,53 +2,17 @@
 pragma solidity ^0.8.33;
 
 import {INovaAppInterface} from "./interfaces/INovaAppInterface.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
-
-// Minimal interface to query required NovaAppRegistry views.
-interface INovaAppRegistryView {
-    function getInstanceByWallet(address wallet)
-        external
-        view
-        returns (
-            uint256 id,
-            uint256 appId,
-            uint256 versionId,
-            address operator,
-            string memory instanceUrl,
-            bytes memory teePubkey,
-            address teeWalletAddress,
-            bool zkVerified,
-            uint8 status,
-            uint256 registeredAt
-        );
-
-    function getVersion(uint256 appId, uint256 versionId)
-        external
-        view
-        returns (
-            uint256 id,
-            string memory versionName,
-            bytes32 codeMeasurement,
-            string memory imageUri,
-            string memory auditUrl,
-            string memory auditHash,
-            string memory githubRunId,
-            uint8 status,
-            uint256 enrolledAt,
-            address enrolledBy
-        );
-}
+import {INovaAppRegistryView} from "./interfaces/INovaAppRegistryView.sol";
 
 /**
  * @title KMSRegistry
  * @notice On-chain operator list for KMS nodes, implementing INovaAppInterface.
- * @dev UUPS Upgradeable version. Managed by NovaAppRegistry callbacks.
+ * @dev Non-upgradeable version. Managed by NovaAppRegistry callbacks.
  */
-contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeable, UUPSUpgradeable {
+contract KMSRegistry is INovaAppInterface {
     // ========== State Variables ==========
 
+    address public immutable OWNER;
     address private _novaAppRegistryAddr;
     uint256 public kmsAppId;
 
@@ -56,18 +20,24 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     ///         0x0 means unset (not yet initialized or reset by owner).
     bytes32 public masterSecretHash;
 
+    struct OperatorInfo {
+        bool exists;
+        uint96 index;
+    }
+
     /// @notice Operator set – managed by addOperator / removeOperator callbacks
-    mapping(address => bool) private _operators;
+    mapping(address => OperatorInfo) private _operatorData;
     address[] private _operatorList;
-    mapping(address => uint256) private _operatorIndex;
 
     // ========== Errors ==========
 
+    error NotOwner();
     error OnlyNovaAppRegistry();
     error InvalidRegistryAddress();
     error AppIdMismatch();
     error MasterSecretHashAlreadySet();
     error NotAuthorizedToSetHash();
+    error AppIdAlreadySet();
 
     // ========== Events ==========
 
@@ -75,10 +45,29 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     event KmsAppIdSet(uint256 indexed appId);
     event MasterSecretHashSet(bytes32 indexed hash, address indexed setter);
     event MasterSecretHashReset(address indexed resetter);
-    event OperatorAdded(address indexed operator, uint256 indexed appId, uint256 versionId, uint256 instanceId);
-    event OperatorRemoved(address indexed operator, uint256 indexed appId, uint256 versionId, uint256 instanceId);
+    event OperatorAdded(
+        address indexed operator,
+        uint256 indexed appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
+    event OperatorRemoved(
+        address indexed operator,
+        uint256 indexed appId,
+        uint256 versionId,
+        uint256 instanceId
+    );
 
     // ========== Modifiers ==========
+
+    modifier onlyOwner() {
+        _checkOwner();
+        _;
+    }
+
+    function _checkOwner() internal view {
+        if (msg.sender != OWNER) revert NotOwner();
+    }
 
     modifier onlyNovaAppRegistryMod() {
         _checkOnlyNovaAppRegistry();
@@ -89,23 +78,13 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
         if (msg.sender != _novaAppRegistryAddr) revert OnlyNovaAppRegistry();
     }
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
+    // ========== Constructor ==========
 
-    // ========== Initializer ==========
-
-    function initialize(address initialOwner, address appRegistry_) public initializer {
-        __Ownable_init(initialOwner);
-
+    constructor(address initialOwner, address appRegistry_) {
         if (appRegistry_ == address(0)) revert InvalidRegistryAddress();
+        OWNER = initialOwner;
         _novaAppRegistryAddr = appRegistry_;
     }
-
-    // ========== Upgrade Authorization ==========
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     // ========== INovaAppInterface Implementation ==========
 
@@ -122,10 +101,11 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     }
 
     /**
-     * @notice Updates the KMS App ID.
+     * @notice Updates the KMS App ID. Can only be set once.
      * @param newAppId The new application ID assigned by Nova.
      */
     function setKmsAppId(uint256 newAppId) external onlyOwner {
+        if (kmsAppId != 0) revert AppIdAlreadySet();
         kmsAppId = newAppId;
         emit KmsAppIdSet(newAppId);
     }
@@ -155,20 +135,24 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     }
 
     /// @inheritdoc INovaAppInterface
-    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId)
-        external
-        onlyNovaAppRegistryMod
-    {
+    function addOperator(
+        address teeWalletAddress,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    ) external onlyNovaAppRegistryMod {
         if (appId != kmsAppId) revert AppIdMismatch();
         _addOperatorInternal(teeWalletAddress);
         emit OperatorAdded(teeWalletAddress, appId, versionId, instanceId);
     }
 
     /// @inheritdoc INovaAppInterface
-    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId)
-        external
-        onlyNovaAppRegistryMod
-    {
+    function removeOperator(
+        address teeWalletAddress,
+        uint256 appId,
+        uint256 versionId,
+        uint256 instanceId
+    ) external onlyNovaAppRegistryMod {
         if (appId != kmsAppId) revert AppIdMismatch();
         _removeOperatorInternal(teeWalletAddress);
         emit OperatorRemoved(teeWalletAddress, appId, versionId, instanceId);
@@ -177,7 +161,7 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
     // ========== Operator View Functions ==========
 
     function isOperator(address account) public view returns (bool) {
-        return _operators[account];
+        return _operatorData[account].exists;
     }
 
     function operatorCount() public view returns (uint256) {
@@ -195,79 +179,66 @@ contract KMSRegistry is INovaAppInterface, Initializable, Ownable2StepUpgradeabl
 
     // ========== NovaAppRegistry Validation ==========
 
-    // VersionStatus.ENROLLED == 0, InstanceStatus.ACTIVE == 0 (per NovaAppRegistry enums)
-    uint8 private constant _VERSION_STATUS_ENROLLED = 0;
-    uint8 private constant _INSTANCE_STATUS_ACTIVE = 0;
+    function _isEligibleHashSetter(
+        address sender
+    ) internal view returns (bool) {
+        if (_novaAppRegistryAddr == address(0) || kmsAppId == 0) return false;
 
-    bytes4 private constant _SEL_GET_INSTANCE_BY_WALLET = bytes4(keccak256("getInstanceByWallet(address)"));
-    bytes4 private constant _SEL_GET_VERSION = bytes4(keccak256("getVersion(uint256,uint256)"));
+        INovaAppRegistryView registry = INovaAppRegistryView(
+            _novaAppRegistryAddr
+        );
 
-    function _loadWord(bytes memory data, uint256 index) private pure returns (uint256 v) {
-        assembly {
-            v := mload(add(data, add(32, mul(index, 32))))
+        // Standard interface call (struct return avoids stack-too-deep)
+        try registry.getInstanceByWallet(sender) returns (
+            INovaAppRegistryView.RuntimeInstance memory inst
+        ) {
+            if (
+                inst.teeWalletAddress != sender ||
+                inst.appId != kmsAppId ||
+                inst.status != INovaAppRegistryView.InstanceStatus.ACTIVE
+            ) return false;
+
+            // Standard interface call for version status
+            try registry.getVersion(inst.appId, inst.versionId) returns (
+                INovaAppRegistryView.AppVersion memory ver
+            ) {
+                return
+                    ver.status == INovaAppRegistryView.VersionStatus.ENROLLED;
+            } catch {
+                return false;
+            }
+        } catch {
+            return false;
         }
-    }
-
-    function _isEligibleHashSetter(address sender) internal view returns (bool) {
-        if (_novaAppRegistryAddr == address(0)) return false;
-        if (kmsAppId == 0) return false;
-
-        // getInstanceByWallet(address) returns a struct-wrapped tuple (word[0]=0x20 offset).
-        // We only need:
-        //   word[2] appId
-        //   word[3] versionId
-        //   word[7] teeWalletAddress
-        //   word[9] instanceStatus
-        (bool ok1, bytes memory instRet) =
-            _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_INSTANCE_BY_WALLET, sender));
-        if (!ok1 || instRet.length < 32 * 11) return false;
-
-        uint256 appId = _loadWord(instRet, 2);
-        uint256 versionId = _loadWord(instRet, 3);
-        address teeWallet = address(uint160(_loadWord(instRet, 7)));
-        uint8 instanceStatus = uint8(_loadWord(instRet, 9));
-
-        if (teeWallet != sender) return false;
-        if (appId != kmsAppId) return false;
-        if (instanceStatus != _INSTANCE_STATUS_ACTIVE) return false;
-
-        // getVersion(appId, versionId) struct-wrapped; version status at word[8].
-        (bool ok2, bytes memory verRet) =
-            _novaAppRegistryAddr.staticcall(abi.encodeWithSelector(_SEL_GET_VERSION, appId, versionId));
-        if (!ok2 || verRet.length < 32 * 11) return false;
-
-        uint8 versionStatus = uint8(_loadWord(verRet, 8));
-        return versionStatus == _VERSION_STATUS_ENROLLED;
     }
 
     // ========== Internal Functions ==========
 
     function _addOperatorInternal(address operator) internal {
-        if (_operators[operator]) return;
-        _operators[operator] = true;
-        _operatorIndex[operator] = _operatorList.length;
+        if (_operatorData[operator].exists) return;
+        // casting to 'uint96' is safe because operator count will not exceed 2^96
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint96 index = uint96(_operatorList.length);
+        _operatorData[operator] = OperatorInfo({exists: true, index: index});
         _operatorList.push(operator);
     }
 
     function _removeOperatorInternal(address operator) internal {
-        if (!_operators[operator]) return;
+        OperatorInfo storage info = _operatorData[operator];
+        if (!info.exists) return;
 
-        uint256 index = _operatorIndex[operator];
+        uint256 index = info.index;
         uint256 lastIndex = _operatorList.length - 1;
 
         if (index != lastIndex) {
             address lastOperator = _operatorList[lastIndex];
             _operatorList[index] = lastOperator;
-            _operatorIndex[lastOperator] = index;
+            // casting to 'uint96' is safe because index is derived from array length
+            // forge-lint: disable-next-line(unsafe-typecast)
+            _operatorData[lastOperator].index = uint96(index);
         }
 
         _operatorList.pop();
-        delete _operatorIndex[operator];
-        delete _operators[operator];
+        delete _operatorData[operator];
     }
-
-    /**
-     * @dev Reserved storage space to allow for layout changes in the future.
-     */
-    uint256[44] private _gap;
 }

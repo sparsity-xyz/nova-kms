@@ -504,12 +504,12 @@ def list_operators():
 # =============================================================================
 
 @router.post("/kms/derive")
-def derive_key(request: Request, response: Response, body: dict = None):
+async def derive_key(request: Request, response: Response, body: dict = None):
     """Derive a deterministic key for the requesting app (E2E encrypted)."""
     import json
     # Parse body manually to work with the encrypted request envelope (no plaintext fallback)
     if body is None:
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
@@ -601,10 +601,10 @@ def list_keys(request: Request, response: Response):
 
 
 @router.put("/kms/data")
-def put_data(request: Request, response: Response, body: dict = None):
+async def put_data(request: Request, response: Response, body: dict = None):
     """Write a key-value pair to the app's KV namespace (E2E encrypted)."""
     if body is None:
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
@@ -648,10 +648,10 @@ def put_data(request: Request, response: Response, body: dict = None):
 
 
 @router.delete("/kms/data")
-def delete_data(request: Request, response: Response, body: dict = None):
+async def delete_data(request: Request, response: Response, body: dict = None):
     """Delete a key from the app's KV namespace (E2E encrypted)."""
     if body is None:
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
     auth_info = _authorize_app(request)
     app_id = auth_info["app_id"]
@@ -679,7 +679,7 @@ def delete_data(request: Request, response: Response, body: dict = None):
 # =============================================================================
 
 @router.post("/sync")
-def sync_endpoint(request: Request, response: Response, body: dict = None):
+async def sync_endpoint(request: Request, response: Response, body: dict = None):
     """
     Handle incoming sync from a KMS peer.
     Verified via lightweight Proof-of-Possession (PoP) signatures as described
@@ -689,7 +689,7 @@ def sync_endpoint(request: Request, response: Response, body: dict = None):
     Response is E2E encrypted using the sender's teePubkey.
     """
     if body is None:
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
 
     if not _sync_manager:
         raise HTTPException(status_code=503, detail="Sync manager not available")

@@ -85,14 +85,14 @@ NOVA_APP_REGISTRY_ADDRESS: str = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"
 # 2. Stores the Master Secret Hash (commit on chain for consistency).
 #
 # Used in: kms_registry.py (client), app.py (bootstrap checks)
-KMS_REGISTRY_ADDRESS: str = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
+KMS_REGISTRY_ADDRESS: str = "0x6a28D24c9AEcdceC9B021ee6960FdDE592796af7"
 
 # KMS_APP_ID:
 # The unique Integer ID assigned to the KMS application within the Nova ecosystem.
 # Used to identify "us" (KMS peers) versus "clients" (other apps).
 #
 # Used in: app.py (identity check), sync_manager.py (peer discovery)
-KMS_APP_ID: int = 43
+KMS_APP_ID: int = 49
 
 # =============================================================================
 # Security & Authentication
@@ -243,4 +243,12 @@ PEER_CACHE_TTL_SECONDS: int = 180
 #
 # Used in: nova_registry.py (CachedNovaRegistry default TTL)
 REGISTRY_CACHE_TTL_SECONDS: int = 180
+
+
+# PEER_BLACKLIST_DURATION_SECONDS:
+# The duration for which a peer is temporarily ignored if it fails verification
+# (e.g. invalid teePubkey). Prevents continuous probing of known-bad hosts.
+#
+# Used in: sync_manager.py (PeerCache.blacklist_peer)
+PEER_BLACKLIST_DURATION_SECONDS: int = 600
 

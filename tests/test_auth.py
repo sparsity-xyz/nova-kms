@@ -115,7 +115,7 @@ class TestIdentityFromHeaders:
     def test_basic(self):
         with patch("auth.config.IN_ENCLAVE", False):
             att = identity_from_headers({"x-tee-wallet": "0xABCD"})
-            assert att.tee_wallet == "0xABCD"
+            assert att.tee_wallet == "0xabcd"
 
     def test_missing_headers(self):
         with patch("auth.config.IN_ENCLAVE", False):
@@ -450,7 +450,7 @@ class TestAuthenticateApp:
             req = MagicMock()
             headers = {"x-tee-wallet": "0xDEV"}
             result = authenticate_app(req, headers)
-            assert result.tee_wallet == "0xDEV"
+            assert result.tee_wallet == "0xdev"
 
     def test_production_mode_requires_pop(self):
         with patch("auth.config.IN_ENCLAVE", True):

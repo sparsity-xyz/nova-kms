@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -129,7 +130,7 @@ class _Namespace:
 
     def __init__(self, app_id: int, key_callback=None):
         self.app_id = app_id
-        self.records: Dict[str, DataRecord] = {}
+        self.records: OrderedDict[str, DataRecord] = OrderedDict()
         self._lock = threading.Lock()
         self._total_bytes = 0
         self._key_callback = key_callback
@@ -148,51 +149,58 @@ class _Namespace:
         return None
 
     def _encrypt(self, value: bytes) -> bytes:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        import os
+        from kdf import encrypt_data
         key = self._get_key()
         if not key:
             raise DataKeyUnavailableError(f"Encryption key unavailable for app {self.app_id}")
-        aesgcm = AESGCM(key)
-        nonce = os.urandom(12)
-        return nonce + aesgcm.encrypt(nonce, value, None)
+        return encrypt_data(value, key)
 
-    def _decrypt(self, ciphertext: bytes) -> Optional[bytes]:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        if not ciphertext:
-            return None
+    def _decrypt(self, ciphertext: bytes) -> bytes:
+        from kdf import decrypt_data
         key = self._get_key()
         if not key:
             raise DataKeyUnavailableError(f"Decryption key unavailable for app {self.app_id}")
         try:
-            aesgcm = AESGCM(key)
-            nonce = ciphertext[:12]
-            return aesgcm.decrypt(nonce, ciphertext[12:], None)
+            return decrypt_data(ciphertext, key)
         except Exception as exc:
             logger.error(f"Decryption failed for app {self.app_id}: {exc}")
             raise DecryptionError(f"Decryption failed for app {self.app_id}") from exc
 
     def get(self, key: str) -> Optional[DataRecord]:
         with self._lock:
-            rec = self.records.get(key)
-            if rec is None:
-                return None
-            if rec.tombstone or rec.is_expired:
+            req = self.records.get(key)
+            if not req:
                 return None
             
-            # Decrypt value for the caller.
-            # Low fix: propagate DecryptionError instead of silently returning
-            # None, so callers (API layer) can distinguish "key not found" from
-            # "data corrupted / key unavailable" and respond appropriately.
-            decrypted_value = self._decrypt(rec.value) if rec.value else None
-            return DataRecord(
-                key=rec.key,
-                value=decrypted_value,
-                version=rec.version,
-                updated_at_ms=rec.updated_at_ms,
-                tombstone=rec.tombstone,
-                ttl_ms=rec.ttl_ms
-            )
+            # Update LRU: move to end
+            self.records.move_to_end(key)
+
+            if req.is_expired or req.tombstone:
+                return None
+            
+            try:
+                # 3. Decrypt on-the-fly
+                # Return a copy with decrypted value so we don't store plaintext in memory
+                
+                # H2 fix: Guard against malformed records (non-tombstone with null value)
+                if req.value is None:
+                    logger.warning(f"Malformed record for {self.app_id}:{key}: non-tombstone has no value")
+                    raise DecryptionError(f"Malformed record: null value for live key")
+
+                decrypted_val = self._decrypt(req.value)
+                return DataRecord(
+                    key=req.key,
+                    value=decrypted_val,
+                    version=req.version,
+                    updated_at_ms=req.updated_at_ms,
+                    tombstone=req.tombstone,
+                    ttl_ms=req.ttl_ms
+                )
+            except DecryptionError:
+                raise
+            except Exception as exc:
+                logger.error(f"Failed to decrypt record for {self.app_id}:{key}: {exc}")
+                raise DecryptionError(str(exc))
 
     def put(
         self,
@@ -212,10 +220,7 @@ class _Namespace:
             encrypted_value = self._encrypt(value)
             new_size = len(encrypted_value)
             old_size = old.value_size() if old and not old.tombstone else 0
-            projected = self._total_bytes - old_size + new_size
-            if projected > config.MAX_APP_STORAGE:
-                self._evict_lru(projected - config.MAX_APP_STORAGE)
-
+            
             rec = DataRecord(
                 key=key,
                 value=encrypted_value,
@@ -224,8 +229,7 @@ class _Namespace:
                 tombstone=False,
                 ttl_ms=ttl_ms if ttl_ms else config.DEFAULT_TTL_MS,
             )
-            self._total_bytes += new_size - old_size
-            self.records[key] = rec
+            self._update_record(rec, old)
             
             # Return record with original plaintext value
             return DataRecord(
@@ -254,6 +258,7 @@ class _Namespace:
             )
             self._total_bytes -= old.value_size() if not old.tombstone else 0
             self.records[key] = rec
+            self.records.move_to_end(key) # Mark as recently used
             return rec
 
     def keys(self) -> List[str]:
@@ -263,7 +268,7 @@ class _Namespace:
                 if not r.tombstone and not r.is_expired
             ]
 
-    def merge_record(self, incoming: DataRecord) -> bool:
+    def merge_record(self, incoming: DataRecord, evict: bool = True) -> bool:
         """
         Merge an incoming record (from sync).  Returns True if the local
         store was updated.
@@ -324,22 +329,43 @@ class _Namespace:
             if existing is None:
                 self.records[incoming.key] = incoming
                 self._total_bytes += incoming.value_size()
+                self.records.move_to_end(incoming.key) # Mark as recently used
+                if evict and self._total_bytes > config.MAX_APP_STORAGE:
+                    self._evict_lru()
                 return True
 
             # If incoming happened-after existing, accept
             if existing.version.happened_before(incoming.version):
-                self._total_bytes += incoming.value_size() - existing.value_size()
-                self.records[incoming.key] = incoming
+                self._update_record(incoming, existing)
                 return True
 
             # Concurrent → LWW
             if existing.version.is_concurrent(incoming.version):
+                # 1. Higher timestamp wins
                 if incoming.updated_at_ms > existing.updated_at_ms:
-                    self._total_bytes += incoming.value_size() - existing.value_size()
-                    self.records[incoming.key] = incoming
+                    self._update_record(incoming, existing)
                     return True
-
+                
+                # 2. Equal timestamp: deterministic tie-break (e.g. higher value wins)
+                # This ensures convergence even if clocks are identical.
+                if incoming.updated_at_ms == existing.updated_at_ms:
+                    # Use value comparison as tie-breaker.
+                    # Note: value is bytes (ciphertext), so this is arbitrary but consistent.
+                    # If values are equal, no update needed.
+                    if (incoming.value or b"") > (existing.value or b""):
+                        self._update_record(incoming, existing)
+                        return True
+                        
             return False
+
+    def _update_record(self, incoming: DataRecord, existing: Optional[DataRecord] = None):
+        """Helper to apply update and manage storage limits."""
+        old_size = existing.value_size() if existing and not existing.tombstone else 0
+        self._total_bytes += incoming.value_size() - old_size
+        self.records[incoming.key] = incoming
+        self.records.move_to_end(incoming.key) 
+        if self._total_bytes > config.MAX_APP_STORAGE:
+             self._evict_lru()
 
     def get_deltas_since(self, since_ms: int) -> List[DataRecord]:
         """Return records updated after *since_ms*."""
@@ -356,21 +382,29 @@ class _Namespace:
 
     # ------------------------------------------------------------------
 
-    def _evict_lru(self, bytes_to_free: int) -> None:
-        """Evict oldest (by updated_at_ms) non-tombstone records until quota is met."""
-        freed = 0
-        candidates = sorted(
-            ((k, r) for k, r in self.records.items() if not r.tombstone),
-            key=lambda x: x[1].updated_at_ms,
-        )
-        for key, rec in candidates:
-            old_size = rec.value_size()  # capture size BEFORE clearing
-            rec.tombstone = True
-            rec.value = None
-            self._total_bytes -= old_size
-            freed += old_size
-            if freed >= bytes_to_free:
+    def _evict_lru(self, limit: Optional[int] = None) -> None:
+        """Evict oldest entries if storage limit exceeded (step 4.2). $O(1)$ with OrderedDict."""
+        if limit is None:
+            from config import MAX_APP_STORAGE
+            limit = int(MAX_APP_STORAGE or 10_485_760)
+
+        # OrderedDict stores items in insertion order. 
+        # move_to_end() ensures recently accessed/updated items are at the end.
+        # Thus the first items in the dict are the oldest.
+        # Thus the first items in the dict are the oldest.
+        # H2 fix: Skip tombstones during eviction to prevent "resurrection" during sync.
+        # We only evict live records that contribute to _total_bytes.
+        keys_to_evict = []
+        for key, record in self.records.items():
+            if self._total_bytes <= limit:
                 break
+            if not record.tombstone:
+                keys_to_evict.append(key)
+                self._total_bytes -= record.value_size()
+        
+        for key in keys_to_evict:
+            del self.records[key]
+            logger.debug(f"LRU Evicted {self.app_id}:{key}")
 
 
 # =============================================================================
@@ -415,12 +449,12 @@ class DataStore:
     # Sync
     # ------------------------------------------------------------------
 
-    def merge_record(self, app_id: int, record: DataRecord) -> bool:
+    def merge_record(self, app_id: int, record: DataRecord, evict: bool = True) -> bool:
         """
         Merge a record from a peer. Note that record.value is already 
         encrypted if coming from a peer with the same master secret.
         """
-        return self._ns(app_id).merge_record(record)
+        return self._ns(app_id).merge_record(record, evict=evict)
 
     def get_deltas_since(self, since_ms: int) -> Dict[int, List[DataRecord]]:
         """
@@ -450,10 +484,15 @@ class DataStore:
         merged = 0
         for app_id_str, records in snapshot.items():
             app_id = int(app_id_str)
+            ns = self._ns(app_id)
             for rec_dict in records:
                 rec = DataRecord.from_dict(rec_dict)
-                if self.merge_record(app_id, rec):
+                if ns.merge_record(rec, evict=False):
                     merged += 1
+            # Evict once after merging all records for this namespace
+            # H2 fix: Ensure eviction is thread-safe (acquire ns._lock)
+            with ns._lock:
+                ns._evict_lru()
         return merged
 
     # ------------------------------------------------------------------

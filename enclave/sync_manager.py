@@ -104,8 +104,10 @@ class PeerCache:
         self._nova_registry = nova_registry
         self._peers: List[dict] = []
         self._last_refresh: float = 0
+        self._blacklist: Dict[str, float] = {}  # wallet -> expiry_ts
         self._lock = threading.Lock()
-        self._refresh_lock = threading.Lock()
+        self._refresh_lock = threading.RLock()
+        self._is_refreshing: bool = False
 
     @property
     def kms_registry(self):
@@ -121,14 +123,29 @@ class PeerCache:
             self._nova_registry = NovaRegistry()
         return self._nova_registry
 
-    def refresh(self) -> None:
+    def refresh(self, skip_if_refreshing: bool = False) -> bool:
         """
         Force a refresh of the peer cache from on-chain data.
         
         Optimized to avoid holding the lock during slow network calls.
         1. Fetch data from chain (slow, no lock).
         2. Update cache (fast, with lock).
+        
+        Args:
+            skip_if_refreshing: If True, returns immediately if another thread is already refreshing.
+            
+        Returns:
+            True if a refresh was performed, False otherwise.
         """
+        if skip_if_refreshing:
+            with self._refresh_lock:
+                if self._is_refreshing:
+                    return False
+                self._is_refreshing = True
+        else:
+            with self._refresh_lock:
+                self._is_refreshing = True
+
         try:
             # 1. Fetch from chain (slow IO, no lock)
             new_peers = self._fetch_peers_from_chain()
@@ -136,11 +153,15 @@ class PeerCache:
             # 2. Update cache (fast, exclusive lock)
             with self._lock:
                 self._update_cache(new_peers)
+                self._is_refreshing = False
             
             logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
-                
+            return True
         except Exception as exc:
             logger.warning(f"Failed to refresh peer cache: {exc}")
+            with self._lock:
+                self._is_refreshing = False
+            return False
 
     def remove_peer(self, wallet: str) -> None:
         """Remove a peer from the cache by wallet address (step 4.3)."""
@@ -148,6 +169,29 @@ class PeerCache:
         with self._lock:
             self._peers = [p for p in self._peers if p["tee_wallet_address"].lower() != lower]
             logger.info(f"Removed peer {wallet} from cache")
+
+    def blacklist_peer(self, wallet: str, duration: Optional[int] = None) -> None:
+        """Temporarily blacklist a peer by wallet address."""
+        from config import PEER_BLACKLIST_DURATION_SECONDS
+        if duration is None:
+            duration = PEER_BLACKLIST_DURATION_SECONDS
+            
+        lower = wallet.lower()
+        expiry = time.time() + duration
+        with self._lock:
+            self._blacklist[lower] = expiry
+            # Also remove from active list immediately
+            self._peers = [p for p in self._peers if p["tee_wallet_address"].lower() != lower]
+            logger.info(f"Blacklisted peer {wallet} for {duration}s")
+
+    def _purge_blacklist(self) -> None:
+        """Remove expired entries from the blacklist. REQUIRES LOCK."""
+        now = time.time()
+        expired = [w for w, exp in self._blacklist.items() if exp < now]
+        for w in expired:
+            del self._blacklist[w]
+        if expired:
+            logger.debug(f"Purged {len(expired)} expired entries from peer blacklist")
 
     def _is_stale(self) -> bool:
         """Check if the cache needs refreshing."""
@@ -167,14 +211,20 @@ class PeerCache:
         # Optimized: Check staleness with a read lock (or just access atomic float)
         # If stale and refresh_if_stale is True, perform refresh efficiently.
         if refresh_if_stale and self._is_stale():
-            # Double check locking pattern to prevent multiple threads 
-            # from hitting the chain simultaneously for the same refresh.
-            with self._refresh_lock:
-                if self._is_stale():
-                    self.refresh()
+            # Optimization: Try to acquire the refresh lock without blocking.
+            # If we fail, it means someone else is already refreshing, so 
+            # we just return the stale data to avoid thread starvation.
+            if self._refresh_lock.acquire(blocking=False):
+                try:
+                    # Double check staleness under lock
+                    if self._is_stale():
+                        self.refresh(skip_if_refreshing=False)
+                finally:
+                    self._refresh_lock.release()
 
         with self._lock:
-            peers = list(self._peers)
+            self._purge_blacklist()
+            peers = [p for p in self._peers if p["tee_wallet_address"].lower() not in self._blacklist]
 
         if exclude_wallet:
             exclude = exclude_wallet.lower()
@@ -267,6 +317,12 @@ class PeerCache:
 
     def _update_cache(self, peers: List[dict]) -> None:
         """Update internal cache state. Fast, REQUIRES LOCK."""
+        # Enforce normalization on all stored wallet addresses
+        for p in peers:
+            if "tee_wallet_address" in p:
+                p["tee_wallet_address"] = p["tee_wallet_address"].lower()
+            if "operator" in p and p["operator"]:
+                 p["operator"] = p["operator"].lower()
         self._peers = peers
         self._last_refresh = time.time()
 
@@ -374,9 +430,9 @@ class SyncManager:
                 logger.warning(f"NovaAppRegistry check failed for {peer_wallet}: {exc}")
 
             if not is_valid:
-                # 4.3 Remove invalid peer from cache
-                logger.warning(f"Peer {peer_wallet} is not a valid KMS instance — removing")
-                self.peer_cache.remove_peer(peer_wallet)
+                # 4.3 Blacklist invalid peer
+                logger.warning(f"Peer {peer_wallet} is not a valid KMS instance — blacklisting")
+                self.peer_cache.blacklist_peer(peer_wallet)
                 continue
 
             # 4.3 Peer is verified
@@ -681,8 +737,9 @@ class SyncManager:
         if not verify_peer_identity(peer_wallet, self.peer_cache.nova_registry):
             logger.warning(
                 f"Refusing sync request to {url}: peer {peer_wallet} failed "
-                "teePubkey verification"
+                "teePubkey verification — blacklisting"
             )
+            self.peer_cache.blacklist_peer(peer_wallet)
             return None
 
         # Get peer's teePubkey for E2E encryption
@@ -692,7 +749,7 @@ class SyncManager:
             return None
 
         # Prevent self-sync: do not send requests to ourselves.
-        if peer_wallet == self.node_wallet:
+        if peer_wallet.lower() == self.node_wallet.lower():
             logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
             return None
         
@@ -978,7 +1035,7 @@ class SyncManager:
             return {"status": "error", "reason": "Invalid KMS signature"}
 
         # Optional explicit wallet header must match recovered signer.
-        if p_wallet and recovered.lower() != p_wallet:
+        if p_wallet and recovered.lower() != p_wallet.lower():
             logger.warning(
                 f"Peer PoP wallet mismatch | "
                 f"Header='{p_wallet}' | "

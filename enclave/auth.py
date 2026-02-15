@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional, Dict
 
@@ -87,6 +89,10 @@ class ClientIdentity:
     tee_wallet: str                  # Ethereum address of the instance
     signature: Optional[str] = None  # Original PoP signature (if applicable)
 
+    def __post_init__(self):
+        if self.tee_wallet:
+            self.tee_wallet = self.tee_wallet.lower()
+
 
 class _NonceStore:
     """
@@ -98,57 +104,70 @@ class _NonceStore:
     """
 
     def __init__(self, ttl_seconds: int = 120, max_nonces: int = 4096):
-        from collections import OrderedDict
-
         self._ttl = ttl_seconds
         self._max_nonces = max(1, int(max_nonces))
         self._nonces: "OrderedDict[bytes, float]" = OrderedDict()
+        self._lock = threading.Lock()
 
     def issue(self) -> bytes:
         import os
-        import time
 
         # Best-effort cleanup first.
         nonce = os.urandom(16)
         now = time.time()
 
-        if len(self._nonces) >= self._max_nonces:
-            self._purge(now=now)
-        # Still full: evict the oldest nonce (FIFO) to keep memory bounded.
-        if len(self._nonces) >= self._max_nonces:
-            self._nonces.popitem(last=False)
+        with self._lock:
+            if len(self._nonces) >= self._max_nonces:
+                self._purge(now=now)
+            # Still full: evict the oldest nonce (FIFO) to keep memory bounded.
+            if len(self._nonces) >= self._max_nonces:
+                self._nonces.popitem(last=False)
 
-        self._nonces[nonce] = now + self._ttl
+            self._nonces[nonce] = now + self._ttl
         return nonce
 
     def validate_and_consume(self, nonce: Optional[bytes]) -> bool:
-        import time
-
         if not nonce:
             return False
         now = time.time()
-        # Fast path
-        exp = self._nonces.pop(nonce, None)
-        if exp is None:
-            return False
-        if exp < now:
-            return False
-        # Periodic cleanup of expired entries to keep memory bounded.
-        # Low fix: run cleanup on every validate call (not just on issuance)
-        # to prevent unbounded growth from external replay attempts.
-        if len(self._nonces) > 256:
-            self._purge(now=now)
+        
+        with self._lock:
+            # Fast path
+            exp = self._nonces.pop(nonce, None)
+            if exp is None:
+                return False
+            if exp < now:
+                return False
+            # Periodic cleanup of expired entries to keep memory bounded.
+            # Low fix: run cleanup on every validate call (not just on issuance)
+            # to prevent unbounded growth from external replay attempts.
+            if len(self._nonces) > 256:
+                self._purge(now=now)
         return True
 
     def _purge(self, now: Optional[float] = None) -> None:
-        import time
-
+        """Remove expired nonces. $O(M)$ where M is number of expired nonces.
+        
+        Assumes lock is held by caller.
+        """
         if now is None:
             now = time.time()
-        # Preserve insertion order for FIFO eviction.
-        for n in list(self._nonces.keys()):
-            if self._nonces.get(n, 0) < now:
-                self._nonces.pop(n, None)
+        
+        # Since OrderedDict preserves insertion order, and we always append
+        # fresh nonces to the end, the oldest entries are at the beginning.
+        to_remove = []
+        for n, expiry in self._nonces.items():
+            if expiry < now:
+                to_remove.append(n)
+            else:
+                # First non-expired nonce found; all subsequent ones are also fresh.
+                break
+        
+        for n in to_remove:
+            self._nonces.pop(n, None)
+            
+        if to_remove:
+            logger.debug(f"Purged {len(to_remove)} expired nonces")
 
 
 _nonce_store = _NonceStore(
@@ -416,7 +435,7 @@ def recover_wallet_from_signature(message: str, signature: str) -> Optional[str]
 
         msghash = encode_defunct(text=message)
         recovered = Account.recover_message(msghash, signature=signature)
-        return recovered
+        return recovered.lower()
     except Exception as exc:
         logger.warning(f"Signature recovery failed: {exc}")
         return None

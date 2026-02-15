@@ -68,7 +68,7 @@ def _setup_routes(monkeypatch):
     # 2. Mock config
     import config
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
-    monkeypatch.setattr(config, "KMS_APP_ID", 43)
+    monkeypatch.setattr(config, "KMS_APP_ID", 49)
     
     # 3. Reload routes to reset state
     import routes
@@ -140,7 +140,7 @@ def _setup_routes(monkeypatch):
 
     @dataclass
     class _FakeApp:
-        app_id: int = 43
+        app_id: int = 49
         latest_version_id: int = 1
         status: object = AppStatus.ACTIVE
 
@@ -152,7 +152,7 @@ def _setup_routes(monkeypatch):
     @dataclass
     class _FakeInstance:
         instance_id: int = 0
-        app_id: int = 43
+        app_id: int = 49
         version_id: int = 1
         operator: str = ""
         instance_url: str = ""
@@ -178,7 +178,7 @@ def _setup_routes(monkeypatch):
         _next_instance_id[0] += 1
         return _FakeInstance(
             instance_id=_next_instance_id[0],
-            app_id=43,
+            app_id=49,
             version_id=1,
             tee_wallet_address=w,
             status=InstanceStatus.ACTIVE,
@@ -217,7 +217,7 @@ def _setup_routes(monkeypatch):
             "tee_wallet": "0xTestNode",
             "node_url": "https://test.kms.example.com",
             "is_operator": True,
-            "kms_app_id": 43,
+            "kms_app_id": 49,
             "kms_registry_address": "0xREG",
         },
     )

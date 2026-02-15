@@ -3,12 +3,9 @@ pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
 import {KMSRegistry} from "../src/KMSRegistry.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract KMSRegistryTest is Test {
-    KMSRegistry public implementation;
-    KMSRegistry public registry; // This will be the proxy cast to KMSRegistry
+    KMSRegistry public registry;
 
     address public mockAppRegistry = address(0xABCD);
     address public admin = address(0xAD);
@@ -20,15 +17,7 @@ contract KMSRegistryTest is Test {
     uint256 public constant KMS_APP_ID = 42;
 
     function setUp() public {
-        // 1. Deploy Implementation
-        implementation = new KMSRegistry();
-
-        // 2. Deploy Proxy and Initialize
-        bytes memory initData = abi.encodeCall(KMSRegistry.initialize, (admin, mockAppRegistry));
-        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
-
-        // 3. Cast Proxy and set App ID
-        registry = KMSRegistry(address(proxy));
+        registry = new KMSRegistry(admin, mockAppRegistry);
         vm.prank(admin);
         registry.setKmsAppId(KMS_APP_ID);
     }
@@ -42,16 +31,11 @@ contract KMSRegistryTest is Test {
 
     // ========== Initialization Tests ==========
 
-    function test_initialize_setsState() public view {
+    function test_constructor_setsState() public view {
         assertEq(registry.novaAppRegistry(), mockAppRegistry);
         assertEq(registry.kmsAppId(), KMS_APP_ID);
-        assertEq(registry.owner(), admin);
+        assertEq(registry.OWNER(), admin);
         assertEq(registry.operatorCount(), 0);
-    }
-
-    function test_initialize_revert_alreadyInitialized() public {
-        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
-        registry.initialize(admin, mockAppRegistry);
     }
 
     // ========== setNovaAppRegistry Tests ==========
@@ -65,22 +49,24 @@ contract KMSRegistryTest is Test {
 
     function test_setNovaAppRegistry_revert_notOwner() public {
         vm.prank(randomUser);
-        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
+        vm.expectRevert(abi.encodeWithSignature("NotOwner()"));
         registry.setNovaAppRegistry(address(0xBEEF));
     }
 
     // ========== setKmsAppId Tests ==========
 
-    function test_setKmsAppId_byOwner() public {
+    function test_setKmsAppId_revert_alreadySet() public {
         vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSignature("AppIdAlreadySet()"));
         registry.setKmsAppId(999);
-        assertEq(registry.kmsAppId(), 999);
     }
 
     function test_setKmsAppId_revert_notOwner() public {
+        // First reset the registry to one without an appId set for testing the error priority
+        KMSRegistry freshRegistry = new KMSRegistry(admin, mockAppRegistry);
         vm.prank(randomUser);
-        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
-        registry.setKmsAppId(999);
+        vm.expectRevert(abi.encodeWithSignature("NotOwner()"));
+        freshRegistry.setKmsAppId(999);
     }
 
     // ========== addOperator Tests ==========
@@ -114,28 +100,6 @@ contract KMSRegistryTest is Test {
     }
 
     // ========== Admin/Ownership Tests ==========
-
-    function test_transferOwnership() public {
-        vm.prank(admin);
-        registry.transferOwnership(randomUser);
-        // Ownable2Step requires acceptance
-        vm.prank(randomUser);
-        registry.acceptOwnership();
-        assertEq(registry.owner(), randomUser);
-    }
-
-    function test_upgrade_authorized() public {
-        KMSRegistry newImp = new KMSRegistry();
-        vm.prank(admin);
-        registry.upgradeToAndCall(address(newImp), "");
-    }
-
-    function test_upgrade_revert_unauthorized() public {
-        KMSRegistry newImp = new KMSRegistry();
-        vm.prank(randomUser);
-        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, randomUser));
-        registry.upgradeToAndCall(address(newImp), "");
-    }
 
     // ========== View Tests ==========
 

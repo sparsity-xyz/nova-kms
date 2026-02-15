@@ -144,20 +144,6 @@ def _format_scan_summary(entry: dict) -> str:
         ])
     nodes_table = _render_table(["#", "Wallet", "URL", "Status", "ZK", "Conn", "VersionId"], node_rows)
 
-    # 2) Write section
-    write = details.get("write") or {}
-    if not write.get("performed"):
-        write_block = "3. KV Write:\n  (not performed)"
-    else:
-        write_block = (
-            "3. KV Write:\n"
-            f"  node: {write.get('node_url')}\n"
-            f"  key : {write.get('key')}\n"
-            f"  value: {write.get('timestamp')}\n"
-            + (f"  http : {write.get('http_status')}\n" if write.get("http_status") is not None else "")
-            + (f"  error: {write.get('error')}\n" if write.get("error") else "")
-        ).rstrip("\n")
-
     # 2) Combined derive + data readback
     combined_rows: List[List[str]] = []
     for idx, r in enumerate(results, start=1):
@@ -196,6 +182,20 @@ def _format_scan_summary(entry: dict) -> str:
         combined_rows,
     )
 
+    # 3) Write section
+    write = details.get("write") or {}
+    if not write.get("performed"):
+        write_block = "3. KV Write:\n  (not performed)"
+    else:
+        write_block = (
+            "3. KV Write:\n"
+            f"  node: {write.get('node_url')}\n"
+            f"  key : {write.get('key')}\n"
+            f"  value: {write.get('timestamp')}\n"
+            + (f"  http : {write.get('http_status')}\n" if write.get("http_status") is not None else "")
+            + (f"  error: {write.get('error')}\n" if write.get("error") else "")
+        ).rstrip("\n")
+
     lines: List[str] = []
     lines.append(f"Run @ {ts_s} | status={status} | nodes={node_count} reachable={reachable_count}")
     if err:
@@ -204,9 +204,18 @@ def _format_scan_summary(entry: dict) -> str:
     lines.append("1. Nodes:")
     lines.append(nodes_table)
     lines.append("")
-    lines.append("2. Derive + data readback:")
+    # Find readback key from results
+    readback_key = None
+    for r in results:
+        if r.get("data") and isinstance(r["data"], dict) and r["data"].get("key"):
+            readback_key = r["data"]["key"]
+            break
+
+    lines.append("2. Derive + KV readback:")
     if fixed_path:
         lines.append(f"   Derive path: {fixed_path}")
+    if readback_key:
+        lines.append(f"   Readback key: {readback_key}")
     lines.append(combined_table)
     lines.append("")
     lines.append(write_block)
