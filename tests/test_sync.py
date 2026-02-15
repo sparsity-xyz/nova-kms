@@ -40,6 +40,7 @@ from sync_manager import (
 @pytest.fixture(autouse=True)
 def _setup_encryption(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
+    monkeypatch.setattr(config, "KMS_APP_ID", 43)
     
     # Mock encryption helpers to bypass real ECIES logic
     import secure_channel

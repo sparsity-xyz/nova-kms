@@ -105,21 +105,7 @@ def _format_scan_summary(entry: dict) -> str:
         ])
     nodes_table = _render_table(["#", "Wallet", "URL", "Status", "ZK", "Conn", "VersionId"], node_rows)
 
-    # 3) Write section
-    write = details.get("write") or {}
-    if not write.get("performed"):
-        write_block = "3. KV Write:\n  (not performed)"
-    else:
-        write_block = (
-            "3. KV Write:\n"
-            f"  node: {write.get('node_url')}\n"
-            f"  key : {write.get('key')}\n"
-            f"  value: {write.get('timestamp')}\n"
-            + (f"  http : {write.get('http_status')}\n" if write.get("http_status") is not None else "")
-            + (f"  error: {write.get('error')}\n" if write.get("error") else "")
-        ).rstrip("\n")
-
-    # 4) Combined derive + data readback
+    # 2) Combined derive + data readback
     combined_rows: List[List[str]] = []
     for idx, r in enumerate(results, start=1):
         inst = r.get("instance") or {}
@@ -129,7 +115,7 @@ def _format_scan_summary(entry: dict) -> str:
 
         wallet = inst.get("tee_wallet") or r.get("operator") or ""
         derive_b64 = derive.get("key") if isinstance(derive, dict) else None
-        # derive_hex = _b64_to_hex(derive_b64) # REMOVED in app.py
+        derive_hex = _b64_to_hex(derive_b64)
         derive_ok = derive.get("matches_cluster") if isinstance(derive, dict) else None
         derive_http = derive.get("http_status") if isinstance(derive, dict) else None
 
@@ -144,6 +130,7 @@ def _format_scan_summary(entry: dict) -> str:
         combined_rows.append([
             str(idx),
             str(wallet),
+            str(derive_hex or ""),
             str(derive_http) if derive_http is not None else "",
             str(derive_ok) if derive_ok is not None else "",
             str(data_val or ""),
@@ -152,9 +139,23 @@ def _format_scan_summary(entry: dict) -> str:
             str(row_err),
         ])
     combined_table = _render_table(
-        ["#", "Wallet", "DeriveHTTP", "DeriveOK", "Readback", "ReadbackHTTP", "ReadbackOK", "Error"],
+        ["#", "Wallet", "DeriveHex", "DeriveHTTP", "DeriveOK", "Readback", "ReadbackHTTP", "ReadbackOK", "Error"],
         combined_rows,
     )
+
+    # 3) Write section
+    write = details.get("write") or {}
+    if not write.get("performed"):
+        write_block = "3. KV Write:\n  (not performed)"
+    else:
+        write_block = (
+            "3. KV Write:\n"
+            f"  node: {write.get('node_url')}\n"
+            f"  key : {write.get('key')}\n"
+            f"  value: {write.get('timestamp')}\n"
+            + (f"  http : {write.get('http_status')}\n" if write.get("http_status") is not None else "")
+            + (f"  error: {write.get('error')}\n" if write.get("error") else "")
+        ).rstrip("\n")
 
     lines: List[str] = []
     lines.append(f"Run @ {ts_s} | status={status} | nodes={node_count} reachable={reachable_count}")
@@ -164,9 +165,18 @@ def _format_scan_summary(entry: dict) -> str:
     lines.append("1. Nodes:")
     lines.append(nodes_table)
     lines.append("")
-    lines.append("2. Derive + data readback:")
+    # Find readback key from results
+    readback_key = None
+    for r in results:
+        if r.get("data") and isinstance(r["data"], dict) and r["data"].get("key"):
+            readback_key = r["data"]["key"]
+            break
+
+    lines.append("2. Derive + KV readback:")
     if fixed_path:
         lines.append(f"   Derive path: {fixed_path}")
+    if readback_key:
+        lines.append(f"   Readback key: {readback_key}")
     lines.append(combined_table)
     lines.append("")
     lines.append(write_block)
@@ -198,7 +208,7 @@ class TestLogs(unittest.TestCase):
                         },
                         "connection": {"connected": True},
                         "derive": {"http_status": 200, "matches_cluster": True},
-                        "data": {"value": "val1", "http_status": 200, "matches_written": True}
+                        "data": {"key": "test/readback-key", "value": "val1", "http_status": 200, "matches_written": True}
                     }
                 ],
                 "write": {
@@ -215,7 +225,8 @@ class TestLogs(unittest.TestCase):
         
         # Verify major sections and new formatting
         self.assertIn("1. Nodes:", text)
-        self.assertIn("2. Derive + data readback:", text)
+        self.assertIn("2. Derive + KV readback:", text)
+        self.assertIn("Readback key: test/readback-key", text)
         self.assertIn("3. KV Write:", text)
         self.assertIn("VersionId", text)
         self.assertIn("DeriveHTTP", text)
@@ -224,8 +235,8 @@ class TestLogs(unittest.TestCase):
         self.assertIn("0x111", text)
         self.assertIn("12345", text)
         
-        # Verify DeriveHex is GONE
-        self.assertNotIn("DeriveHex", text)
+        # Verify DeriveHex is RESTORED
+        self.assertIn("DeriveHex", text)
 
 if __name__ == "__main__":
     unittest.main()
