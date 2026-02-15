@@ -13,7 +13,6 @@ Copied from the Nova app-template with minor additions for KMS usage.
 """
 
 import base64
-import json
 import os
 from typing import Dict, Any, Optional, Union
 

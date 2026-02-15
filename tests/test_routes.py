@@ -12,7 +12,7 @@ Covers:
 
 import base64
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,39 +45,17 @@ def _kms_pop_headers(client: TestClient, *, recipient_wallet: str, private_key_h
 def _setup_routes(monkeypatch):
     """Initialize routes with mocked dependencies."""
     import importlib
-    import asyncio
-    
-    # 1. Mock asyncio in routes to use a transient loop
-    # This avoids "no current event loop" errors and prevents hangs
-    # from sharing a loop between TestClient and the app.
-    mock_asyncio = MagicMock()
-    
-    def _run_shim(coro):
-        """Run coroutine in a fresh loop."""
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
 
-    mock_loop = MagicMock()
-    mock_loop.run_until_complete.side_effect = _run_shim
-    # Return our mock loop when routes calls get_event_loop()
-    mock_asyncio.get_event_loop.return_value = mock_loop
-    
-    # 2. Mock config
+    # 1. Mock config
     import config
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
     monkeypatch.setattr(config, "KMS_APP_ID", 49)
     
-    # 3. Reload routes to reset state
+    # 2. Reload routes to reset state
     import routes
     importlib.reload(routes)
-    
-    # 4. Apply the asyncio mock to routes
-    monkeypatch.setattr(routes, "asyncio", mock_asyncio)
-    
-    # 5. Mock routes encryption helpers AFTER reload
+
+    # 3. Mock routes encryption helpers AFTER reload
     monkeypatch.setattr(routes, "_is_encrypted_envelope", lambda body: True)
     monkeypatch.setattr(routes, "_decrypt_request_body", lambda body, pk: (body, True))
     monkeypatch.setattr(routes, "_encrypt_response", lambda data, pk: data)
@@ -111,7 +89,7 @@ def _setup_routes(monkeypatch):
     mgr.initialize_from_peer(b"\x01" * 32)
     
     # Mock authorizer
-    from auth import AppAuthorizer, AuthResult, ClientIdentity
+    from auth import AppAuthorizer, AuthResult
     from sync_manager import PeerCache, SyncManager
     authorizer = MagicMock(spec=AppAuthorizer)
     
@@ -338,6 +316,15 @@ class TestNodes:
         assert "operator" in item
         assert "instance" in item
         assert "connection" in item
+
+    def test_list_operators_uses_peer_cache_without_registry_refetch(self, client):
+        import routes
+
+        reg = routes._sync_manager.peer_cache.nova_registry
+        reg.get_instance_by_wallet.reset_mock()
+        resp = client.get("/nodes")
+        assert resp.status_code == 200
+        reg.get_instance_by_wallet.assert_not_called()
 
 
 # =============================================================================

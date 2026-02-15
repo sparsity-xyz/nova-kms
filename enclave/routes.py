@@ -28,8 +28,7 @@ import base64
 import logging
 import re
 import threading
-import asyncio
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -444,59 +443,53 @@ def list_operators():
     PeerCache which is refreshed asynchronously by ``node_tick``.
     """
     peer_cache = None
-    nova_registry = None
     if _sync_manager and getattr(_sync_manager, "peer_cache", None):
         peer_cache = _sync_manager.peer_cache
-        nova_registry = _sync_manager.peer_cache.nova_registry
 
     if not peer_cache:
         raise HTTPException(status_code=503, detail="Peer discovery not available")
 
     try:
         peers = peer_cache.get_peers(refresh_if_stale=False)
-        enriched = []
-        for p in peers:
-            wallet = p.get("tee_wallet_address", "")
-            instance_info: dict = {}
-            if nova_registry:
-                try:
-                    inst = nova_registry.get_instance_by_wallet(wallet)
-                    status_val = getattr(inst.status, "value", inst.status)
-                    status_name = getattr(inst.status, "name", str(inst.status))
-                    instance_info = {
-                        "instance_id": inst.instance_id,
-                        "app_id": inst.app_id,
-                        "version_id": inst.version_id,
-                        "operator": inst.operator,
-                        "instance_url": inst.instance_url,
-                        "tee_wallet": inst.tee_wallet_address,
-                        "zk_verified": inst.zk_verified,
-                        "instance_status": {"value": status_val, "name": status_name},
-                        "registered_at": inst.registered_at,
-                    }
-                except Exception as exc:
-                    instance_info = {"error": str(exc)}
-
-            connection_info = {
-                "in_peer_cache": True,
-                "cached_status": (
-                    getattr(p.get("status"), "name", str(p.get("status")))
-                    if p.get("status") is not None else None
-                ),
-            }
-
-            enriched.append({
-                "operator": wallet,
-                "instance": instance_info,
-                "connection": connection_info,
-            })
-
-        return {
-            "operators": enriched,
-            "count": len(enriched),
-        }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.warning(f"Failed to load peer cache: {exc}")
+        raise HTTPException(status_code=503, detail="Peer cache unavailable")
+
+    enriched = []
+    for p in peers:
+        wallet = p.get("tee_wallet_address", "")
+        status_val = getattr(p.get("status"), "value", p.get("status"))
+        status_name = getattr(p.get("status"), "name", str(p.get("status")))
+        instance_info = {
+            "instance_id": p.get("instance_id"),
+            "app_id": p.get("app_id"),
+            "version_id": p.get("version_id"),
+            "operator": p.get("operator"),
+            "instance_url": p.get("node_url"),
+            "tee_wallet": wallet,
+            "zk_verified": p.get("zk_verified"),
+            "instance_status": {"value": status_val, "name": status_name},
+            "registered_at": p.get("registered_at"),
+        }
+
+        connection_info = {
+            "in_peer_cache": True,
+            "cached_status": (
+                getattr(p.get("status"), "name", str(p.get("status")))
+                if p.get("status") is not None else None
+            ),
+        }
+
+        enriched.append({
+            "operator": wallet,
+            "instance": instance_info,
+            "connection": connection_info,
+        })
+
+    return {
+        "operators": enriched,
+        "count": len(enriched),
+    }
 
 
 # =============================================================================
@@ -506,7 +499,6 @@ def list_operators():
 @router.post("/kms/derive")
 async def derive_key(request: Request, response: Response, body: dict = None):
     """Derive a deterministic key for the requesting app (E2E encrypted)."""
-    import json
     # Parse body manually to work with the encrypted request envelope (no plaintext fallback)
     if body is None:
         body = await request.json()

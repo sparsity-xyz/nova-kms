@@ -22,7 +22,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional
 
 import config
 from config import (
@@ -454,6 +454,5 @@ def _require_fresh_timestamp(ts: str) -> None:
     now = int(time.time())
     if abs(now - ts_int) > max_age:
         raise RuntimeError("Stale timestamp")
-
 
 

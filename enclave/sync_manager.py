@@ -30,17 +30,13 @@ import threading
 import time
 
 from config import PEER_CACHE_TTL_SECONDS
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import requests
 from eth_hash.auto import keccak
 
 import config as config_module
 
-from config import (
-    MAX_SYNC_PAYLOAD_BYTES,
-    SYNC_BATCH_SIZE,
-)
 from data_store import DataStore
 from url_validator import URLValidationError, validate_peer_url
 
@@ -303,10 +299,13 @@ class PeerCache:
                 {
                     "tee_wallet_address": wallet,
                     "node_url": instance.instance_url,
+                    "app_id": instance.app_id,
                     "operator": _normalize_wallet(getattr(instance, "operator", "")),
                     "status": instance.status,
+                    "zk_verified": bool(getattr(instance, "zk_verified", False)),
                     "version_id": instance.version_id,
                     "instance_id": instance.instance_id,
+                    "registered_at": getattr(instance, "registered_at", 0),
                 }
             )
             seen_wallets.add(wallet)
@@ -993,7 +992,6 @@ class SyncManager:
           - {"type": "master_secret_request", "sender_wallet": "0x...", "ecdh_pubkey": "hex"}
         """
         from auth import (
-            verify_wallet_signature,
             recover_wallet_from_signature,
             _nonce_store,
             _require_fresh_timestamp,

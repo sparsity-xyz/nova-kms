@@ -14,13 +14,10 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from web3 import Web3
-from web3.exceptions import ContractLogicError
 from eth_hash.auto import keccak
-
-from config import CHAIN_ID
 
 # Minimum number of block confirmations before trusting eth_call results.
 # Protects against reorgs that could change on-chain operator sets.

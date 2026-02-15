@@ -5,7 +5,5 @@ web3==7.14.1
 requests==2.32.5
 APScheduler==3.11.2
 eth-hash[pycryptodome]==0.7.1
-cryptography==46.0.4
+cryptography==46.0.5
 python-dotenv==1.2.1
-cbor2==5.8.0
-pycose==1.1.0
