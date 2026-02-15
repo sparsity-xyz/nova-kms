@@ -241,7 +241,7 @@ def verify_app_request(identity: ClientIdentity) -> tuple[bool, str | None]:
     The current implementation authorizes based on NovaAppRegistry state:
     - Instance is ACTIVE and zkVerified
     - App status is ACTIVE
-    - Version status is ENROLLED
+    - Version status is not REVOKED (ENROLLED or DEPRECATED)
 
     (No code-measurement comparison is performed in this layer.)
     """
@@ -304,12 +304,12 @@ Payload format is simple JSON.
 > headers that the enclave verifies directly against on-chain registered
 > identities.
 
-**POST /kms/derive**
+**POST /kms/derive** (inner payload before E2E envelope encryption)
 ```json
 {
   "path": "app_disk_encryption",
   "context": "v1",
-  "nonce": "random-uuid"
+  "length": 32
 }
 ```
 
@@ -336,10 +336,10 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 
 ### 4.1 Membership and Sync Strategy
 
-- **Membership source**: nodes discover peers via NovaAppRegistry (`KMS_APP_ID` → ENROLLED versions → ACTIVE instances), cached in `PeerCache`.
+- **Membership source**: nodes discover peers via NovaAppRegistry (`KMS_APP_ID` → ACTIVE instances with non-REVOKED versions), cached in `PeerCache`.
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
-- **Security**: sync messages are authenticated with PoP and authorize the sender as an ACTIVE + zkVerified instance of the KMS app with an ENROLLED version.
+- **Security**: sync messages are authenticated with PoP and authorize the sender as an ACTIVE + zkVerified instance of the KMS app with a non-REVOKED version.
 - **Backpressure**: rate-limit sync and snapshot requests to avoid amplification during spikes.
 
 ### 4.2 Vector Clock Based Sync
@@ -412,7 +412,7 @@ class DataRecord:
 | App Code Upgrade Leak | App/Version hierarchy allows owners to rotate approved measurements |
 | Man-in-the-middle | TLS + in-app PoP verification (no trusted proxies) |
 | Replay attack | PoP nonce + timestamp window (configurable) |
-| Node impersonation during sync | PoP + NovaAppRegistry authorization (KMS app, ACTIVE+zkVerified, ENROLLED) + (if encrypted) sender_tee_pubkey checked against registered teePubkey before decryption |
+| Node impersonation during sync | PoP + NovaAppRegistry authorization (KMS app, ACTIVE+zkVerified, non-REVOKED version) + (if encrypted) sender_tee_pubkey checked against registered teePubkey before decryption |
 
 ### 5.2 Access Control Matrix (Instance Based)
 

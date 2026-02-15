@@ -200,7 +200,7 @@ After authentication succeeds, the server authorizes the request via `AppAuthori
   - `status == ACTIVE`
   - `zkVerified == true`
 3. `getApp(appId)`: App must be `ACTIVE`
-4. `getVersion(appId, versionId)`: Version must be `ENROLLED`
+4. `getVersion(appId, versionId)`: Version must not be `REVOKED` (currently `ENROLLED` or `DEPRECATED`)
 
 Implementation: `nova-kms/enclave/auth.py`.
 
@@ -208,7 +208,7 @@ Implementation: `nova-kms/enclave/auth.py`.
 
 ## 6. How the client verifies the mutual response signature (X-KMS-Response-Signature)
 
-Example client implementation: `nova-examples/nova-kms-client/enclave/kms_identity.py`:
+Example client implementation: `demo-client/enclave/kms_identity.py`:
 
 - construct `NovaKMS:Response:<client_sig>:<kms_wallet>`
 - recover the signer address using EIP-191
@@ -237,7 +237,7 @@ When KMS node A sends a sync request to KMS node B, node B verifies A using:
    - `status == ACTIVE`
    - `zkVerified == true`
 3. `instance.app_id == KMS_APP_ID` (verify it's a KMS instance)
-4. `getVersion(KMS_APP_ID, versionId)`: Version must be `ENROLLED`
+4. `getVersion(KMS_APP_ID, versionId)`: Version must not be `REVOKED` (currently `ENROLLED` or `DEPRECATED`)
 5. `teePubkey` must be a valid P-384 public key
 
 Implementation: `nova-kms/enclave/auth.py` → `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
@@ -271,7 +271,7 @@ sequenceDiagram
   KMS_B->>Chain: getInstanceByWallet(A_wallet)
   Chain-->>KMS_B: instance(app_id/version_id/zkVerified/status/teePubkey)
 
-  Note over KMS_B: AppAuthorizer(require_app_id=KMS_APP_ID).verify():<br/>ACTIVE + zkVerified + app_id==KMS_APP_ID + version ENROLLED
+  Note over KMS_B: AppAuthorizer(require_app_id=KMS_APP_ID).verify():<br/>ACTIVE + zkVerified + app_id==KMS_APP_ID + version not REVOKED
 
   Note over KMS_B: process sync request
   Note over KMS_B: E2E encrypt response with A's teePubkey
@@ -325,7 +325,7 @@ The current implementation provides a **unified authorization model** for both A
 The security model does **not rely on TLS** for confidentiality. Sensitive payloads are protected by teePubkey-based E2E encryption and PoP.
 
 Practical notes from the current code:
-- **KMS↔KMS outbound peer URLs** are validated and, in production (`IN_ENCLAVE=true`), restricted to `https` schemes.
+- **KMS↔KMS outbound peer URLs** are validated for scheme/host/credential format; in production (`IN_ENCLAVE=true`) default allowed schemes are `https` (configurable via `ALLOWED_PEER_URL_SCHEMES`).
 - **App→KMS** can be deployed behind HTTPS (recommended), but the application-layer security is provided by PoP + E2E envelopes.
 
 ### Authorization Checks
@@ -337,7 +337,7 @@ Practical notes from the current code:
 | Instance zkVerified | ✓ | ✓ |
 | App ID matches | - | ✓ |
 | App ACTIVE | ✓ | ✓ |
-| Version ENROLLED | ✓ | ✓ |
+| Version not REVOKED | ✓ | ✓ |
 
 Usage:
 - **App→KMS**: `AppAuthorizer(require_app_id=0).verify(identity)`

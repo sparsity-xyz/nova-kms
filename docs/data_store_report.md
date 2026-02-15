@@ -5,7 +5,7 @@ This report provides a detailed technical review of the `DataStore` architecture
 ## 1. Security & Encryption
 The DataStore implements a "defense-in-depth" approach where data is never stored in plaintext within the enclave's memory.
 
-- **Algorithm**: `AES-214-GCM` (Galois/Counter Mode) via `cryptography.hazmat`. GCM provides both confidentiality and authenticity.
+- **Algorithm**: `AES-256-GCM` (Galois/Counter Mode) via `cryptography.hazmat`. GCM provides both confidentiality and authenticity.
 - **Key Management**: 
     - Keys are derived per-app using `HKDF-SHA256` from the global master secret.
     - Context-binding ensures that `app_A` cannot decrypt data belonging to `app_B`.
@@ -30,12 +30,12 @@ To prevent memory exhaustion attacks, strict limits are enforced within each nam
 | `MAX_APP_STORAGE` | 10 MB | Total encrypted payload quota per app namespace. |
 | `MAX_CLOCK_SKEW_MS`| 5 sec | Tolerance window for future-dated writes. |
 
-- **LRU Eviction**: When a namespace exceeds its `MAX_APP_STORAGE`, it evicts the oldest non-tombstone records (sorted by `updated_at_ms`) until the quota is met.
+- **Eviction policy**: When a namespace exceeds `MAX_APP_STORAGE`, it evicts records in least-recently-updated order based on `updated_at_ms` while preserving tombstone semantics.
 
 ## 4. Distributed Synchronization
 Synchronization between KMS nodes is a multi-layered process ensuring state convergence across the cluster.
 
-- **Peer Discovery**: Nodes dynamically discover each other via the `NovaAppRegistry` on-chain (filtering for `ACTIVE` status and compatible `version_id`).
+- **Peer Discovery**: Nodes dynamically discover each other via the `NovaAppRegistry` on-chain (filtering for `ACTIVE` instances under `KMS_APP_ID` and excluding `REVOKED` versions).
 - **Communication Security**:
     - **PoP Handshake**: Mutual Proof-of-Possession based on `tee_wallet` signatures.
     - **HMAC Signing**: All sync payloads are signed with a transient sync key derived from the shared master secret.

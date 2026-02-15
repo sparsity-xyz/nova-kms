@@ -56,14 +56,14 @@ export PRIVATE_KEY=0x...                # Deployer private key (admin)
 make deploy
 ```
 
-Save the deployed **Proxy** contract address (the stable entry point) and the **Implementation** address (which contains the logic). You will primarily use the Proxy address for integration.
+Save the deployed `KMSRegistry` contract address (non-upgradeable deployment in current code).
 
 ### 1.3 Configure KMS App ID
 
 Once the KMS application is created in the Nova Platform and you have an `appId`:
 
 ```bash
-export PROXY_ADDRESS=<KMS_REGISTRY_PROXY_ADDRESS>
+export CONTRACT_ADDRESS=<KMS_REGISTRY_ADDRESS>
 export KMS_APP_ID=<ASSIGNED_APP_ID>
 make set-app-id
 ```
@@ -73,7 +73,7 @@ make set-app-id
 ```bash
 # Check the deployment
 cast call <KMS_REGISTRY_ADDRESS> "kmsAppId()" --rpc-url https://sepolia.base.org
-cast call <KMS_REGISTRY_ADDRESS> "owner()" --rpc-url https://sepolia.base.org
+cast call <KMS_REGISTRY_ADDRESS> "OWNER()" --rpc-url https://sepolia.base.org
 ```
 
 ## Step 2: Configure the Enclave Application
@@ -145,7 +145,7 @@ On boot, the KMS node:
 2. Gets its TEE wallet address from Odyn
 3. ZKP service verifies the enclave and registers the instance in NovaAppRegistry
 4. NovaAppRegistry calls `KMSRegistry.addOperator()` → node is discoverable
-5. KMS node discovers peers by enumerating `ACTIVE` KMS instances from `NovaAppRegistry` (scoped by `KMS_APP_ID`, across `ENROLLED` versions)
+5. KMS node discovers peers by enumerating `ACTIVE` KMS instances from `NovaAppRegistry` (scoped by `KMS_APP_ID`, with version status not `REVOKED`)
 6. Reads `masterSecretHash` from `KMSRegistry`
 7. If `masterSecretHash == 0x0` (bootstrap):
   - generates a fresh master secret from Odyn hardware RNG (if needed)
@@ -215,7 +215,7 @@ KMS Node 1  ←→  KMS Node 2  ←→  KMS Node 3
 
 ### Node Discovery
 
-Nodes discover each other via `NovaAppRegistry` (scoped by `KMS_APP_ID` → `ENROLLED` versions → `ACTIVE` instances). No external service discovery is required.
+Nodes discover each other via `NovaAppRegistry` (scoped by `KMS_APP_ID` → `ACTIVE` instances with non-`REVOKED` version). No external service discovery is required.
 
 ### Master Secret Propagation
 
@@ -227,7 +227,7 @@ Nodes discover each other via `NovaAppRegistry` (scoped by `KMS_APP_ID` → `ENR
 
 - **Eventual consistency** via vector-clock-based sync
 - **LWW** (Last-Writer-Wins) for concurrent conflicts
-- **Delta sync** every `SYNC_INTERVAL_SECONDS` (default: 60s)
+- **Delta sync** every `DATA_SYNC_INTERVAL_SECONDS` (default: 10s)
 - **Snapshot sync** for nodes that are far behind
 
 ## Monitoring

@@ -34,7 +34,7 @@ nova-kms/
 │   ├── odyn.py                   # Odyn SDK wrapper (DO NOT MODIFY)
 │   ├── chain.py                  # Blockchain / RPC helpers
 │   ├── nova_registry.py          # NovaAppRegistry read wrapper
-│   ├── kms_registry.py           # KMSRegistry read-only wrapper
+│   ├── kms_registry.py           # KMSRegistry wrapper (reads + bootstrap/maintenance writes)
 │   ├── auth.py                   # App authorization via PoP + registry
 │   ├── kdf.py                    # HKDF key derivation + sealed exchange
 │   ├── secure_channel.py         # P-384 teePubkey validation + ECDH
@@ -195,7 +195,7 @@ Standard TEE SDK. Auto-detects enclave vs dev mode. Provides:
 1. `getInstanceByWallet(teeWallet)` → instance
 2. Check `ACTIVE` + `zkVerified`
 3. `getApp(appId)` → `ACTIVE`
-4. `getVersion(appId, versionId)` → `ENROLLED`
+4. `getVersion(appId, versionId)` → not `REVOKED` (currently `ENROLLED` or `DEPRECATED`)
 
 ### `kms_registry.py` — KMSRegistry (contract wrapper)
 Wraps the on-chain `KMSRegistry` contract for:
@@ -223,4 +223,4 @@ Per-app namespace isolation. LRU eviction when quota exceeded.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NODE_URL` | Public URL of this KMS node | (empty) |
-| `CORS_ORIGINS` | Allowed CORS origins | `*` |
+| `CORS_ORIGINS` | Allowed CORS origins (comma-separated; empty = deny all) | `(empty)` |

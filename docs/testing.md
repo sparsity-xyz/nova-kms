@@ -112,13 +112,13 @@ assert resp.status_code == 200
 
 
 #### Auth
-- Full success path (ACTIVE instance + zkVerified + ACTIVE app + ENROLLED version)
+- Full success path (ACTIVE instance + zkVerified + ACTIVE app + non-REVOKED version)
 - Missing wallet → rejected
 - Instance not found → rejected
 - Instance STOPPED → rejected
 - Instance not zkVerified → rejected
 - App not ACTIVE → rejected
-- Version not ENROLLED → rejected
+- Version REVOKED (or lookup failure) → rejected
 
 #### Sync
 - Delta merge incoming records
@@ -162,18 +162,14 @@ Uses a mock `novaAppRegistry` address to simulate the callback pattern.
 
 | Test | Scenario |
 |------|----------|
-| `test_initialize_setsState` | Proxy initialization sets registry, appId, owner |
-| `test_initialize_revert_alreadyInitialized` | Cannot re-initialize |
 | `test_setNovaAppRegistry_byOwner` | Owner can update registry address |
 | `test_setNovaAppRegistry_revert_notOwner` | Non-owner cannot update registry |
-| `test_setKmsAppId_byOwner` | Owner can set KMS app ID |
+| `test_setKmsAppId_revert_alreadySet` | `kmsAppId` is write-once |
 | `test_setKmsAppId_revert_notOwner` | Non-owner cannot set app ID |
 | `test_addOperator_success` | Successful operator addition via callback |
 | `test_addOperator_emitsEvent` | OperatorAdded event emitted |
 | `test_removeOperator_success` | Operator removed via callback |
-| `test_transferOwnership` | Ownable2Step ownership transfer |
-| `test_upgrade_authorized` | Owner can upgrade proxy |
-| `test_upgrade_revert_unauthorized` | Non-owner cannot upgrade |
+| `test_constructor_setsState` | Constructor sets registry and owner |
 | `test_getOperators_empty` | Empty operator list |
 | `test_fullLifecycle` | Add 3 operators, remove 1, verify state |
 

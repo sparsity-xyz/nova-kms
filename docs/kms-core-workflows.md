@@ -10,12 +10,11 @@ The `KMSRegistry` contract is the trust anchor for the KMS cluster. It must be d
 
 ### Workflow
 1.  **Contract Deployment**:
-    - Deploy `KMSRegistry` implementation and proxy contracts.
-    - **Note**: This process yields both a **Proxy Address** (stable entry point) and an **Implementation Address** (logic backend).
-    - Initialize the proxy with the platform's `NovaAppRegistry` address.
+    - Deploy `KMSRegistry` (non-upgradeable in current code).
+    - Provide constructor args: owner and `NovaAppRegistry` address.
 2.  **Platform App Creation**:
     - Create a new application on the **Nova Platform** (e.g., via `POST /apps`).
-    - **Crucial**: You must provide the `KMSRegistry` proxy address as the `dappContract` during this step.
+    - **Crucial**: Provide the deployed `KMSRegistry` address as `dappContract` during this step.
     - This creates the off-chain record for the service.
 3.  **On-Chain Registration**:
     - In the Nova Platform UI/API, perform the **Register App On-Chain** step.
@@ -34,14 +33,14 @@ sequenceDiagram
     participant Platform as Nova Platform
     participant AppReg as Nova App Registry
 
-    Operator->>KMSReg: Deploy Implementation & Proxy
-    Note over Operator: Save Proxy & Implementation Addrs
+    Operator->>KMSReg: Deploy KMSRegistry
+    Note over Operator: Save KMSRegistry address
     
-    Operator->>Platform: 1. Create App (Set dappContract = Proxy)
+    Operator->>Platform: 1. Create App (Set dappContract = KMSRegistry)
     Platform-->>Operator: App Created (assigned internal ID)
     
     Operator->>Platform: 2. Register App On-Chain
-    Platform->>AppReg: registerApp(Proxy Address, ...)
+    Platform->>AppReg: registerApp(KMSRegistry Address, ...)
     AppReg-->>Platform: Result: KMS_APP_ID assigned
     Platform-->>Operator: On-chain KMS_APP_ID
     
@@ -198,7 +197,7 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
     - Node B authorizes $Wallet_A$ as a KMS peer using **NovaAppRegistry** state (same checks as App→KMS, with `require_app_id = KMS_APP_ID`):
         - Instance is ACTIVE and zkVerified
         - App status is ACTIVE
-        - Version status is ENROLLED
+        - Version status is not REVOKED (ENROLLED or DEPRECATED)
 5.  **Mutual Proof**: Node B returns its own signature on the Client's signature ($Sig\_A$) to prove receipt and processing:
     `NovaKMS:Response:<Sig_A>:<Wallet_B>`
     returned in header `X-KMS-Peer-Signature`.
@@ -237,7 +236,7 @@ sequenceDiagram
     
     B->>B: Recover Wallet_A from Sig_A
     B->>AppReg: getInstanceByWallet(Wallet_A) + getApp/getVersion
-    AppReg-->>B: ACTIVE + zkVerified + App ACTIVE + Version ENROLLED
+    AppReg-->>B: ACTIVE + zkVerified + App ACTIVE + Version not REVOKED
     
     Note over B: Create Response Message:<br/>"NovaKMS:Response:Sig_A:Wallet_B"
     Note over B: Sign with TEE Private Key (Sig_B)
@@ -256,7 +255,7 @@ sequenceDiagram
 KMS supports **Lightweight PoP** for high-performance app API calls.
 
 ### Mutual PoP Handshake Flow
-1.  **Discovery**: App discovers KMS nodes via **NovaAppRegistry** (same enumeration used by the KMS peer cache: `KMS_APP_ID` → ENROLLED versions → ACTIVE instances).
+1.  **Discovery**: App discovers KMS nodes via **NovaAppRegistry** (same enumeration used by the KMS peer cache: `KMS_APP_ID` → ACTIVE instances with non-REVOKED versions).
 2.  **Challenge**: App calls `GET /nonce` on a selected KMS node.
 3.  **Signature A ($Sig\_A$)**: App signs a message binding the challenge and the node:
     `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
@@ -290,7 +289,7 @@ sequenceDiagram
     participant KMS as KMS Node (Server)
     participant AppReg as Nova App Registry
 
-    App->>AppReg: Enumerate KMS instances (KMS_APP_ID → ENROLLED versions → ACTIVE instances)
+    App->>AppReg: Enumerate KMS instances (KMS_APP_ID → ACTIVE instances with non-REVOKED versions)
     AppReg-->>App: {instanceUrl, teeWalletAddress, teePubkey, ...}
     
     App->>KMS: GET /nonce
@@ -348,7 +347,7 @@ The `/kms/derive` endpoint allows an authorized app to derive deterministic keys
 
 | Property | Mechanism |
 | :--- | :--- |
-| **Authenticity** | Signatures are recovered into wallet addresses and authorized against `NovaAppRegistry` state (apps and KMS peers are ACTIVE + zkVerified, App ACTIVE, Version ENROLLED). `KMSRegistry` additionally provides cluster coordination via `masterSecretHash`. |
+| **Authenticity** | Signatures are recovered into wallet addresses and authorized against `NovaAppRegistry` state (apps and KMS peers are ACTIVE + zkVerified, App ACTIVE, Version not REVOKED). `KMSRegistry` additionally provides cluster coordination via `masterSecretHash`. |
 | **Freshness** | One-time nonces and tight timestamps prevent replay attacks. |
 | **Identity Binding** | Signatures include the recipient's wallet address, preventing "Reflection" or "Re-routing" attacks (a signature for Node B cannot be used to authenticate to Node C). |
 | **Bidirectional Trust** | Mutual signatures ensure both client and server are verified against on-chain status before sensitive data is processed. |

@@ -19,8 +19,8 @@ It is designed with a **Zero-Trust** architecture where no single node is truste
 The system implements a **Defense in Depth** strategy with four layers of security:
 
 ### 1. On-Chain Identity & Authorization (The "Who")
-*   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID` with an `ENROLLED` version.
-*   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE` and version is `ENROLLED`.
+*   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID`, with app `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
+*   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
 *   **KMSRegistry**: Not used for runtime peer discovery; it is used for cluster coordination via `masterSecretHash`.
 *   **Verification**: All access gates on `NovaAppRegistry` lookups (instance/app/version status + `zkVerified`).
 

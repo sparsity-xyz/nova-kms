@@ -30,7 +30,7 @@ It summarizes the **security-relevant behaviors that are implemented in this rep
   - instance must be `ACTIVE`
   - instance must be `zkVerified`
   - app must be `ACTIVE`
-  - version must be `ENROLLED`
+  - version must not be `REVOKED` (current app logic accepts `ENROLLED` and `DEPRECATED`)
 - **KMS↔KMS** sync uses the same authorizer, additionally requiring `require_app_id=KMS_APP_ID`.
 
 ### 2) Mutual PoP authentication (EIP-191)
@@ -64,8 +64,9 @@ This prevents a class of MitM “re-encryption” attacks where an attacker subs
 
 ### 6) SSRF and network hardening for peer URLs
 
-- Peer URLs are validated to reduce SSRF risk and block private/reserved IP ranges in production.
-- In production, peer URLs are restricted to `https` schemes.
+- Peer URLs are validated for scheme/host/credential format before outbound requests.
+- In production, default allowed peer URL schemes are `https` (via `ALLOWED_PEER_URL_SCHEMES`).
+- DNS/IP allow/deny and egress controls are expected to be enforced by network policy/proxy.
 
 ### 7) DoS protection (rate limiting + body size limits)
 
