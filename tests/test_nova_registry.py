@@ -63,6 +63,7 @@ def _app_tuple(app_id=1, status=0):
         1,                          # latestVersionId
         1700000000,                # createdAt
         status,                    # status (AppStatus)
+        "0x" + "ff" * 20,          # appWallet
     )
 
 
@@ -241,7 +242,7 @@ class TestGetActiveInstances:
 class TestCachedNovaRegistry:
     def test_caches_app_result(self):
         mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
+        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
         mock_inner.get_app.return_value = app_obj
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
@@ -283,7 +284,7 @@ class TestCachedNovaRegistry:
 
     def test_cache_expires(self):
         mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
+        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
         mock_inner.get_app.return_value = app_obj
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=0)  # TTL=0 → always expired
@@ -293,7 +294,7 @@ class TestCachedNovaRegistry:
 
     def test_invalidate_all(self):
         mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
+        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
         mock_inner.get_app.return_value = app_obj
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
@@ -304,7 +305,7 @@ class TestCachedNovaRegistry:
 
     def test_invalidate_specific_key(self):
         mock_inner = MagicMock()
-        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
+        app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
         mock_inner.get_app.return_value = app_obj
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=60)
@@ -340,8 +341,8 @@ class TestCachedNovaRegistry:
 
     def test_different_keys_use_different_cache_entries(self):
         mock_inner = MagicMock()
-        app1 = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
-        app2 = App(2, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE)
+        app1 = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
+        app2 = App(2, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")
         mock_inner.get_app.side_effect = [app1, app2]
 
         cached = CachedNovaRegistry(inner=mock_inner, ttl=60)

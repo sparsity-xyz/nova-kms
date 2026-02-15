@@ -31,6 +31,7 @@ interface INovaAppRegistryView {
         uint256 latestVersionId;
         uint256 createdAt;
         AppStatus status;
+        address appWallet;
     }
 
     struct AppVersion {

@@ -75,6 +75,7 @@ def _make_app(*, app_id=100, status=AppStatus.ACTIVE) -> App:
         latest_version_id=1,
         created_at=1700000000,
         status=status,
+        app_wallet="0x0000000000000000000000000000000000000000",
     )
 
 
