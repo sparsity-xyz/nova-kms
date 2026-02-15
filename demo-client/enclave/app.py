@@ -14,8 +14,8 @@ from typing import Dict, List, Optional
 import httpx
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 import config

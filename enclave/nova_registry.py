@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple
 
-from abi_helpers import abi_type_to_eth_abi_str as _abi_type_to_eth_abi_str
 from abi_helpers import decode_outputs as _decode_outputs
 
 from web3 import Web3

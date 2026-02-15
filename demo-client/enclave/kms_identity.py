@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization

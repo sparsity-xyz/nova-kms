@@ -36,7 +36,6 @@ import routes
 from auth import AppAuthorizer
 from data_store import DataStore
 from kdf import MasterSecretManager
-from probe import find_healthy_peer
 from rate_limiter import RateLimitMiddleware
 from sync_manager import PeerCache, SyncManager
 
@@ -118,7 +117,7 @@ def _startup_production() -> dict:
     is_active_instance = False
     if nova_registry:
         try:
-            from nova_registry import InstanceStatus
+            from nova_registry import InstanceStatus, VersionStatus
             inst = nova_registry.get_instance_by_wallet(tee_wallet)
             kms_app_id = int(config.KMS_APP_ID or 0)
 
@@ -149,22 +148,14 @@ def _startup_production() -> dict:
 
                 # Verify that the registered teePubkey matches our local key.
                 # If these mismatch, we cannot decrypt messages sent by peers.
-                try:
-                    local_pubkey_der = odyn.get_encryption_public_key_der()
-                    registered_pubkey_bytes = getattr(inst, "tee_pubkey", b"") or b""
-                    
-                    # Compare bytes
-                    if local_pubkey_der != registered_pubkey_bytes:
-                        logger.critical(
-                            "CRITICAL CONFIGURATION ERROR: Local teePubkey does not match "
-                            "NovaAppRegistry! Encrypted communication will fail."
-                        )
-                        logger.critical(f"Local (DER): {local_pubkey_der.hex()}")
-                        logger.critical(f"Registry   : {registered_pubkey_bytes.hex()}")
-                    else:
-                        logger.info("teePubkey verified: matches NovaAppRegistry")
-                except Exception as exc:
-                    logger.warning(f"Failed to verify teePubkey against registry: {exc}")
+                local_pubkey_der = odyn.get_encryption_public_key_der()
+                registered_pubkey_bytes = getattr(inst, "tee_pubkey", b"") or b""
+                if local_pubkey_der != registered_pubkey_bytes:
+                    raise RuntimeError(
+                        "CRITICAL CONFIGURATION ERROR: Local teePubkey does not match "
+                        "NovaAppRegistry; refusing to start."
+                    )
+                logger.info("teePubkey verified: matches NovaAppRegistry")
             else:
                 reasons = []
                 if inst_id == 0:
@@ -176,6 +167,8 @@ def _startup_production() -> dict:
                 logger.warning(
                     f"This node is NOT an active KMS instance: {'; '.join(reasons)}"
                 )
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.warning(f"Instance check failed: {exc}")
     node_info["is_operator"] = is_active_instance

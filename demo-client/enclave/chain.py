@@ -13,13 +13,12 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from web3 import Web3
-from web3.exceptions import ContractLogicError
 from eth_hash.auto import keccak
 
-from config import CHAIN_ID, CONFIRMATION_DEPTH
+from config import CONFIRMATION_DEPTH
 
 logger = logging.getLogger("nova-kms.chain")
 

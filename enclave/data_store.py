@@ -15,8 +15,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import config
 
@@ -184,8 +184,8 @@ class _Namespace:
                 
                 # H2 fix: Guard against malformed records (non-tombstone with null value)
                 if req.value is None:
-                    logger.warning(f"Malformed record for {self.app_id}:{key}: non-tombstone has no value")
-                    raise DecryptionError(f"Malformed record: null value for live key")
+                    logger.warning("Malformed record for %s:%s: non-tombstone has no value", self.app_id, key)
+                    raise DecryptionError("Malformed record: null value for live key")
 
                 decrypted_val = self._decrypt(req.value)
                 return DataRecord(
@@ -218,9 +218,6 @@ class _Namespace:
             vc.increment(node_id)
 
             encrypted_value = self._encrypt(value)
-            new_size = len(encrypted_value)
-            old_size = old.value_size() if old and not old.tombstone else 0
-            
             rec = DataRecord(
                 key=key,
                 value=encrypted_value,

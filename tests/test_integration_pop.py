@@ -163,25 +163,6 @@ def _setup(monkeypatch):
 
     sync_mgr = SyncManager(ds, _NODE_WALLET, peer_cache)
 
-    import asyncio
-    # Mock asyncio in routes to use a transient loop
-    mock_asyncio = MagicMock()
-    
-    def _run_shim(coro):
-        """Run coroutine in a fresh loop."""
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-
-    mock_loop = MagicMock()
-    mock_loop.run_until_complete.side_effect = _run_shim
-    # Return our mock loop when routes calls get_event_loop()
-    mock_asyncio.get_event_loop.return_value = mock_loop
-    
-    monkeypatch.setattr(routes, "asyncio", mock_asyncio)
-
     routes.init(
         odyn=odyn,
         data_store=ds,

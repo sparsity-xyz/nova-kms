@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import time
 import threading
-from typing import Dict, Optional
+from typing import Dict
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
