@@ -135,7 +135,7 @@ class SimulatedNetwork:
 class SimulatedNode:
     """Wraps the KMS components for a single node instance."""
     
-    def __init__(self, wallet, network: SimulatedNetwork, kms_app_id=43):
+    def __init__(self, wallet, network: SimulatedNetwork, kms_app_id=49):
         self.wallet = wallet
         self.network = network
         self.ds = DataStore(node_id=wallet)

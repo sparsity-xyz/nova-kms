@@ -40,7 +40,7 @@ from sync_manager import (
 @pytest.fixture(autouse=True)
 def _setup_encryption(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
-    monkeypatch.setattr(config, "KMS_APP_ID", 43)
+    monkeypatch.setattr(config, "KMS_APP_ID", 49)
     
     # Mock encryption helpers to bypass real ECIES logic
     import secure_channel
@@ -62,7 +62,7 @@ from nova_registry import AppStatus, InstanceStatus, VersionStatus
 
 @dataclass
 class _FakeApp:
-    app_id: int = 43
+    app_id: int = 49
     latest_version_id: int = 1
     status: object = AppStatus.ACTIVE
 
@@ -76,7 +76,7 @@ class _FakeVersion:
 @dataclass
 class _FakeInstance:
     instance_id: int = 1
-    app_id: int = 43
+    app_id: int = 49
     version_id: int = 1
     tee_wallet_address: str = ""
     instance_url: str = ""
@@ -112,7 +112,7 @@ def nova_reg():
 
     reg = MagicMock()
 
-    reg.get_app.return_value = _FakeApp(app_id=43, latest_version_id=1)
+    reg.get_app.return_value = _FakeApp(app_id=49, latest_version_id=1)
     reg.get_version.return_value = _FakeVersion(version_id=1, status=VersionStatus.ENROLLED)
 
     # Build instances
@@ -121,7 +121,7 @@ def nova_reg():
         url = _PEER_URLS.get(wallet.lower(), f"http://localhost:{5000 + idx}")
         instances[idx] = _FakeInstance(
             instance_id=idx,
-            app_id=43,
+            app_id=49,
             version_id=1,
             tee_wallet_address=wallet,
             instance_url=url,
@@ -144,7 +144,7 @@ def nova_reg():
         _next_instance_id[0] += 1
         return _FakeInstance(
             instance_id=_next_instance_id[0],
-            app_id=43,
+            app_id=49,
             version_id=1,
             tee_wallet_address=w,
             instance_url="",
@@ -232,19 +232,16 @@ class TestPeerCache:
     def test_refresh(self, peer_cache, kms_reg, nova_reg, monkeypatch):
         # Mock validate_peer_url to accept any URL in tests
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peer_cache.refresh()
         assert len(peer_cache._peers) == len(_PEER_WALLETS)
 
     def test_get_peers_auto_refreshes(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peers = peer_cache.get_peers()
         assert len(peers) == len(_PEER_WALLETS)
 
     def test_get_peers_exclude_wallet(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peers = peer_cache.get_peers()
         assert len(peers) == len(_PEER_WALLETS)
         filtered = peer_cache.get_peers(exclude_wallet="0xOp1")
@@ -252,14 +249,12 @@ class TestPeerCache:
 
     def test_remove_peer(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peer_cache.refresh()
         peer_cache.remove_peer("0xOp1")
         assert all(p["tee_wallet_address"] != "0xOp1" for p in peer_cache._peers)
 
     def test_get_wallet_by_url(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peer_cache.refresh()
         url = peer_cache._peers[0]["node_url"]
         wallet = peer_cache.get_wallet_by_url(url)
@@ -267,13 +262,11 @@ class TestPeerCache:
 
     def test_get_wallet_by_url_unknown(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peer_cache.refresh()
         assert peer_cache.get_wallet_by_url("http://nobody") is None
 
     def test_refresh_skip_invalid_url(self, peer_cache, monkeypatch):
         from sync_manager import URLValidationError
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         call_count = {"n": 0}
 
         def _validate(url):
@@ -289,14 +282,12 @@ class TestPeerCache:
 
     def test_refresh_handles_instance_lookup_error(self, peer_cache, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         nova_reg.get_instance_by_wallet.side_effect = RuntimeError("chain error")
         peer_cache.refresh()
         assert len(peer_cache._peers) == 0
 
     def test_stale_triggers_refresh(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         peer_cache.refresh()
         # Manually mark as stale
         peer_cache._last_refresh = 0
@@ -340,7 +331,7 @@ class TestDeltaSerialization:
 
     def test_apply_deltas(self, sync_mgr):
         data = {
-            "42": [{
+            "49": [{
                 "key": "synced_key",
                 "value": "aabb",
                 "version": {"peer": 1},
@@ -351,7 +342,7 @@ class TestDeltaSerialization:
         }
         merged = sync_mgr._apply_deltas(data)
         assert merged == 1
-        rec = sync_mgr.data_store.get(42, "synced_key")
+        rec = sync_mgr.data_store.get(49, "synced_key")
         assert rec is not None
 
 
@@ -443,7 +434,7 @@ class TestHandleIncomingSync:
         def _get_non_kms_instance(w):
             return _FakeInstance(
                 instance_id=999,
-                app_id=123,  # Not KMS_APP_ID (43)
+                app_id=123,  # Not KMS_APP_ID (49)
                 version_id=1,
                 tee_wallet_address=w,
                 status=InstanceStatus.ACTIVE,
@@ -559,7 +550,6 @@ class TestMasterSecretRequest:
 class TestVerifyAndSyncPeers:
     def test_verified_count(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
 
         # Mock probe_node to return True
@@ -569,7 +559,6 @@ class TestVerifyAndSyncPeers:
 
     def test_unreachable_peer_skipped(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
 
         with patch("probe.probe_node", return_value=False):
@@ -578,7 +567,6 @@ class TestVerifyAndSyncPeers:
 
     def test_non_operator_removed(self, sync_mgr, nova_reg, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         sync_mgr.peer_cache.refresh()
 
         # Make nova_reg return instances with wrong app_id so they fail validation
@@ -630,7 +618,6 @@ class TestNodeTick:
 
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch):
-        monkeypatch.setattr(config, "KMS_APP_ID", 43)
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
 
     @pytest.fixture

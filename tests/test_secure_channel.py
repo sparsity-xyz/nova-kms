@@ -71,7 +71,7 @@ def _make_p256_der() -> bytes:
 @dataclass
 class _FakeInstance:
     instance_id: int = 1
-    app_id: int = 43
+    app_id: int = 49
     version_id: int = 1
     tee_wallet_address: str = "0xABCD"
     instance_url: str = "http://localhost:5000"
@@ -90,7 +90,7 @@ class _FakeInstance:
 @pytest.fixture(autouse=True)
 def _test_config(monkeypatch):
     monkeypatch.setattr(config, "IN_ENCLAVE", False)
-    monkeypatch.setattr(config, "KMS_APP_ID", 43)
+    monkeypatch.setattr(config, "KMS_APP_ID", 49)
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ def nova_reg(p384_der):
 
     inst = _FakeInstance(
         instance_id=1,
-        app_id=43,
+        app_id=49,
         tee_wallet_address="0xPeerWallet",
         tee_pubkey=p384_der,
         status=InstanceStatus.ACTIVE,
@@ -331,7 +331,7 @@ class TestVerifyPeerInKmsOperatorSet:
         from nova_registry import InstanceStatus
         nova_reg.get_instance_by_wallet.return_value = _FakeInstance(
             instance_id=1,
-            app_id=43,
+            app_id=49,
             tee_wallet_address="0xPeerWallet",
             tee_pubkey=p384_der,
             status=InstanceStatus.STOPPED,
