@@ -208,15 +208,15 @@ DEFAULT_TTL_MS: int = 0
 # It drives: master secret checks, operator status checks, and sync initiation.
 #
 # Used in: app.py (BackgroundScheduler interval)
-KMS_NODE_TICK_SECONDS: int = 30
+KMS_NODE_TICK_SECONDS: int = 60
 
 
-# SYNC_INTERVAL_SECONDS:
+# DATA_SYNC_INTERVAL_SECONDS:
 # Defines how frequently the background sync process (pushing deltas to peers) runs.
-# This throttles network traffic; we don't need to sync on every single tick.
+# This drives faster data convergence than the heavy node_tick cycle.
 #
-# Used in: sync_manager.py (SyncManager.node_tick logic)
-SYNC_INTERVAL_SECONDS: int = 60
+# Used in: app.py (BackgroundScheduler interval for sync_tick)
+DATA_SYNC_INTERVAL_SECONDS: int = 10
 
 # SYNC_BATCH_SIZE:
 # The maximum number of records to include in a single sync push request.

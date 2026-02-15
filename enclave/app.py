@@ -254,6 +254,12 @@ async def lifespan(app: FastAPI):
         seconds=config.KMS_NODE_TICK_SECONDS,
         args=[master_secret_mgr],
     )
+    # 11. Dedicated sync task (faster convergence)
+    scheduler.add_job(
+        components["sync_manager"].sync_tick,
+        "interval",
+        seconds=config.DATA_SYNC_INTERVAL_SECONDS,
+    )
     scheduler.start()
     logger.info("=== Nova KMS started successfully ===")
 

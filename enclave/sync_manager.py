@@ -40,7 +40,6 @@ import config as config_module
 from config import (
     MAX_SYNC_PAYLOAD_BYTES,
     SYNC_BATCH_SIZE,
-    SYNC_INTERVAL_SECONDS,
 )
 from data_store import DataStore
 from url_validator import URLValidationError, validate_peer_url
@@ -635,15 +634,33 @@ class SyncManager:
             logger.debug("Node tick: Online; setting available...")
             _set_available()
 
-        # 4) If online: sync data with peers (paced)
-        now = time.time()
-        # Use config constant directly (imported at top)
-        if now - self._last_push_deltas_at >= config_module.SYNC_INTERVAL_SECONDS:
-            try:
-                self.push_deltas()
-                logger.debug("Node tick: Pushed deltas...")
-            finally:
-                self._last_push_deltas_at = now
+        # 4) Data sync is now handled by an independent scheduled task (sync_tick).
+        pass
+
+    def sync_tick(self) -> None:
+        """
+        Independent scheduled task for data synchronization.
+        Pushes local deltas to peers if the node is online.
+        """
+        # Only sync if the master secret is initialized (we have the sync key)
+        if not self._sync_key:
+            return
+
+        # Ensure routes are initialized before checking availability
+        import routes as routes_module
+        try:
+            available, _ = routes_module.get_service_availability()
+            if not available:
+                return
+        except Exception:
+            # If routes module is not ready, skip sync
+            return
+
+        try:
+            self.push_deltas()
+            logger.debug("Sync tick: Pushed deltas")
+        except Exception as exc:
+            logger.debug(f"Sync tick push_deltas failed: {exc}")
 
     def _sync_master_secret_from_peer(self, peer_url: str, master_secret_mgr) -> bool:
         """
