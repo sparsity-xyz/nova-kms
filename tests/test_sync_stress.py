@@ -7,13 +7,12 @@ Simulates a cluster of KMS nodes with a mocked inter-node network to validate:
 3. Node churn resilience.
 """
 
-import json
 import logging
 import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -220,36 +219,32 @@ def test_cluster_convergence_under_concurrent_writes(network):
         for i in range(10):
             executor.submit(writer, i)
 
-    # Allow time for final synchronization
+    # Wait for eventual convergence with bounded polling to reduce flakiness.
     logging.info("Waiting for data convergence...")
-    time.sleep(5)
-    
+    deadline = time.time() + 20
+    converged = False
+
+    def _snapshot_fingerprint(node):
+        snap = node.ds.full_snapshot()
+        out = {}
+        for app_id, records in snap.items():
+            per_app = {}
+            for rec in records:
+                per_app[rec.key] = (rec.value, dict(rec.version.clock))
+            out[app_id] = per_app
+        return out
+
+    while time.time() < deadline:
+        reference = _snapshot_fingerprint(nodes[0])
+        if all(_snapshot_fingerprint(n) == reference for n in nodes[1:]):
+            converged = True
+            break
+        time.sleep(0.3)
+
     for node in nodes:
         node.stop_event.set()
 
-    # Final check: compare DataStores
-    # Note: VectorClock + LWW should ensure consistency
-    reference_node = nodes[0]
-    ref_snap = reference_node.ds.full_snapshot()
-    
-    for i in range(1, num_nodes):
-        target_node = nodes[i]
-        target_snap = target_node.ds.full_snapshot()
-        
-        # Compare keys
-        assert ref_snap.keys() == target_snap.keys(), f"Node {i} key mismatch"
-        
-        for app_id in ref_snap:
-            ref_recs = {r.key: r for r in ref_snap[app_id]}
-            target_recs = {r.key: r for r in target_snap[app_id]}
-            
-            assert ref_recs.keys() == target_recs.keys()
-            for key in ref_recs:
-                r1 = ref_recs[key]
-                r2 = target_recs[key]
-                # Check value and version
-                assert r1.value == r2.value, f"Value mismatch for app {app_id}, key {key} between Node 0 and Node {i}"
-                assert r1.version.clock == r2.version.clock, f"Version mismatch for app {app_id}, key {key}"
+    assert converged, "Cluster did not converge before timeout"
 
     logging.info(f"Convergence verified across {num_nodes} nodes.")
 

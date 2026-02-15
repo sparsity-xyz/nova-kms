@@ -447,12 +447,11 @@ def _require_fresh_timestamp(ts: str) -> None:
         raise RuntimeError("Missing timestamp")
     try:
         ts_int = int(ts)
-    except Exception:
+    except (TypeError, ValueError):
         raise RuntimeError("Invalid timestamp")
 
     max_age = POP_MAX_AGE_SECONDS
     now = int(time.time())
     if abs(now - ts_int) > max_age:
         raise RuntimeError("Stale timestamp")
-
 

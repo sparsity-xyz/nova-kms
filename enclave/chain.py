@@ -163,14 +163,15 @@ def encode_address(addr: str) -> str:
 
 """
 ==============================================================================
-NOTE: Transaction helpers intentionally removed
+NOTE: Generic transaction helpers intentionally removed
 ==============================================================================
 
-The KMS design guarantees that enclave nodes NEVER submit on-chain
-transactions — all state changes are driven by NovaAppRegistry callbacks.
+The KMS runtime is mostly read-only on-chain. The normal lifecycle is driven
+by NovaAppRegistry callbacks, but bootstrap logic can submit a bounded
+`setMasterSecretHash` transaction via `kms_registry.py`.
 
 Earlier versions of this module included generic transaction-building and
 broadcast helpers adapted from the Nova app-template.  They were unused in
 this project and posed a risk of accidental misuse, so they have been
-removed for clarity and to reinforce the "read-only chain access" invariant.
+removed for clarity and to avoid accidental generic transaction submission from this module.
 """

@@ -521,12 +521,25 @@ async def derive_key(request: Request, response: Response, body: dict = None):
     
     logger.debug(f"derive_key request: app_id={app_id} path={path} length={length}")
 
-    if not path:
+    if not isinstance(path, str) or not path:
         raise HTTPException(status_code=400, detail="Missing 'path' field")
+    if not isinstance(context, str):
+        raise HTTPException(status_code=400, detail="'context' must be a string")
+    if isinstance(length, bool):
+        raise HTTPException(status_code=400, detail="'length' must be an integer")
+    try:
+        length = int(length)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="'length' must be an integer")
+    if length <= 0 or length > 1024:
+        raise HTTPException(status_code=400, detail="'length' must be in range 1..1024")
 
-    derived = _master_secret_mgr.derive(
-        app_id, path, length=length, context=context
-    )
+    try:
+        derived = _master_secret_mgr.derive(
+            app_id, path, length=length, context=context
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # Encrypt response
     resp_data = {

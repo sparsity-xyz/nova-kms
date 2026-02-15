@@ -1017,29 +1017,26 @@ class SyncManager:
         # Timestamp freshness check (limits replay window)
         try:
             _require_fresh_timestamp(str(p_ts))
-        except Exception as exc:
+        except RuntimeError as exc:
             logger.warning(f"Sync rejected from {p_wallet}: Timestamp freshness check failed: {exc}")
             return {"status": "error", "reason": str(exc)}
 
         # A. Validate and consume nonce
         import base64
+        import binascii
         try:
-            nonce_bytes = base64.b64decode(p_nonce_b64)
+            nonce_bytes = base64.b64decode(p_nonce_b64, validate=True)
             if not _nonce_store.validate_and_consume(nonce_bytes):
                 logger.warning(f"Sync rejected from {p_wallet}: Invalid or expired nonce")
                 return {"status": "error", "reason": "Invalid or expired nonce"}
-        except Exception:
+        except (binascii.Error, ValueError, TypeError):
             logger.warning(f"Sync rejected from {p_wallet}: Invalid nonce encoding")
             return {"status": "error", "reason": "Invalid nonce encoding"}
 
         # B. Verify signature: NovaKMS:Auth:<Nonce>:<Recipient_Wallet>:<Timestamp>
         # Enforce a single canonical wallet string format (lowercase) across sender/receiver.
         message = f"NovaKMS:Auth:{p_nonce_b64}:{self.node_wallet}:{p_ts}"
-        try:
-            recovered = recover_wallet_from_signature(message, p_sig)
-        except Exception as exc:
-            logger.warning(f"Peer PoP signature recovery crashed: {exc}")
-            return {"status": "error", "reason": "Signature recovery failed"}
+        recovered = recover_wallet_from_signature(message, p_sig)
 
         if not recovered:
             logger.warning(

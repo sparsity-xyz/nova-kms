@@ -362,6 +362,15 @@ class TestDerive:
         r2 = client.post("/kms/derive", json={"path": "d"}, headers=h)
         assert r1.json()["key"] == r2.json()["key"]
 
+    @pytest.mark.parametrize("length", ["abc", 0, -1, 2048, True])
+    def test_derive_invalid_length(self, client, length):
+        resp = client.post(
+            "/kms/derive",
+            json={"path": "bad", "length": length},
+            headers={"x-tee-wallet": "0x1234"},
+        )
+        assert resp.status_code == 400
+
     def test_derive_unauthorized(self, client, _setup_routes):
         """Derive returns 403 when authorizer rejects."""
         import routes
