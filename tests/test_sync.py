@@ -49,7 +49,7 @@ def _setup_encryption(monkeypatch):
     
     # Mock identity verification for peers
     monkeypatch.setattr(secure_channel, "verify_peer_identity", lambda *a, **kw: True)
-    monkeypatch.setattr(secure_channel, "get_tee_pubkey_hex_for_wallet", lambda *a: "01"*32)
+    monkeypatch.setattr(secure_channel, "get_tee_pubkey_der_hex", lambda *a: "01"*32)
 
     # Mock DataStore encryption to avoid AES errors with fake data
     from data_store import DataStore, _Namespace

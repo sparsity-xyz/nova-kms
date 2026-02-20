@@ -705,9 +705,9 @@ async def sync_endpoint(request: Request, response: Response, body: dict = None)
     if _is_encrypted_envelope(body):
         peer_wallet = kms_pop.get("wallet")
         if peer_wallet and sender_tee_pubkey:
-            from secure_channel import get_tee_pubkey_hex_for_wallet
+            from secure_channel import get_tee_pubkey_der_hex
             try:
-                onchain_pubkey_hex = get_tee_pubkey_hex_for_wallet(
+                onchain_pubkey_hex = get_tee_pubkey_der_hex(
                     peer_wallet,
                     _sync_manager.peer_cache.nova_registry if _sync_manager.peer_cache else None
                 )

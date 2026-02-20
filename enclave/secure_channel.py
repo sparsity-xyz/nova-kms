@@ -165,24 +165,39 @@ def decrypt_json_envelope(
     return json.loads(plaintext)
 
 
-def get_tee_pubkey_hex_for_wallet(
+def get_tee_pubkey_der(
     wallet: str,
     nova_registry,
-) -> Optional[str]:
+) -> Optional[bytes]:
     """
-    Retrieve the on-chain teePubkey (P-384, DER) for a wallet address.
+    Retrieve the exact on-chain teePubkey bytes (P-384, DER) for a wallet address.
 
-    Returns the hex-encoded teePubkey, or None if not found/invalid.
+    Returns the raw DER-encoded bytes, or None if not found/invalid.
     """
     try:
         instance = nova_registry.get_instance_by_wallet(wallet)
         tee_pubkey_bytes = getattr(instance, "tee_pubkey", b"") or b""
         if not tee_pubkey_bytes or not validate_tee_pubkey(tee_pubkey_bytes):
             return None
-        return tee_pubkey_bytes.hex()
+        return tee_pubkey_bytes
     except Exception as exc:
-        logger.debug(f"Failed to get teePubkey for {wallet}: {exc}")
+        logger.debug(f"Failed to get teePubkey DER for {wallet}: {exc}")
         return None
+
+
+def get_tee_pubkey_der_hex(
+    wallet: str,
+    nova_registry,
+) -> Optional[str]:
+    """
+    Retrieve the on-chain teePubkey (P-384, DER format) for a wallet address.
+
+    Returns the hex-encoded teePubkey, or None if not found/invalid.
+    """
+    der_bytes = get_tee_pubkey_der(wallet, nova_registry)
+    if der_bytes:
+        return der_bytes.hex()
+    return None
 
 
 # =============================================================================
@@ -379,21 +394,22 @@ def verify_peer_in_kms_operator_set(
 # =============================================================================
 
 
-def get_peer_tee_pubkey(
+def get_peer_tee_pubkey_parsed(
     peer_wallet: str,
     nova_registry,
 ) -> Optional[ec.EllipticCurvePublicKey]:
     """
-    Retrieve and parse the on-chain P-384 teePubkey for *peer_wallet*.
+    Retrieve and parse the on-chain P-384 teePubkey (DER format) for *peer_wallet*.
 
     Returns the parsed public key, or None if not found / invalid.
     """
+    tee_pubkey_bytes = get_tee_pubkey_der(peer_wallet, nova_registry)
+    if not tee_pubkey_bytes:
+        return None
     try:
-        instance = nova_registry.get_instance_by_wallet(peer_wallet)
-        tee_pubkey_bytes = getattr(instance, "tee_pubkey", b"") or b""
         return parse_tee_pubkey(tee_pubkey_bytes)
     except Exception as exc:
-        logger.debug(f"Failed to get teePubkey for {peer_wallet}: {exc}")
+        logger.debug(f"Failed to parse teePubkey for {peer_wallet}: {exc}")
         return None
 
 

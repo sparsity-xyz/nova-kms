@@ -7,7 +7,8 @@ Covers:
   - parse_tee_pubkey (parsing, error handling)
   - verify_peer_identity (ACTIVE instance, wallet match, P-384 teePubkey)
   - verify_peer_in_kms_operator_set (KMS_APP_ID + identity)
-  - get_peer_tee_pubkey (retrieval + parsing)
+  - get_peer_tee_pubkey_parsed (retrieval + parsing)
+  - get_tee_pubkey_der_hex (retrieval + hex)
   - generate_ecdh_keypair (P-384 ephemeral keys)
   - derive_ecdh_shared_key (symmetric derivation)
   - Independence of wallet (secp256k1) and teePubkey (P-384)
@@ -26,7 +27,7 @@ import config
 from secure_channel import (
     derive_ecdh_shared_key,
     generate_ecdh_keypair,
-    get_peer_tee_pubkey,
+    get_peer_tee_pubkey_parsed,
     parse_tee_pubkey,
     validate_tee_pubkey,
     verify_peer_identity,
@@ -348,13 +349,13 @@ class TestVerifyPeerInKmsOperatorSet:
 
 
 # =============================================================================
-# get_peer_tee_pubkey
+# get_peer_tee_pubkey_parsed
 # =============================================================================
 
 
-class TestGetPeerTeePubkey:
+class TestGetPeerTeePubkeyParsed:
     def test_returns_parsed_key(self, nova_reg):
-        key = get_peer_tee_pubkey("0xPeerWallet", nova_reg)
+        key = get_peer_tee_pubkey_parsed("0xPeerWallet", nova_reg)
         assert key is not None
         assert isinstance(key, ec.EllipticCurvePublicKey)
         assert isinstance(key.curve, ec.SECP384R1)
@@ -362,7 +363,7 @@ class TestGetPeerTeePubkey:
     def test_returns_none_for_missing(self):
         reg = MagicMock()
         reg.get_instance_by_wallet.side_effect = ValueError("not found")
-        assert get_peer_tee_pubkey("0xNoOne", reg) is None
+        assert get_peer_tee_pubkey_parsed("0xNoOne", reg) is None
 
     def test_returns_none_for_invalid_pubkey(self):
         from nova_registry import InstanceStatus
@@ -372,7 +373,7 @@ class TestGetPeerTeePubkey:
         )
         reg = MagicMock()
         reg.get_instance_by_wallet.return_value = inst
-        assert get_peer_tee_pubkey("0xABCD", reg) is None
+        assert get_peer_tee_pubkey_parsed("0xABCD", reg) is None
 
 
 # =============================================================================
@@ -721,9 +722,9 @@ class TestDecryptJsonEnvelope:
         assert result == {"test": "data"}
 
 
-class TestGetTeePubkeyHexForWallet:
+class TestGetTeePubkeyDerHex:
     def test_returns_hex(self, p384_der):
-        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from secure_channel import get_tee_pubkey_der_hex
         from nova_registry import InstanceStatus
 
         reg = MagicMock()
@@ -733,11 +734,11 @@ class TestGetTeePubkeyHexForWallet:
             status=InstanceStatus.ACTIVE,
         )
 
-        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        result = get_tee_pubkey_der_hex("0xWallet", reg)
         assert result == p384_der.hex()
 
     def test_returns_none_for_missing_pubkey(self):
-        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from secure_channel import get_tee_pubkey_der_hex
         from nova_registry import InstanceStatus
 
         reg = MagicMock()
@@ -747,11 +748,11 @@ class TestGetTeePubkeyHexForWallet:
             status=InstanceStatus.ACTIVE,
         )
 
-        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        result = get_tee_pubkey_der_hex("0xWallet", reg)
         assert result is None
 
     def test_returns_none_for_invalid_pubkey(self):
-        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from secure_channel import get_tee_pubkey_der_hex
         from nova_registry import InstanceStatus
 
         reg = MagicMock()
@@ -761,16 +762,16 @@ class TestGetTeePubkeyHexForWallet:
             status=InstanceStatus.ACTIVE,
         )
 
-        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        result = get_tee_pubkey_der_hex("0xWallet", reg)
         assert result is None
 
     def test_returns_none_on_exception(self):
-        from secure_channel import get_tee_pubkey_hex_for_wallet
+        from secure_channel import get_tee_pubkey_der_hex
 
         reg = MagicMock()
         reg.get_instance_by_wallet.side_effect = RuntimeError("RPC error")
 
-        result = get_tee_pubkey_hex_for_wallet("0xWallet", reg)
+        result = get_tee_pubkey_der_hex("0xWallet", reg)
         assert result is None
 
 
