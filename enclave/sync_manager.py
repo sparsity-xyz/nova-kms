@@ -879,10 +879,17 @@ class SyncManager:
         Push recent deltas to all healthy peers.
         Returns the number of peers successfully synced.
         """
-        since_ms = self._last_push_ms
+        # Capture current time before fetching deltas to prevent race conditions 
+        # where records inserted during the push are missed by the next push.
+        push_start_ms = int(time.time() * 1000)
+        
+        # Overlap by 1ms to catch boundary cases
+        since_ms = max(0, self._last_push_ms - 1)
+        
         deltas = self.data_store.get_deltas_since(since_ms)
         if not deltas:
             logger.debug("Push deltas: No new deltas to push")
+            self._last_push_ms = push_start_ms
             return 0
         
         logger.debug(f"Push deltas: Found {len(deltas)} records since {since_ms}")
@@ -907,7 +914,7 @@ class SyncManager:
                 logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
                 logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
 
-        self._last_push_ms = int(time.time() * 1000)
+        self._last_push_ms = push_start_ms
         logger.info(f"Delta push: {success_count}/{len(peers)} peers synced")
         return success_count
 
