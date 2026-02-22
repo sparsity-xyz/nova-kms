@@ -34,14 +34,20 @@ class Chain:
     """Low-level RPC helper.  Auto-selects Helios or mock endpoint."""
 
     DEFAULT_MOCK_RPC = "http://odyn.sparsity.cloud:8545"
-    DEFAULT_HELIOS_RPC = "http://127.0.0.1:8545"
+    # Registry/auth chain default (Base Sepolia) exposed by Helios in-enclave.
+    DEFAULT_BASE_SEPOLIA_HELIOS_RPC = "http://127.0.0.1:18545"
 
     def __init__(self, rpc_url: Optional[str] = None):
+        helios_rpc_url = os.getenv("HELIOS_RPC_URL", "").strip()
         if rpc_url:
             self.endpoint = rpc_url
+        elif helios_rpc_url:
+            self.endpoint = helios_rpc_url
         else:
             is_enclave = os.getenv("IN_ENCLAVE", "False").lower() == "true"
-            self.endpoint = self.DEFAULT_HELIOS_RPC if is_enclave else self.DEFAULT_MOCK_RPC
+            self.endpoint = (
+                self.DEFAULT_BASE_SEPOLIA_HELIOS_RPC if is_enclave else self.DEFAULT_MOCK_RPC
+            )
         self.w3 = Web3(Web3.HTTPProvider(self.endpoint))
 
     # ------------------------------------------------------------------

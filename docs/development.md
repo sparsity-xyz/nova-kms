@@ -222,5 +222,7 @@ Per-app namespace isolation. LRU eviction when quota exceeded.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `IN_ENCLAVE` | Enclave mode switch (`true` uses local Helios endpoint and strict auth rules) | `true` |
+| `HELIOS_RPC_URL` | Optional override for local Helios JSON-RPC endpoint | `http://127.0.0.1:18545` (when `IN_ENCLAVE=true`) |
 | `NODE_URL` | Public URL of this KMS node | (empty) |
 | `CORS_ORIGINS` | Allowed CORS origins | `*` |

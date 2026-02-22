@@ -21,19 +21,16 @@ egress:
     - "0.0.0.0/0"
     - "::/0"
 
-storage:
-  s3:
-    enabled: false  # KMS is non-persistent by design
-
 defaults:
   cpu_count: 2
   memory_mb: 4096
 
 helios_rpc:
   enabled: true
-  kind: opstack
-  network: base-sepolia
-  listen_port: 8545
-  execution_rpc: "https://sepolia.base.org"
-
-services: []
+  chains:
+    - name: "L2-base-sepolia"
+      network_id: "84532"
+      kind: opstack
+      network: base-sepolia
+      execution_rpc: "https://sepolia.base.org"
+      local_rpc_port: 18545
