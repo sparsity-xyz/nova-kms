@@ -223,7 +223,7 @@ def app_identity_from_signature(request) -> Optional[ClientIdentity]:
 
     try:
         import base64
-        nonce_bytes = base64.b64decode(nonce_b64)
+        nonce_bytes = base64.b64decode(nonce_b64, validate=True)
         if not _nonce_store.validate_and_consume(nonce_bytes):
             raise RuntimeError("Invalid or expired nonce")
 
@@ -454,4 +454,3 @@ def _require_fresh_timestamp(ts: str) -> None:
     now = int(time.time())
     if abs(now - ts_int) > max_age:
         raise RuntimeError("Stale timestamp")
-

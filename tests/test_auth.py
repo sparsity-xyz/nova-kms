@@ -21,10 +21,12 @@ from auth import (
     ClientIdentity,
     _NonceStore,
     _require_fresh_timestamp,
+    app_identity_from_signature,
     authenticate_app,
     identity_from_headers,
     issue_nonce,
     recover_wallet_from_signature,
+    set_node_wallet,
     verify_wallet_signature,
 )
 from nova_registry import (
@@ -477,3 +479,15 @@ class TestAuthenticateApp:
             req.headers = {}  # empty dict — no PoP headers present
             with pytest.raises(RuntimeError):
                 authenticate_app(req, {})
+
+    def test_app_pop_rejects_invalid_base64_nonce(self):
+        set_node_wallet("0x" + "11" * 20)
+        req = MagicMock()
+        req.headers = {
+            "x-app-signature": "0xdeadbeef",
+            "x-app-timestamp": str(int(time.time())),
+            "x-app-nonce": "@@@",  # invalid base64
+            "x-app-wallet": "0x" + "22" * 20,
+        }
+        with pytest.raises(RuntimeError, match="authentication failed"):
+            app_identity_from_signature(req)

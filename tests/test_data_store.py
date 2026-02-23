@@ -376,6 +376,54 @@ class TestEviction:
 
 
 # =============================================================================
+# Tombstone compaction
+# =============================================================================
+
+
+class TestTombstoneCompaction:
+    @pytest.fixture(autouse=True)
+    def _mock_encryption(self, monkeypatch):
+        from data_store import _Namespace
+        monkeypatch.setattr(_Namespace, "_encrypt", lambda self, v: v)
+        monkeypatch.setattr(_Namespace, "_decrypt", lambda self, c: c)
+
+    def test_expired_tombstones_are_compacted(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "TOMBSTONE_RETENTION_MS", 1000)
+        monkeypatch.setattr(config, "MAX_TOMBSTONES_PER_APP", 1000)
+
+        ds = DataStore(node_id="node1")
+        ds.put(1, "old", b"v1")
+        ds.delete(1, "old")
+
+        ns = ds._ns(1)
+        with ns._lock:
+            ns.records["old"].updated_at_ms = int(time.time() * 1000) - 10_000
+
+        ds.put(1, "new", b"v2")
+        ds.delete(1, "new")
+
+        assert "old" not in ns.records
+        assert "new" in ns.records and ns.records["new"].tombstone
+
+    def test_tombstones_are_bounded_by_count_cap(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "TOMBSTONE_RETENTION_MS", 10_000_000)
+        monkeypatch.setattr(config, "MAX_TOMBSTONES_PER_APP", 2)
+
+        ds = DataStore(node_id="node1")
+        for key in ("a", "b", "c"):
+            ds.put(1, key, b"v")
+            ds.delete(1, key)
+            time.sleep(0.002)
+
+        ns = ds._ns(1)
+        tombstones = [k for k, rec in ns.records.items() if rec.tombstone]
+        assert len(tombstones) <= 2
+        assert "a" not in tombstones
+
+
+# =============================================================================
 # Clock Skew Protection
 # =============================================================================
 

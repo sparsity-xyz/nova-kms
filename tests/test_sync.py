@@ -17,6 +17,7 @@ import hashlib
 import hmac as hmac_mod
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from unittest.mock import MagicMock, Mock, patch
 
@@ -286,6 +287,42 @@ class TestPeerCache:
         peer_cache.refresh()
         assert len(peer_cache._peers) == 0
 
+    def test_refresh_skips_non_zk_verified_instances(self, peer_cache, nova_reg, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        original = nova_reg.get_instance_by_wallet.side_effect
+
+        def _instance_side_effect(wallet: str):
+            inst = original(wallet)
+            if wallet.lower() == _PEER_WALLETS[0].lower():
+                inst.zk_verified = False
+            return inst
+
+        nova_reg.get_instance_by_wallet.side_effect = _instance_side_effect
+        peer_cache.refresh()
+        assert len(peer_cache._peers) == len(_PEER_WALLETS) - 1
+
+    def test_refresh_fails_closed_when_version_lookup_errors(self, peer_cache, nova_reg, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        nova_reg.get_version.side_effect = RuntimeError("version lookup failed")
+        peer_cache.refresh()
+        assert len(peer_cache._peers) == 0
+
+    def test_get_peers_uses_singleflight_refresh(self, peer_cache, monkeypatch):
+        calls = {"count": 0}
+
+        def _slow_fetch():
+            calls["count"] += 1
+            time.sleep(0.05)
+            return []
+
+        monkeypatch.setattr(peer_cache, "_fetch_peers_from_chain", _slow_fetch)
+        peer_cache._last_refresh = 0
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: peer_cache.get_peers(), range(4)))
+
+        assert calls["count"] == 1
+
     def test_stale_triggers_refresh(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         peer_cache.refresh()
@@ -505,41 +542,59 @@ class TestMasterSecretRequest:
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives import serialization
 
-        import app as app_module
-
         mgr = MasterSecretManager()
         mgr.initialize_from_peer(b"\xAB" * 32)
-        # Patch app_module.master_secret_mgr
-        with patch.object(app_module, "master_secret_mgr", mgr, create=True):
-            ecdh_key = ec.generate_private_key(ec.SECP384R1())
-            pub_bytes = ecdh_key.public_key().public_bytes(
-                serialization.Encoding.DER,
-                serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            body = {
-                "type": "master_secret_request",
-                "sender_wallet": "0xSender",
-                "ecdh_pubkey": pub_bytes.hex(),
-            }
+        sync_mgr._master_secret_mgr = mgr
+        ecdh_key = ec.generate_private_key(ec.SECP384R1())
+        pub_bytes = ecdh_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        body = {
+            "type": "master_secret_request",
+            "sender_wallet": "0xSender",
+            "ecdh_pubkey": pub_bytes.hex(),
+        }
 
-            # Build PoP
-            from auth import issue_nonce
-            from eth_account import Account
-            from eth_account.messages import encode_defunct
+        # Build PoP
+        from auth import issue_nonce
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
 
-            nonce = issue_nonce()
-            nonce_b64 = base64.b64encode(nonce).decode()
-            ts = str(int(time.time()))
-            acct = Account.from_key(bytes.fromhex("44" * 32))
-            msg = f"NovaKMS:Auth:{nonce_b64}:{sync_mgr.node_wallet}:{ts}"
-            sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
-            pop = {"wallet": acct.address, "signature": sig, "timestamp": ts, "nonce": nonce_b64}
+        nonce = issue_nonce()
+        nonce_b64 = base64.b64encode(nonce).decode()
+        ts = str(int(time.time()))
+        acct = Account.from_key(bytes.fromhex("44" * 32))
+        msg = f"NovaKMS:Auth:{nonce_b64}:{sync_mgr.node_wallet}:{ts}"
+        sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
+        pop = {"wallet": acct.address, "signature": sig, "timestamp": ts, "nonce": nonce_b64}
 
-            body["sender_wallet"] = acct.address
+        body["sender_wallet"] = acct.address
 
-            result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
-            assert result["status"] == "ok"
-            assert "sealed" in result
+        result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
+        assert result["status"] == "ok"
+        assert "sealed" in result
+
+    def test_master_secret_request_fails_when_manager_unavailable(self, sync_mgr, kms_reg):
+        sync_mgr._master_secret_mgr = None
+        body = {"type": "master_secret_request", "sender_wallet": "0xSender"}
+
+        from auth import issue_nonce
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        nonce = issue_nonce()
+        nonce_b64 = base64.b64encode(nonce).decode()
+        ts = str(int(time.time()))
+        acct = Account.from_key(bytes.fromhex("55" * 32))
+        msg = f"NovaKMS:Auth:{nonce_b64}:{sync_mgr.node_wallet}:{ts}"
+        sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
+        pop = {"wallet": acct.address, "signature": sig, "timestamp": ts, "nonce": nonce_b64}
+        body["sender_wallet"] = acct.address
+
+        result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
+        assert result["status"] == "error"
+        assert "manager unavailable" in result["reason"]
 
 
 # =============================================================================
@@ -601,6 +656,49 @@ class TestMakeRequest:
         result = sync_mgr._make_request("http://unknown-peer:8000/sync", {})
         assert result is None
 
+    def test_non_zk_peer_rejected_without_exception(self, sync_mgr, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        sync_mgr.peer_cache._peers = [
+            {
+                "tee_wallet_address": "0xPeerWallet",
+                "node_url": "http://peer-wallet",
+            }
+        ]
+        monkeypatch.setattr(
+            "secure_channel.verify_peer_identity",
+            lambda *args, **kwargs: False,
+        )
+
+        result = sync_mgr._make_request("http://peer-wallet/sync", {"type": "delta"})
+        assert result is None
+
+
+# =============================================================================
+# SyncManager — push_deltas resilience
+# =============================================================================
+
+
+class TestPushDeltasResilience:
+    def test_peer_exception_does_not_abort_fanout(self, sync_mgr, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        sync_mgr.peer_cache.refresh()
+        sync_mgr.data_store.put(1, "k", b"v")
+
+        calls = {"count": 0}
+
+        def _make_request(url, body, timeout=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("preflight failed")
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        sync_mgr._make_request = _make_request
+        peer_count = len(sync_mgr.peer_cache.get_peers(exclude_wallet=sync_mgr.node_wallet))
+        success = sync_mgr.push_deltas()
+        assert success == max(0, peer_count - 1)
+
 
 # =============================================================================
 # SyncManager — node_tick  (hash-based online/offline state machine)
@@ -610,7 +708,7 @@ class TestMakeRequest:
 class TestNodeTick:
     """Tests for the core hash-based online/offline lifecycle in node_tick().
 
-    Invariant: /kms/* and /sync are available ONLY when:
+    Invariant: /kms/* is available ONLY when:
         1) self is in the KMS node list (from NovaAppRegistry)
         2) on-chain masterSecretHash is non-zero
         3) local master secret hash matches the on-chain hash

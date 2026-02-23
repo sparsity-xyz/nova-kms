@@ -198,6 +198,20 @@ MAX_APP_STORAGE: int = 10_485_760     # 10 MB total per app
 # Used in: data_store.py (DataRecord creation in put)
 DEFAULT_TTL_MS: int = 0
 
+# TOMBSTONE_RETENTION_MS:
+# How long tombstones are retained to prevent deleted keys from being
+# resurrected during delayed sync. Older tombstones are compacted.
+#
+# Used in: data_store.py (_Namespace._compact_tombstones)
+TOMBSTONE_RETENTION_MS: int = 24 * 60 * 60 * 1000  # 24 hours
+
+# MAX_TOMBSTONES_PER_APP:
+# Hard cap on tombstone count per app namespace to keep memory bounded
+# under heavy delete churn.
+#
+# Used in: data_store.py (_Namespace._compact_tombstones)
+MAX_TOMBSTONES_PER_APP: int = 10_000
+
 # =============================================================================
 # Periodic Tasks (Scheduling)
 # =============================================================================
@@ -251,4 +265,3 @@ REGISTRY_CACHE_TTL_SECONDS: int = 180
 #
 # Used in: sync_manager.py (PeerCache.blacklist_peer)
 PEER_BLACKLIST_DURATION_SECONDS: int = 600
-

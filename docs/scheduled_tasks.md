@@ -27,6 +27,11 @@ This matches `enclave/app.py`, which registers both jobs via APScheduler.
 
 `node_tick` itself does not perform periodic delta pushes anymore.
 
+Note:
+- The service-availability gate applies to app-facing `/kms/*` endpoints.
+- Incoming `/sync` has a dedicated readiness gate: it is available only after the local master secret is initialized (PoP/HMAC checks still enforced).
+- Outbound sync/bootstrap requests are still allowed before full service availability.
+
 ## Task 2: `sync_tick`
 
 `sync_tick` is the lightweight data convergence task:
