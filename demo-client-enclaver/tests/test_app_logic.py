@@ -1,16 +1,41 @@
 import importlib
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 import asyncio
 
 
 THIS_DIR = Path(__file__).resolve().parent
 ENCLAVE_DIR = THIS_DIR.parent / "enclave"
-if str(ENCLAVE_DIR) not in sys.path:
-    sys.path.insert(0, str(ENCLAVE_DIR))
+_IMPORT_SCOPE_MODULES = ("config", "odyn", "app")
 
-from odyn import OdynRequestError, OdynTransportError
+
+@contextmanager
+def _demo_enclave_import_scope():
+    saved_modules = {name: sys.modules.get(name) for name in _IMPORT_SCOPE_MODULES}
+    inserted_path = False
+    enclave_path = str(ENCLAVE_DIR)
+    if enclave_path not in sys.path:
+        sys.path.insert(0, enclave_path)
+        inserted_path = True
+
+    for name in _IMPORT_SCOPE_MODULES:
+        sys.modules.pop(name, None)
+
+    try:
+        yield
+    finally:
+        for name in _IMPORT_SCOPE_MODULES:
+            sys.modules.pop(name, None)
+        if inserted_path:
+            try:
+                sys.path.remove(enclave_path)
+            except ValueError:
+                pass
+        for name, module in saved_modules.items():
+            if module is not None:
+                sys.modules[name] = module
 
 
 class FakeOdyn:
@@ -43,9 +68,8 @@ class FakeOdyn:
 def _load_app_module():
     # Ensure deterministic import config for tests.
     os.environ.setdefault("TEST_CYCLE_INTERVAL_SECONDS", "30")
-    if "app" in sys.modules:
-        return importlib.reload(sys.modules["app"])
-    return importlib.import_module("app")
+    with _demo_enclave_import_scope():
+        return importlib.import_module("app")
 
 
 def test_first_run_has_no_previous_derive_match():
@@ -97,7 +121,7 @@ def test_run_once_marks_registration_pending_for_kms_authz_error():
 
     client = app_mod.KMSDemoClient()
     client.odyn = FakeOdyn(
-        derive_exc=OdynRequestError(
+        derive_exc=app_mod.OdynRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -122,7 +146,7 @@ def test_run_once_marks_transport_timeout_as_transient_failure():
 
     client = app_mod.KMSDemoClient()
     client.odyn = FakeOdyn(
-        derive_exc=OdynTransportError(
+        derive_exc=app_mod.OdynTransportError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -146,7 +170,7 @@ def test_run_once_marks_registry_discovery_rpc_failure_as_transient_failure():
 
     client = app_mod.KMSDemoClient()
     client.odyn = FakeOdyn(
-        derive_exc=OdynRequestError(
+        derive_exc=app_mod.OdynRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -174,7 +198,7 @@ def test_run_once_marks_kms_instance_not_found_as_pending_registration():
 
     client = app_mod.KMSDemoClient()
     client.odyn = FakeOdyn(
-        derive_exc=OdynRequestError(
+        derive_exc=app_mod.OdynRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",

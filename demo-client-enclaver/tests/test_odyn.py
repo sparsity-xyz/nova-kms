@@ -1,15 +1,48 @@
+import importlib
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+
+import requests
 
 
 THIS_DIR = Path(__file__).resolve().parent
 ENCLAVE_DIR = THIS_DIR.parent / "enclave"
-if str(ENCLAVE_DIR) not in sys.path:
-    sys.path.insert(0, str(ENCLAVE_DIR))
 
 
-import odyn as odyn_mod
-import requests
+_IMPORT_SCOPE_MODULES = ("config", "odyn")
+
+
+@contextmanager
+def _demo_enclave_import_scope():
+    saved_modules = {name: sys.modules.get(name) for name in _IMPORT_SCOPE_MODULES}
+    inserted_path = False
+    enclave_path = str(ENCLAVE_DIR)
+    if enclave_path not in sys.path:
+        sys.path.insert(0, enclave_path)
+        inserted_path = True
+
+    for name in _IMPORT_SCOPE_MODULES:
+        sys.modules.pop(name, None)
+
+    try:
+        yield
+    finally:
+        for name in _IMPORT_SCOPE_MODULES:
+            sys.modules.pop(name, None)
+        if inserted_path:
+            try:
+                sys.path.remove(enclave_path)
+            except ValueError:
+                pass
+        for name, module in saved_modules.items():
+            if module is not None:
+                sys.modules[name] = module
+
+
+def _load_odyn_module():
+    with _demo_enclave_import_scope():
+        return importlib.import_module("odyn")
 
 
 class DummyResponse:
@@ -54,6 +87,7 @@ class DummySession:
 
 
 def test_odyn_rejects_non_dict_json():
+    odyn_mod = _load_odyn_module()
     od = odyn_mod.Odyn(endpoint="http://example.com")
     od._session = DummySession(response=DummyResponse(payload=["not", "dict"]))
 
@@ -65,6 +99,7 @@ def test_odyn_rejects_non_dict_json():
 
 
 def test_odyn_includes_http_error_body():
+    odyn_mod = _load_odyn_module()
     od = odyn_mod.Odyn(endpoint="http://example.com")
     od._session = DummySession(
         response=DummyResponse(
@@ -86,6 +121,7 @@ def test_odyn_includes_http_error_body():
 
 
 def test_odyn_prefers_json_error_field():
+    odyn_mod = _load_odyn_module()
     od = odyn_mod.Odyn(endpoint="http://example.com")
     od._session = DummySession(
         response=DummyResponse(
@@ -105,6 +141,7 @@ def test_odyn_prefers_json_error_field():
 
 
 def test_odyn_wraps_timeout_as_transport_error():
+    odyn_mod = _load_odyn_module()
     od = odyn_mod.Odyn(endpoint="http://example.com", timeout_seconds=10.0)
     od._session = DummySession(
         post_exc=requests.exceptions.Timeout("read timed out"),

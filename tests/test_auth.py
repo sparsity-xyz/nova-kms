@@ -407,6 +407,24 @@ class TestSignatureHelpers:
         recovered = recover_wallet_from_signature(msg, sig.signature.hex())
         assert recovered.lower() == acct.address.lower()
 
+    def test_verify_and_recover_accept_compact_recovery_id(self):
+        """Enclaver/Odyn signatures use compact recovery-id (0/1) in the last byte."""
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        acct = Account.create()
+        msg = "compact recovery id"
+        sig = bytearray(acct.sign_message(encode_defunct(text=msg)).signature)
+        # Convert legacy 27/28 to compact 0/1.
+        if sig[64] >= 27:
+            sig[64] -= 27
+        compact_sig_hex = bytes(sig).hex()
+
+        assert verify_wallet_signature(acct.address, msg, compact_sig_hex) is True
+        recovered = recover_wallet_from_signature(msg, compact_sig_hex)
+        assert recovered is not None
+        assert recovered.lower() == acct.address.lower()
+
     def test_recover_returns_none_on_empty(self):
         assert recover_wallet_from_signature("msg", "") is None
         assert recover_wallet_from_signature("", "sig") is None

@@ -29,13 +29,15 @@ from app import app
 # Deterministic test key
 _APP_PRIVATE_KEY = "0x" + "ab" * 32
 _APP_ACCOUNT = Account.from_key(bytes.fromhex("ab" * 32))
-_APP_WALLET = _APP_ACCOUNT.address.lower()
 
-_WRONG_PRIVATE_KEY = "0x" + "cd" * 32
+# Deterministic KMS node key (acts like Odyn signer for response signatures)
+_KMS_PRIVATE_KEY = "0x" + "11" * 32
+_KMS_ACCOUNT = Account.from_key(bytes.fromhex(_KMS_PRIVATE_KEY[2:]))
+
 _WRONG_ACCOUNT = Account.from_key(bytes.fromhex("cd" * 32))
 
 # The KMS node wallet used in the test fixture
-_NODE_WALLET = ("0x" + "aa" * 20).lower()
+_NODE_WALLET = _KMS_ACCOUNT.address.lower()
 
 
 def _app_pop_headers(client: TestClient, *, private_key_hex: str = _APP_PRIVATE_KEY):
@@ -91,7 +93,16 @@ def _setup(monkeypatch):
 
     odyn = MagicMock()
     odyn.eth_address.return_value = _NODE_WALLET
-    odyn.sign_message.return_value = {"signature": "0x" + "ff" * 65}
+
+    def _odyn_sign_message(message: str, include_attestation: bool = False):
+        del include_attestation
+        # Mimic Odyn's compact recovery-id form (v in {0,1}).
+        sig = bytearray(_KMS_ACCOUNT.sign_message(encode_defunct(text=message)).signature)
+        if sig[64] >= 27:
+            sig[64] -= 27
+        return {"signature": "0x" + bytes(sig).hex()}
+
+    odyn.sign_message.side_effect = _odyn_sign_message
 
     set_node_wallet(_NODE_WALLET)
 
@@ -366,6 +377,19 @@ class TestMutualResponseSignature:
         resp = client.post("/kms/derive", json={"path": "mutual"}, headers=headers)
         assert resp.status_code == 200
         assert "x-kms-response-signature" in resp.headers
+
+    def test_mutual_signature_verifies_with_kms_wallet(self, client):
+        from auth import verify_wallet_signature
+
+        headers, _ = _app_pop_headers(client)
+        client_sig = headers["x-app-signature"]
+        resp = client.post("/kms/derive", json={"path": "mutual-verify"}, headers=headers)
+        assert resp.status_code == 200
+
+        response_sig = resp.headers.get("x-kms-response-signature")
+        assert response_sig
+        response_msg = f"NovaKMS:Response:{client_sig}:{_NODE_WALLET}"
+        assert verify_wallet_signature(_NODE_WALLET, response_msg, response_sig) is True
 
     def test_no_mutual_signature_on_header_auth(self, client):
         """Header-based auth (dev mode) should not produce a mutual signature."""
