@@ -30,6 +30,17 @@ REGISTRATION_PENDING_MARKERS = (
     "kms_integration requires registry discovery configuration",
     "has no anchored appwallet on registry",
 )
+TRANSIENT_REQUEST_MARKERS = (
+    # Discovery may briefly fail while local Helios RPC is initializing/reconnecting.
+    "registry discovery failed",
+    "error sending request for url",
+    "127.0.0.1:18545",
+    "connection refused",
+    "connection reset",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
 
 
 def _fmt_ts(ts_ms: int) -> str:
@@ -100,7 +111,13 @@ def _is_transient_error(exc: Exception) -> bool:
     if isinstance(exc, OdynTransportError):
         return True
     if isinstance(exc, OdynRequestError):
-        return exc.status_code in (408, 429, 500, 502, 503, 504)
+        if exc.status_code in (408, 429, 500, 502, 503, 504):
+            return True
+        body = exc.response_body.lower()
+        message = str(exc).lower()
+        return any(
+            (marker in body) or (marker in message) for marker in TRANSIENT_REQUEST_MARKERS
+        )
     message = str(exc).lower()
     return any(
         marker in message

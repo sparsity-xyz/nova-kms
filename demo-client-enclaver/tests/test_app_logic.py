@@ -138,3 +138,31 @@ def test_run_once_marks_transport_timeout_as_transient_failure():
     assert latest["details"]["retryable"] is True
     assert latest["details"]["path"] == "/v1/kms/derive"
     assert latest["details"]["transport_error"] == "TimeoutError"
+
+
+def test_run_once_marks_registry_discovery_rpc_failure_as_transient_failure():
+    app_mod = _load_app_module()
+    app_mod.request_logs.clear()
+
+    client = app_mod.KMSDemoClient()
+    client.odyn = FakeOdyn(
+        derive_exc=OdynRequestError(
+            method="POST",
+            path="/v1/kms/derive",
+            url="http://localhost:18000/v1/kms/derive",
+            status_code=400,
+            reason="Bad Request",
+            response_body=(
+                "registry discovery failed: error sending request for url "
+                "(http://127.0.0.1:18545/)"
+            ),
+        )
+    )
+
+    asyncio.run(client.run_once())
+
+    latest = app_mod.request_logs[0]
+    assert latest["status"] == "TransientFailure"
+    assert latest["details"]["retryable"] is True
+    assert latest["details"]["http_status"] == 400
+    assert latest["details"]["path"] == "/v1/kms/derive"
