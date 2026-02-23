@@ -8,6 +8,82 @@ from typing import Any, Dict, Optional
 import requests
 
 
+class OdynRequestError(RuntimeError):
+    """Raised when Odyn returns a non-success HTTP status."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        url: str,
+        status_code: int,
+        reason: str,
+        response_body: str,
+    ):
+        self.method = method
+        self.path = path
+        self.url = url
+        self.status_code = status_code
+        self.reason = reason
+        self.response_body = response_body
+        reason_suffix = f" {reason}" if reason else ""
+        super().__init__(
+            f"Odyn API request failed: {method} {path} -> HTTP {status_code}{reason_suffix}; "
+            f"url={url}; response={response_body}"
+        )
+
+
+class OdynTransportError(RuntimeError):
+    """Raised when Odyn cannot be reached due to transport-level issues."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        url: str,
+        timeout_seconds: float,
+        cause: Exception,
+    ):
+        self.method = method
+        self.path = path
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+        self.cause = cause
+        cause_name = type(cause).__name__
+        super().__init__(
+            f"Odyn transport error: {method} {path}; url={url}; timeout={timeout_seconds}s; "
+            f"cause={cause_name}: {cause}"
+        )
+
+
+def _truncate(text: str, max_len: int = 4096) -> str:
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(truncated)"
+
+
+def _extract_error_message(res: requests.Response) -> str:
+    try:
+        payload = res.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("error", "message", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return _truncate(value.strip())
+        return _truncate(str(payload))
+
+    if payload is not None:
+        return _truncate(str(payload))
+
+    text = (res.text or "").strip()
+    if text:
+        return _truncate(text)
+    return "<empty response body>"
+
+
 def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -21,6 +97,7 @@ def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
 
 class Odyn:
     DEFAULT_MOCK_ODYN_API = "http://odyn.sparsity.cloud:18000"
+    DEFAULT_TIMEOUT_SECONDS = 30.0
 
     def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):
         env_endpoint = os.getenv("ODYN_ENDPOINT", "").strip()
@@ -32,7 +109,7 @@ class Odyn:
             is_enclave = os.getenv("IN_ENCLAVE", "false").lower() == "true"
             self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_ODYN_API
         if timeout_seconds is None:
-            timeout_seconds = _float_env("ODYN_TIMEOUT_SECONDS", 10.0)
+            timeout_seconds = _float_env("ODYN_TIMEOUT_SECONDS", self.DEFAULT_TIMEOUT_SECONDS)
         self.timeout_seconds = timeout_seconds
         self._session = requests.Session()
 
@@ -42,13 +119,32 @@ class Odyn:
     def _call(self, method: str, path: str, payload: Any = None) -> Dict[str, Any]:
         url = f"{self.endpoint}{path}"
         verb = method.upper()
-        if verb == "POST":
-            res = self._session.post(url, json=payload, timeout=self.timeout_seconds)
-        elif verb == "GET":
-            res = self._session.get(url, timeout=self.timeout_seconds)
-        else:
-            raise ValueError(f"Unsupported method: {method}")
-        res.raise_for_status()
+        try:
+            if verb == "POST":
+                res = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+            elif verb == "GET":
+                res = self._session.get(url, timeout=self.timeout_seconds)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+        except requests.exceptions.RequestException as exc:
+            raise OdynTransportError(
+                method=verb,
+                path=path,
+                url=url,
+                timeout_seconds=self.timeout_seconds,
+                cause=exc,
+            ) from exc
+        if res.status_code >= 400:
+            reason = (getattr(res, "reason", "") or "").strip()
+            body = _extract_error_message(res)
+            raise OdynRequestError(
+                method=verb,
+                path=path,
+                url=url,
+                status_code=res.status_code,
+                reason=reason,
+                response_body=body,
+            )
         try:
             data = res.json()
         except ValueError as exc:
