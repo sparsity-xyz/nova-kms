@@ -282,6 +282,29 @@ class TestCachedNovaRegistry:
         cached.get_instance_by_wallet("0xAA")
         assert mock_inner.get_instance_by_wallet.call_count == 1
 
+    def test_instance_by_wallet_not_found_uses_short_ttl(self):
+        mock_inner = MagicMock()
+        # Simulate an unresolved wallet lookup (instance_id == 0).
+        not_found = RuntimeInstance(
+            0,
+            0,
+            0,
+            "0x0000000000000000000000000000000000000000",
+            "",
+            b"",
+            "0x0000000000000000000000000000000000000000",
+            False,
+            InstanceStatus.STOPPED,
+            0,
+        )
+        mock_inner.get_instance_by_wallet.return_value = not_found
+
+        cached = CachedNovaRegistry(inner=mock_inner, ttl=60, not_found_instance_ttl=0)
+        cached.get_instance_by_wallet("0xAA")
+        cached.get_instance_by_wallet("0xAA")
+        # TTL=0 for not-found lookups means no practical caching.
+        assert mock_inner.get_instance_by_wallet.call_count == 2
+
     def test_cache_expires(self):
         mock_inner = MagicMock()
         app_obj = App(1, "0x00", b"", "0x00", "", 1, 0, AppStatus.ACTIVE, "0x00")

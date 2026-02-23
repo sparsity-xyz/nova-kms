@@ -166,3 +166,28 @@ def test_run_once_marks_registry_discovery_rpc_failure_as_transient_failure():
     assert latest["details"]["retryable"] is True
     assert latest["details"]["http_status"] == 400
     assert latest["details"]["path"] == "/v1/kms/derive"
+
+
+def test_run_once_marks_kms_instance_not_found_as_pending_registration():
+    app_mod = _load_app_module()
+    app_mod.request_logs.clear()
+
+    client = app_mod.KMSDemoClient()
+    client.odyn = FakeOdyn(
+        derive_exc=OdynRequestError(
+            method="POST",
+            path="/v1/kms/derive",
+            url="http://localhost:18000/v1/kms/derive",
+            status_code=400,
+            reason="Bad Request",
+            response_body='KMS HTTP 403: {"detail":"Instance not found"}',
+        )
+    )
+
+    asyncio.run(client.run_once())
+
+    latest = app_mod.request_logs[0]
+    assert latest["status"] == "PendingRegistration"
+    assert latest["details"]["retryable"] is True
+    assert latest["details"]["http_status"] == 400
+    assert latest["details"]["path"] == "/v1/kms/derive"

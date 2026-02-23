@@ -25,6 +25,7 @@ request_logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOGS)
 REGISTRATION_PENDING_MARKERS = (
     "not zk-verified on registry",
     "is not active on registry",
+    "instance not found",
     "registry discovery returned no active kms nodes",
     "registry-based authz requires kms_app_id/nova_app_registry",
     "kms_integration requires registry discovery configuration",

@@ -363,9 +363,23 @@ class CachedNovaRegistry:
     drop-in replacement.
     """
 
-    def __init__(self, inner: Optional[NovaRegistry] = None, ttl: Optional[int] = None):
+    DEFAULT_NOT_FOUND_INSTANCE_TTL_SECONDS = 10
+
+    def __init__(
+        self,
+        inner: Optional[NovaRegistry] = None,
+        ttl: Optional[int] = None,
+        not_found_instance_ttl: Optional[int] = None,
+    ):
         self._inner = inner or NovaRegistry()
         self._ttl = ttl if ttl is not None else REGISTRY_CACHE_TTL_SECONDS
+        default_not_found_ttl = min(self._ttl, self.DEFAULT_NOT_FOUND_INSTANCE_TTL_SECONDS)
+        self._not_found_instance_ttl = (
+            default_not_found_ttl
+            if not_found_instance_ttl is None
+            else max(0, int(not_found_instance_ttl))
+        )
+        # key -> (expires_at_epoch_seconds, value)
         self._cache: Dict[str, Tuple[float, Any]] = {}
         self._lock = threading.Lock()
 
@@ -377,13 +391,18 @@ class CachedNovaRegistry:
     def _get_cached(self, key: str):
         with self._lock:
             entry = self._cache.get(key)
-            if entry and (time.time() - entry[0]) < self._ttl:
-                return entry[1]
+            if entry:
+                expires_at, value = entry
+                if time.time() < expires_at:
+                    return value
+                # Best-effort eviction for stale entries.
+                self._cache.pop(key, None)
         return None
 
-    def _set_cached(self, key: str, value):
+    def _set_cached(self, key: str, value, ttl_seconds: Optional[int] = None):
+        ttl = self._ttl if ttl_seconds is None else max(0, int(ttl_seconds))
         with self._lock:
-            self._cache[key] = (time.time(), value)
+            self._cache[key] = (time.time() + ttl, value)
 
     def invalidate(self, key: Optional[str] = None):
         """Clear a specific cache entry or the entire cache."""
@@ -426,7 +445,12 @@ class CachedNovaRegistry:
         if cached is not None:
             return cached
         result = self._inner.get_instance_by_wallet(wallet)
-        self._set_cached(cache_key, result)
+        ttl_override = (
+            self._not_found_instance_ttl
+            if getattr(result, "instance_id", 0) == 0
+            else None
+        )
+        self._set_cached(cache_key, result, ttl_seconds=ttl_override)
         return result
 
     def get_instances_for_version(self, app_id: int, version_id: int) -> List[int]:
