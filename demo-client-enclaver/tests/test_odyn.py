@@ -9,6 +9,7 @@ if str(ENCLAVE_DIR) not in sys.path:
 
 
 import odyn as odyn_mod
+import requests
 
 
 class DummyResponse:
@@ -33,13 +34,19 @@ class DummyResponse:
 
 
 class DummySession:
-    def __init__(self, response):
+    def __init__(self, response=None, post_exc=None, get_exc=None):
         self.response = response
+        self.post_exc = post_exc
+        self.get_exc = get_exc
 
     def post(self, *args, **kwargs):
+        if self.post_exc is not None:
+            raise self.post_exc
         return self.response
 
     def get(self, *args, **kwargs):
+        if self.get_exc is not None:
+            raise self.get_exc
         return self.response
 
     def close(self):
@@ -95,3 +102,19 @@ def test_odyn_prefers_json_error_field():
         message = str(exc)
         assert "HTTP 503 Service Unavailable" in message
         assert "no ACTIVE KMS nodes" in message
+
+
+def test_odyn_wraps_timeout_as_transport_error():
+    od = odyn_mod.Odyn(endpoint="http://example.com", timeout_seconds=10.0)
+    od._session = DummySession(
+        post_exc=requests.exceptions.Timeout("read timed out"),
+    )
+
+    try:
+        od.kms_derive("nova-kms-client/fixed-derive")
+        assert False, "Expected OdynTransportError"
+    except odyn_mod.OdynTransportError as exc:
+        message = str(exc)
+        assert "Odyn transport error" in message
+        assert "POST /v1/kms/derive" in message
+        assert "read timed out" in message

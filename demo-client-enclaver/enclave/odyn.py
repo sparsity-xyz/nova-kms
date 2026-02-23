@@ -33,6 +33,29 @@ class OdynRequestError(RuntimeError):
         )
 
 
+class OdynTransportError(RuntimeError):
+    """Raised when Odyn cannot be reached due to transport-level issues."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        url: str,
+        timeout_seconds: float,
+        cause: Exception,
+    ):
+        self.method = method
+        self.path = path
+        self.url = url
+        self.timeout_seconds = timeout_seconds
+        self.cause = cause
+        cause_name = type(cause).__name__
+        super().__init__(
+            f"Odyn transport error: {method} {path}; url={url}; timeout={timeout_seconds}s; "
+            f"cause={cause_name}: {cause}"
+        )
+
+
 def _truncate(text: str, max_len: int = 4096) -> str:
     if len(text) <= max_len:
         return text
@@ -95,12 +118,21 @@ class Odyn:
     def _call(self, method: str, path: str, payload: Any = None) -> Dict[str, Any]:
         url = f"{self.endpoint}{path}"
         verb = method.upper()
-        if verb == "POST":
-            res = self._session.post(url, json=payload, timeout=self.timeout_seconds)
-        elif verb == "GET":
-            res = self._session.get(url, timeout=self.timeout_seconds)
-        else:
-            raise ValueError(f"Unsupported method: {method}")
+        try:
+            if verb == "POST":
+                res = self._session.post(url, json=payload, timeout=self.timeout_seconds)
+            elif verb == "GET":
+                res = self._session.get(url, timeout=self.timeout_seconds)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+        except requests.exceptions.RequestException as exc:
+            raise OdynTransportError(
+                method=verb,
+                path=path,
+                url=url,
+                timeout_seconds=self.timeout_seconds,
+                cause=exc,
+            ) from exc
         if res.status_code >= 400:
             reason = (getattr(res, "reason", "") or "").strip()
             body = _extract_error_message(res)

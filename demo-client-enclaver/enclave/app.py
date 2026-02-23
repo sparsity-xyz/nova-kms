@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 import config
-from odyn import Odyn, OdynRequestError
+from odyn import Odyn, OdynRequestError, OdynTransportError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -60,6 +60,8 @@ def _render_log(entry: Dict[str, Any]) -> str:
         lines.append(f"HTTP status: {details.get('http_status')}")
     if "path" in details:
         lines.append(f"Path: {details.get('path')}")
+    if "transport_error" in details:
+        lines.append(f"Transport error: {details.get('transport_error')}")
 
     lines.extend(
         [
@@ -92,6 +94,26 @@ def _is_registration_pending_error(exc: Exception) -> bool:
             return False
         message = exc.response_body.lower()
     return any(marker in message for marker in REGISTRATION_PENDING_MARKERS)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    if isinstance(exc, OdynTransportError):
+        return True
+    if isinstance(exc, OdynRequestError):
+        return exc.status_code in (408, 429, 500, 502, 503, 504)
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "temporary",
+            "temporarily unavailable",
+            "connection refused",
+            "connection reset",
+            "incompletemessage",
+        )
+    )
 
 
 class KMSDemoClient:
@@ -135,14 +157,22 @@ class KMSDemoClient:
                 self._log(status=status, details=details)
             except Exception as exc:
                 registration_pending = _is_registration_pending_error(exc)
-                status = "PendingRegistration" if registration_pending else "Failed"
+                transient_error = _is_transient_error(exc)
+                status = (
+                    "PendingRegistration"
+                    if registration_pending
+                    else ("TransientFailure" if transient_error else "Failed")
+                )
                 details: Dict[str, Any] = {
                     "duration_ms": int(time.time() * 1000) - started_ms,
-                    "retryable": registration_pending,
+                    "retryable": (registration_pending or transient_error),
                 }
                 if isinstance(exc, OdynRequestError):
                     details["http_status"] = exc.status_code
                     details["path"] = exc.path
+                elif isinstance(exc, OdynTransportError):
+                    details["path"] = exc.path
+                    details["transport_error"] = type(exc.cause).__name__
                 self._log(
                     status=status,
                     details=details,
@@ -153,6 +183,8 @@ class KMSDemoClient:
                         "KMS is not ready yet (likely pending app-registry registration): %s",
                         exc,
                     )
+                elif transient_error:
+                    logger.warning("KMS API transient failure; will retry: %s", exc)
                 else:
                     logger.exception("KMS cycle failed")
 

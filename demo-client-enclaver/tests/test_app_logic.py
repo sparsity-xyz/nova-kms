@@ -10,7 +10,7 @@ ENCLAVE_DIR = THIS_DIR.parent / "enclave"
 if str(ENCLAVE_DIR) not in sys.path:
     sys.path.insert(0, str(ENCLAVE_DIR))
 
-from odyn import OdynRequestError
+from odyn import OdynRequestError, OdynTransportError
 
 
 class FakeOdyn:
@@ -114,3 +114,27 @@ def test_run_once_marks_registration_pending_for_kms_authz_error():
     assert latest["details"]["retryable"] is True
     assert latest["details"]["http_status"] == 400
     assert latest["details"]["path"] == "/v1/kms/derive"
+
+
+def test_run_once_marks_transport_timeout_as_transient_failure():
+    app_mod = _load_app_module()
+    app_mod.request_logs.clear()
+
+    client = app_mod.KMSDemoClient()
+    client.odyn = FakeOdyn(
+        derive_exc=OdynTransportError(
+            method="POST",
+            path="/v1/kms/derive",
+            url="http://localhost:18000/v1/kms/derive",
+            timeout_seconds=10.0,
+            cause=TimeoutError("timed out"),
+        )
+    )
+
+    asyncio.run(client.run_once())
+
+    latest = app_mod.request_logs[0]
+    assert latest["status"] == "TransientFailure"
+    assert latest["details"]["retryable"] is True
+    assert latest["details"]["path"] == "/v1/kms/derive"
+    assert latest["details"]["transport_error"] == "TimeoutError"
