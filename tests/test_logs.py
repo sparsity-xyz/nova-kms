@@ -187,56 +187,51 @@ def _format_scan_summary(entry: dict) -> str:
 # Tests
 # -----------------------------------------------------------------------------
 
-class TestLogs(unittest.TestCase):
-
-    def test_format_scan_summary(self):
-        entry = {
-            "timestamp_ms": 1600000000000,
-            "status": "Success",
-            "details": {
-                "node_count": 2,
-                "reachable_count": 2,
-                "fixed_derive_path": "test/path",
-                "results": [
-                    {
-                        "instance": {
-                            "tee_wallet": "0x111",
-                            "instance_url": "http://1.1.1.1",
-                            "status": {"name": "ACTIVE"},
-                            "zk_verified": True,
-                            "version_id": 1
-                        },
-                        "connection": {"connected": True},
-                        "derive": {"http_status": 200, "matches_cluster": True},
-                        "data": {"key": "test/readback-key", "value": "val1", "http_status": 200, "matches_written": True}
-                    }
-                ],
-                "write": {
-                    "performed": True,
-                    "node_url": "http://1.1.1.1",
-                    "key": "test/key",
-                    "timestamp": "12345",
-                    "http_status": 200
+def test_format_scan_summary():
+    entry = {
+        "timestamp_ms": 1600000000000,
+        "status": "Success",
+        "details": {
+            "node_count": 2,
+            "reachable_count": 2,
+            "fixed_derive_path": "test/path",
+            "results": [
+                {
+                    "instance": {
+                        "tee_wallet": "0x111",
+                        "instance_url": "http://1.1.1.1",
+                        "status": {"name": "ACTIVE"},
+                        "zk_verified": True,
+                        "version_id": 1
+                    },
+                    "connection": {"connected": True},
+                    "derive": {"http_status": 200, "matches_cluster": True},
+                    "data": {"key": "test/readback-key", "value": "val1", "http_status": 200, "matches_written": True}
                 }
+            ],
+            "write": {
+                "performed": True,
+                "node_url": "http://1.1.1.1",
+                "key": "test/key",
+                "timestamp": "12345",
+                "http_status": 200
             }
         }
-        
-        text = _format_scan_summary(entry)
-        
-        # Verify major sections and new formatting
-        self.assertIn("1. Nodes:", text)
-        self.assertIn("2. Derive + KV readback:", text)
-        self.assertIn("Readback key: test/readback-key", text)
-        self.assertIn("3. KV Write:", text)
-        self.assertIn("VersionId", text)
-        self.assertIn("DeriveHTTP", text)
-        self.assertIn("ReadbackOK", text)
-        self.assertIn("Derive path: test/path", text)
-        self.assertIn("0x111", text)
-        self.assertIn("12345", text)
-        
-        # Verify DeriveHex is RESTORED
-        self.assertIn("DeriveHex", text)
-
-if __name__ == "__main__":
-    unittest.main()
+    }
+    
+    text = _format_scan_summary(entry)
+    
+    # Verify major sections and new formatting
+    assert "1. Nodes:" in text
+    assert "2. Derive + KV readback:" in text
+    assert "Readback key: test/readback-key" in text
+    assert "3. KV Write:" in text
+    assert "VersionId" in text
+    assert "DeriveHTTP" in text
+    assert "ReadbackOK" in text
+    assert "Derive path: test/path" in text
+    assert "0x111" in text
+    assert "12345" in text
+    
+    # Verify DeriveHex is RESTORED
+    assert "DeriveHex" in text

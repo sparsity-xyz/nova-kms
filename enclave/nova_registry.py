@@ -65,6 +65,7 @@ class App:
     latest_version_id: int
     created_at: int
     status: AppStatus
+    app_wallet: str
 
 
 @dataclass
@@ -114,6 +115,7 @@ _NOVA_REGISTRY_ABI = [
                     {"internalType": "uint256", "name": "latestVersionId", "type": "uint256"},
                     {"internalType": "uint256", "name": "createdAt", "type": "uint256"},
                     {"internalType": "enum AppStatus", "name": "status", "type": "uint8"},
+                    {"internalType": "address", "name": "appWallet", "type": "address"},
                 ],
                 "internalType": "struct App",
                 "name": "",
@@ -269,7 +271,7 @@ class NovaRegistry:
         return decoded
 
     def get_app(self, app_id: int) -> App:
-        # returns (id, owner, teeArch, dappContract, metadataUri, latestVersionId, createdAt, status)
+        # returns (id, owner, teeArch, dappContract, metadataUri, latestVersionId, createdAt, status, appWallet)
         result = self._call("getApp", [app_id])
         # result is a list/tuple or a dict depending on web3 version/strictness, 
         # usually a list of values if returned as a struct in tuple form.
@@ -286,6 +288,7 @@ class NovaRegistry:
             latest_version_id=result[5],
             created_at=result[6],
             status=AppStatus(result[7]),
+            app_wallet=result[8],
         )
 
     def get_version(self, app_id: int, version_id: int) -> AppVersion:

@@ -18,7 +18,8 @@ def test_authorizer_allows_enrolled(authorizer, mock_registry):
     )
     mock_registry.get_app.return_value = App(
         app_id=42, owner="0xOwn", tee_arch=b"", dapp_contract="", metadata_uri="",
-        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE
+        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE,
+        app_wallet="0x0000000000000000000000000000000000000000",
     )
     mock_registry.get_version.return_value = AppVersion(
         version_id=1, version_name="v1", code_measurement=b"", image_uri="", audit_url="",
@@ -36,7 +37,8 @@ def test_authorizer_allows_deprecated(authorizer, mock_registry):
     )
     mock_registry.get_app.return_value = App(
         app_id=42, owner="0xOwn", tee_arch=b"", dapp_contract="", metadata_uri="",
-        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE
+        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE,
+        app_wallet="0x0000000000000000000000000000000000000000",
     )
     mock_registry.get_version.return_value = AppVersion(
         version_id=1, version_name="v1", code_measurement=b"", image_uri="", audit_url="",
@@ -54,7 +56,8 @@ def test_authorizer_rejects_revoked(authorizer, mock_registry):
     )
     mock_registry.get_app.return_value = App(
         app_id=42, owner="0xOwn", tee_arch=b"", dapp_contract="", metadata_uri="",
-        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE
+        latest_version_id=1, created_at=0, status=AppStatus.ACTIVE,
+        app_wallet="0x0000000000000000000000000000000000000000",
     )
     mock_registry.get_version.return_value = AppVersion(
         version_id=1, version_name="v1", code_measurement=b"", image_uri="", audit_url="",

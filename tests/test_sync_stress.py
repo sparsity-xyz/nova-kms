@@ -38,7 +38,7 @@ def _setup_stress_mocks(monkeypatch, network):
     monkeypatch.setattr(secure_channel, "encrypt_json_envelope", lambda odyn, data, pk: data)
     monkeypatch.setattr(secure_channel, "decrypt_json_envelope", lambda odyn, body: body)
     monkeypatch.setattr(secure_channel, "verify_peer_identity", lambda *a, **kw: True)
-    monkeypatch.setattr(secure_channel, "get_tee_pubkey_hex_for_wallet", lambda *a: "01"*32)
+    monkeypatch.setattr(secure_channel, "get_tee_pubkey_der_hex", lambda *a: "01"*32)
 
     import auth
     monkeypatch.setattr(auth, "verify_wallet_signature", lambda *a, **kw: True)

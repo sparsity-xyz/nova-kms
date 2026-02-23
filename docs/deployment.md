@@ -13,7 +13,7 @@ This guide covers deploying Nova KMS to production on the Nova Platform (AWS Nit
 │  │  nova-kms (Docker)                          │         │
 │  │  ┌──────────┐  ┌────────────┐  ┌─────────┐ │         │
 │  │  │ FastAPI   │  │ Helios RPC │  │ Odyn API│ │         │
-│  │  │ :8000     │  │ :8545      │  │ :18000  │ │         │
+│  │  │ :8000     │  │ :18545     │  │ :18000  │ │         │
 │  │  └──────────┘  └────────────┘  └─────────┘ │         │
 │  └─────────────────────────────────────────────┘         │
 │                                                          │
@@ -90,21 +90,25 @@ KMS_APP_ID = ...                        # appId assigned by platform
 ### 2.2 Update `enclaver.yaml`
 
 ```yaml
-storage:
-  s3:
-    enabled: false    # KMS is non-persistent
-
 defaults:
   cpu_count: 2
   memory_mb: 4096     # Adjust based on expected data size
 
 helios_rpc:
   enabled: true
-  kind: opstack
-  network: base-sepolia
-  listen_port: 8545
-  execution_rpc: "https://sepolia.base.org"
+  chains:
+    - name: "L2-base-sepolia"
+      network_id: "84532"
+      kind: opstack
+      network: base-sepolia
+      execution_rpc: "https://sepolia.base.org"
+      local_rpc_port: 18545
 ```
+
+For `nova-kms`, omit `storage.s3` entirely (the service is intentionally non-persistent).
+
+Runtime reads registry/auth-chain RPC from `http://127.0.0.1:18545` by default.
+Set `HELIOS_RPC_URL` only if you intentionally need a different local endpoint.
 
 ## Step 3: Build the Docker Image
 

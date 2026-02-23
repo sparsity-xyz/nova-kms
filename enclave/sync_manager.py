@@ -749,21 +749,25 @@ class SyncManager:
         # transmitting any data to the peer.  This prevents MitM by a host
         # that intercepts the TLS connection but cannot forge the on-chain
         # teePubkey registration.
-        from secure_channel import verify_peer_identity, get_tee_pubkey_hex_for_wallet
-        if not verify_peer_identity(peer_wallet, self.peer_cache.nova_registry):
-            logger.warning(
-                f"Refusing sync request to {url}: peer {peer_wallet} failed "
-                "teePubkey verification — blacklisting"
-            )
-            self.peer_cache.blacklist_peer(peer_wallet)
-            return None
+        # 4b. Identify peer public key
+        # Must be retrieved reliably from the chain
+        from secure_channel import verify_peer_identity, get_tee_pubkey_der_hex
 
-        # Get peer's teePubkey for E2E encryption
-        peer_tee_pubkey_hex = get_tee_pubkey_hex_for_wallet(peer_wallet, self.peer_cache.nova_registry)
+        if not verify_peer_identity(
+            peer_wallet,
+            self.peer_cache.nova_registry,
+            require_zk_verified=False,
+        ):
+            raise ValueError("Peer not valid in NovaAppRegistry")
+
+        peer_tee_pubkey_hex = get_tee_pubkey_der_hex(peer_wallet, self.peer_cache.nova_registry)
         if not peer_tee_pubkey_hex:
-            logger.warning(f"Refusing sync request to {url}: cannot get peer teePubkey")
-            return None
+            raise ValueError(
+                "Peer does not have a valid P-384 teePubkey registered"
+            )
 
+        # 4c. Encrypt to the peer
+        from secure_channel import encrypt_json_envelope
         # Prevent self-sync: do not send requests to ourselves.
         if peer_wallet.lower() == self.node_wallet.lower():
             logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
@@ -875,10 +879,17 @@ class SyncManager:
         Push recent deltas to all healthy peers.
         Returns the number of peers successfully synced.
         """
-        since_ms = self._last_push_ms
+        # Capture current time before fetching deltas to prevent race conditions 
+        # where records inserted during the push are missed by the next push.
+        push_start_ms = int(time.time() * 1000)
+        
+        # Overlap by 1ms to catch boundary cases
+        since_ms = max(0, self._last_push_ms - 1)
+        
         deltas = self.data_store.get_deltas_since(since_ms)
         if not deltas:
             logger.debug("Push deltas: No new deltas to push")
+            self._last_push_ms = push_start_ms
             return 0
         
         logger.debug(f"Push deltas: Found {len(deltas)} records since {since_ms}")
@@ -903,7 +914,7 @@ class SyncManager:
                 logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
                 logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
 
-        self._last_push_ms = int(time.time() * 1000)
+        self._last_push_ms = push_start_ms
         logger.info(f"Delta push: {success_count}/{len(peers)} peers synced")
         return success_count
 
