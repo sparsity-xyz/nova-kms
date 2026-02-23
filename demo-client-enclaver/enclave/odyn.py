@@ -8,6 +8,34 @@ from typing import Any, Dict, Optional
 import requests
 
 
+def _truncate(text: str, max_len: int = 4096) -> str:
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(truncated)"
+
+
+def _extract_error_message(res: requests.Response) -> str:
+    try:
+        payload = res.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("error", "message", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return _truncate(value.strip())
+        return _truncate(str(payload))
+
+    if payload is not None:
+        return _truncate(str(payload))
+
+    text = (res.text or "").strip()
+    if text:
+        return _truncate(text)
+    return "<empty response body>"
+
+
 def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -48,7 +76,14 @@ class Odyn:
             res = self._session.get(url, timeout=self.timeout_seconds)
         else:
             raise ValueError(f"Unsupported method: {method}")
-        res.raise_for_status()
+        if res.status_code >= 400:
+            reason = (getattr(res, "reason", "") or "").strip()
+            reason_suffix = f" {reason}" if reason else ""
+            body = _extract_error_message(res)
+            raise RuntimeError(
+                f"Odyn API request failed: {verb} {path} -> HTTP {res.status_code}{reason_suffix}; "
+                f"url={url}; response={body}"
+            )
         try:
             data = res.json()
         except ValueError as exc:
