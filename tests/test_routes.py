@@ -254,7 +254,9 @@ class TestHealth:
                 headers={"x-tee-wallet": "0x1234"},
             )
             assert resp.status_code == 503
-            assert "test-offline" in resp.json()["detail"]["reason"]
+            body = resp.json()
+            assert body["code"] == "service_unavailable"
+            assert "test-offline" in body["message"]
 
             resp_sync = client.post(
                 "/sync",
@@ -465,7 +467,9 @@ class TestSync:
             json={"type": "delta", "sender_wallet": "0xAnon", "data": {}},
         )
         assert resp.status_code == 503
-        assert "master secret not initialized" in resp.json()["detail"]["reason"]
+        body = resp.json()
+        assert body["code"] == "service_unavailable"
+        assert "master secret not initialized" in body["message"]
 
     def test_sync_delta(self, client):
         headers, sender_wallet = _kms_pop_headers(

@@ -820,7 +820,13 @@ class SyncManager:
             # Check HTTP status first — error responses won't have mutual auth headers
             if not resp.ok:
                 try:
-                    err_detail = resp.json().get("detail", resp.text[:200])
+                    body = resp.json()
+                    err_detail = (
+                        body.get("message")
+                        or body.get("detail")
+                        or body.get("error")
+                        or resp.text[:200]
+                    )
                 except Exception:
                     err_detail = resp.text[:200]
                 logger.warning(

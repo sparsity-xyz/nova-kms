@@ -28,6 +28,10 @@ from contextlib import asynccontextmanager
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from web3 import Web3
 
@@ -35,6 +39,7 @@ import config
 import routes
 from auth import AppAuthorizer
 from data_store import DataStore
+from errors import error_response
 from kdf import MasterSecretManager
 from rate_limiter import RateLimitMiddleware
 from sync_manager import PeerCache, SyncManager
@@ -273,6 +278,36 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+    return error_response(exc.status_code, exc.detail)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return error_response(
+        422,
+        {
+            "code": "validation_error",
+            "message": "Invalid request payload",
+            "reason": str(exc),
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception in request processing")
+    return error_response(
+        500,
+        {
+            "code": "internal_error",
+            "message": "Internal server error",
+            "reason": str(exc),
+        },
+    )
 
 # CORS — M3 fix: default to restrictive (no origins) in production.
 # Set CORS_ORIGINS env var to a comma-separated list of allowed origins.

@@ -99,7 +99,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             logger.warning(f"Rate limit exceeded for {client_ip}")
             return JSONResponse(
                 status_code=429,
-                content={"detail": "Rate limit exceeded. Try again later."},
+                content={
+                    "code": "rate_limited",
+                    "message": "Rate limit exceeded. Try again later.",
+                },
             )
 
         # 2. Request body size limit — H2 fix: read actual body bytes from
@@ -137,7 +140,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(
                     status_code=413,
                     content={
-                        "detail": f"Request body too large (>{max_size} bytes)"
+                        "code": "payload_too_large",
+                        "message": f"Request body too large (>{max_size} bytes)",
                     },
                 )
 
