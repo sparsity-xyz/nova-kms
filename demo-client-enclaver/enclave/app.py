@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import time
@@ -234,9 +235,9 @@ class KMSDemoClient:
         read_res = self.odyn.kms_kv_get(self.data_key)
         read_found = _parse_bool(read_res.get("found"))
         read_value_raw = read_res.get("value")
-        read_value = None if read_value_raw is None else str(read_value_raw)
+        read_value = None if read_value_raw is None else base64.b64decode(read_value_raw).decode()
 
-        write_res = self.odyn.kms_kv_put(self.data_key, now_value, ttl_ms=0)
+        write_res = self.odyn.kms_kv_put(self.data_key, base64.b64encode(now_value.encode()).decode(), ttl_ms=0)
         write_success = _parse_bool(write_res.get("success"))
         if not write_success:
             raise RuntimeError("kms/kv/put returned success=false")

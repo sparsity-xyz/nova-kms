@@ -5,8 +5,8 @@ This demo provides the same core behavior as `nova-kms/demo-client`: it periodic
 The difference is that it directly uses enclaver-provided Odyn KMS APIs:
 
 - `POST /v1/kms/derive`
-- `POST /v1/kms/kv/get`
-- `POST /v1/kms/kv/put`
+- `POST /v1/kms/kv/get` (returns base64-encoded value)
+- `POST /v1/kms/kv/put` (expects base64-encoded value)
 
 So this client no longer needs to implement the following in application code:
 
