@@ -8,6 +8,31 @@ from typing import Any, Dict, Optional
 import requests
 
 
+class OdynRequestError(RuntimeError):
+    """Raised when Odyn returns a non-success HTTP status."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        url: str,
+        status_code: int,
+        reason: str,
+        response_body: str,
+    ):
+        self.method = method
+        self.path = path
+        self.url = url
+        self.status_code = status_code
+        self.reason = reason
+        self.response_body = response_body
+        reason_suffix = f" {reason}" if reason else ""
+        super().__init__(
+            f"Odyn API request failed: {method} {path} -> HTTP {status_code}{reason_suffix}; "
+            f"url={url}; response={response_body}"
+        )
+
+
 def _truncate(text: str, max_len: int = 4096) -> str:
     if len(text) <= max_len:
         return text
@@ -78,11 +103,14 @@ class Odyn:
             raise ValueError(f"Unsupported method: {method}")
         if res.status_code >= 400:
             reason = (getattr(res, "reason", "") or "").strip()
-            reason_suffix = f" {reason}" if reason else ""
             body = _extract_error_message(res)
-            raise RuntimeError(
-                f"Odyn API request failed: {verb} {path} -> HTTP {res.status_code}{reason_suffix}; "
-                f"url={url}; response={body}"
+            raise OdynRequestError(
+                method=verb,
+                path=path,
+                url=url,
+                status_code=res.status_code,
+                reason=reason,
+                response_body=body,
             )
         try:
             data = res.json()

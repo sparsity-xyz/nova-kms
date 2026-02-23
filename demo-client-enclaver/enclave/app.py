@@ -10,12 +10,11 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, Deque, Dict, Optional
 
-import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 import config
-from odyn import Odyn
+from odyn import Odyn, OdynRequestError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -23,6 +22,14 @@ logger = logging.getLogger("nova-kms-demo-enclaver")
 
 MAX_LOGS = 50
 request_logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOGS)
+REGISTRATION_PENDING_MARKERS = (
+    "not zk-verified on registry",
+    "is not active on registry",
+    "registry discovery returned no active kms nodes",
+    "registry-based authz requires kms_app_id/nova_app_registry",
+    "kms_integration requires registry discovery configuration",
+    "has no anchored appwallet on registry",
+)
 
 
 def _fmt_ts(ts_ms: int) -> str:
@@ -47,6 +54,12 @@ def _render_log(entry: Dict[str, Any]) -> str:
 
     if entry.get("error"):
         lines.append(f"Error: {entry['error']}")
+    if "retryable" in details:
+        lines.append(f"Retryable: {details.get('retryable')}")
+    if "http_status" in details:
+        lines.append(f"HTTP status: {details.get('http_status')}")
+    if "path" in details:
+        lines.append(f"Path: {details.get('path')}")
 
     lines.extend(
         [
@@ -71,6 +84,16 @@ def _render_log(entry: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _is_registration_pending_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if isinstance(exc, OdynRequestError):
+        status = exc.status_code
+        if status not in (400, 401, 403, 404, 409, 503):
+            return False
+        message = exc.response_body.lower()
+    return any(marker in message for marker in REGISTRATION_PENDING_MARKERS)
+
+
 class KMSDemoClient:
     def __init__(self):
         self.odyn = Odyn()
@@ -80,11 +103,14 @@ class KMSDemoClient:
 
         self._expected_derive_key: Optional[str] = None
         self._last_written_value: Optional[str] = None
+        self._tee_address_logged = False
         self._stop_event = asyncio.Event()
         self._cycle_lock = asyncio.Lock()
 
     async def run_loop(self) -> None:
         while not self._stop_event.is_set():
+            if not self._tee_address_logged:
+                await self._try_log_tee_address()
             await self.run_once()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
@@ -108,12 +134,35 @@ class KMSDemoClient:
 
                 self._log(status=status, details=details)
             except Exception as exc:
+                registration_pending = _is_registration_pending_error(exc)
+                status = "PendingRegistration" if registration_pending else "Failed"
+                details: Dict[str, Any] = {
+                    "duration_ms": int(time.time() * 1000) - started_ms,
+                    "retryable": registration_pending,
+                }
+                if isinstance(exc, OdynRequestError):
+                    details["http_status"] = exc.status_code
+                    details["path"] = exc.path
                 self._log(
-                    status="Failed",
-                    details={"duration_ms": int(time.time() * 1000) - started_ms},
+                    status=status,
+                    details=details,
                     error=str(exc),
                 )
-                logger.exception("KMS cycle failed")
+                if registration_pending:
+                    logger.warning(
+                        "KMS is not ready yet (likely pending app-registry registration): %s",
+                        exc,
+                    )
+                else:
+                    logger.exception("KMS cycle failed")
+
+    async def _try_log_tee_address(self) -> None:
+        try:
+            addr = await asyncio.to_thread(self.odyn.eth_address)
+            self._tee_address_logged = True
+            logger.info("Connected to Odyn. TEE address=%s", addr)
+        except Exception as exc:
+            logger.info("Odyn identity is not available yet: %s", exc)
 
     def _run_once_sync(self) -> Dict[str, Any]:
         started = time.time()
@@ -181,12 +230,7 @@ kms_demo = KMSDemoClient()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    try:
-        addr = await asyncio.to_thread(kms_demo.odyn.eth_address)
-        logger.info("Connected to Odyn. TEE address=%s", addr)
-    except Exception as exc:
-        logger.warning("Could not query Odyn eth address at startup: %s", exc)
-
+    # Startup is non-blocking: KMS availability and registry registration are handled in background cycles.
     task = asyncio.create_task(kms_demo.run_loop())
     yield
     kms_demo.stop()
@@ -222,4 +266,6 @@ def logs() -> str:
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -19,11 +19,13 @@ As a result, the code is significantly smaller than the original `demo-client`.
 
 ## Behavior
 
-- Runs one test cycle immediately on startup, then repeats every `TEST_CYCLE_INTERVAL_SECONDS`.
+- Startup is non-blocking. The web server starts even if KMS access is not ready yet.
+- Runs one test cycle immediately in background, then repeats every `TEST_CYCLE_INTERVAL_SECONDS`.
 - Each cycle performs:
   - Fixed-path derive (`FIXED_DERIVE_PATH`)
   - Read `KV_DATA_KEY`
   - Write current timestamp to `KV_DATA_KEY`
+- If `/v1/kms/*` fails because the enclave is not yet registered in app-registry, the cycle is logged as `PendingRegistration` (retryable) instead of crashing startup.
 - View recent cycle results via `GET /logs` (plain text).
 
 ## Directory Structure
