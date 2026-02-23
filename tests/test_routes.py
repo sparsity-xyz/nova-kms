@@ -244,7 +244,7 @@ class TestHealth:
         assert resp.json()["status"] == "healthy"
 
     def test_service_unavailable_returns_503(self, client):
-        """All router endpoints should 503 when service is unavailable."""
+        """Service gate affects /kms/*, while /sync uses its own readiness gate."""
         import routes
         routes.set_service_availability(False, reason="test-offline")
         try:
@@ -260,7 +260,7 @@ class TestHealth:
                 "/sync",
                 json={"type": "delta", "sender_wallet": "0x0", "data": {}},
             )
-            assert resp_sync.status_code == 503
+            assert resp_sync.status_code == 403
         finally:
             routes.set_service_availability(True)
 
@@ -455,6 +455,18 @@ class TestData:
 
 
 class TestSync:
+    def test_sync_unavailable_without_master_secret(self, client):
+        import routes
+        from kdf import MasterSecretManager
+
+        routes._master_secret_mgr = MasterSecretManager()  # intentionally uninitialized
+        resp = client.post(
+            "/sync",
+            json={"type": "delta", "sender_wallet": "0xAnon", "data": {}},
+        )
+        assert resp.status_code == 503
+        assert "master secret not initialized" in resp.json()["detail"]["reason"]
+
     def test_sync_delta(self, client):
         headers, sender_wallet = _kms_pop_headers(
             client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32

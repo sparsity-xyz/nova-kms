@@ -256,6 +256,7 @@ class _Namespace:
             self._total_bytes -= old.value_size() if not old.tombstone else 0
             self.records[key] = rec
             self.records.move_to_end(key) # Mark as recently used
+            self._compact_tombstones(now_ms=rec.updated_at_ms)
             return rec
 
     def keys(self) -> List[str]:
@@ -327,6 +328,8 @@ class _Namespace:
                 self.records[incoming.key] = incoming
                 self._total_bytes += incoming.value_size()
                 self.records.move_to_end(incoming.key) # Mark as recently used
+                if incoming.tombstone:
+                    self._compact_tombstones(now_ms=now_ms)
                 if evict and self._total_bytes > config.MAX_APP_STORAGE:
                     self._evict_lru()
                 return True
@@ -334,6 +337,8 @@ class _Namespace:
             # If incoming happened-after existing, accept
             if existing.version.happened_before(incoming.version):
                 self._update_record(incoming, existing)
+                if incoming.tombstone:
+                    self._compact_tombstones(now_ms=now_ms)
                 return True
 
             # Concurrent → LWW
@@ -351,6 +356,8 @@ class _Namespace:
                     # If values are equal, no update needed.
                     if (incoming.value or b"") > (existing.value or b""):
                         self._update_record(incoming, existing)
+                        if incoming.tombstone:
+                            self._compact_tombstones(now_ms=now_ms)
                         return True
                         
             return False
@@ -402,6 +409,47 @@ class _Namespace:
         for key in keys_to_evict:
             del self.records[key]
             logger.debug(f"LRU Evicted {self.app_id}:{key}")
+
+    def _compact_tombstones(self, now_ms: Optional[int] = None) -> None:
+        """Bound tombstone growth with retention + count cap.
+
+        Assumes lock is held by caller.
+        """
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+
+        retention_ms = max(0, int(getattr(config, "TOMBSTONE_RETENTION_MS", 0) or 0))
+        max_tombstones = max(0, int(getattr(config, "MAX_TOMBSTONES_PER_APP", 0) or 0))
+
+        if retention_ms > 0:
+            cutoff = now_ms - retention_ms
+            expired_tombstones = [
+                key
+                for key, record in self.records.items()
+                if record.tombstone and record.updated_at_ms <= cutoff
+            ]
+            for key in expired_tombstones:
+                self.records.pop(key, None)
+            if expired_tombstones:
+                logger.debug(
+                    f"Compacted {len(expired_tombstones)} expired tombstones for app {self.app_id}"
+                )
+
+        if max_tombstones > 0:
+            tombstones = [
+                (key, record.updated_at_ms)
+                for key, record in self.records.items()
+                if record.tombstone
+            ]
+            overflow = len(tombstones) - max_tombstones
+            if overflow > 0:
+                tombstones.sort(key=lambda item: (item[1], item[0]))
+                for key, _ in tombstones[:overflow]:
+                    self.records.pop(key, None)
+                logger.warning(
+                    f"Compacted {overflow} tombstones for app {self.app_id} "
+                    f"to enforce MAX_TOMBSTONES_PER_APP={max_tombstones}"
+                )
 
 
 # =============================================================================

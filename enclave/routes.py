@@ -137,15 +137,31 @@ def _require_service_available(request: Request) -> None:
         raise HTTPException(status_code=503, detail={"error": "Service unavailable", "reason": reason})
 
 
+def _require_sync_ready(request: Request) -> None:
+    # Allow CORS preflight to proceed so clients see a proper 503 on real requests.
+    if request.method.upper() == "OPTIONS":
+        return
+    if _master_secret_mgr is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Sync unavailable", "reason": "master secret manager not available"},
+        )
+    if not _master_secret_mgr.is_initialized:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Sync unavailable", "reason": "master secret not initialized"},
+        )
+
+
 # =============================================================================
 # Routers
 # =============================================================================
 
 router = APIRouter(tags=["kms"], dependencies=[Depends(_require_service_available)])
 
-# Diagnostic and sync routes are exempt from the service availability gate.
-# This prevents deadlocks (e.g. node A won't sync to node B because node B is 
-# "unavailable" while waiting for the secret) and allows status monitoring.
+# Diagnostic and sync routes are exempt from the general service availability gate.
+# /sync still has its own readiness gate based on master-secret initialization.
+# This keeps bootstrap traffic controlled while allowing status monitoring.
 exempt_router = APIRouter(tags=["kms"])
 
 _nonce_rate_limiter = TokenBucket(config.NONCE_RATE_LIMIT_PER_MINUTE)
@@ -683,7 +699,7 @@ async def delete_data(request: Request, response: Response, body: dict = None):
 # /sync  (Inter-node synchronization)
 # =============================================================================
 
-@router.post("/sync")
+@exempt_router.post("/sync", dependencies=[Depends(_require_sync_ready)])
 async def sync_endpoint(request: Request, response: Response, body: dict = None):
     """
     Handle incoming sync from a KMS peer.

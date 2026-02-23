@@ -23,6 +23,12 @@ _EXPECTED_SELECTORS = {
     "isOperator(address)": None,
     "operatorCount()": None,
     "operatorAt(uint256)": None,
+    "setMasterSecretHash(bytes32)": None,
+    "resetMasterSecretHash()": None,
+    "setKmsAppId(uint256)": None,
+    "addOperator(address,uint256,uint256,uint256)": None,
+    "removeOperator(address,uint256,uint256,uint256)": None,
+    "setNovaAppRegistry(address)": None,
 }
 
 # Pre-compute from keccak
@@ -41,6 +47,12 @@ class TestKMSRegistryABI:
         assert "isOperator" in names
         assert "operatorCount" in names
         assert "operatorAt" in names
+        assert "setMasterSecretHash" in names
+        assert "resetMasterSecretHash" in names
+        assert "setKmsAppId" in names
+        assert "addOperator" in names
+        assert "removeOperator" in names
+        assert "setNovaAppRegistry" in names
 
     def test_get_operators_selector(self):
         from kms_registry import _KMS_REGISTRY_ABI
@@ -64,6 +76,36 @@ class TestKMSRegistryABI:
         sel = keccak(sig.encode())[:4]
         assert sel == _EXPECTED_SELECTORS[sig]
 
+    def test_set_master_secret_hash_selector(self):
+        sig = "setMasterSecretHash(bytes32)"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
+    def test_reset_master_secret_hash_selector(self):
+        sig = "resetMasterSecretHash()"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
+    def test_set_kms_app_id_selector(self):
+        sig = "setKmsAppId(uint256)"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
+    def test_add_operator_selector(self):
+        sig = "addOperator(address,uint256,uint256,uint256)"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
+    def test_remove_operator_selector(self):
+        sig = "removeOperator(address,uint256,uint256,uint256)"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
+    def test_set_nova_app_registry_selector(self):
+        sig = "setNovaAppRegistry(address)"
+        sel = keccak(sig.encode())[:4]
+        assert sel == _EXPECTED_SELECTORS[sig]
+
     def test_abi_input_types_match_solidity(self):
         """Verify that the ABI inputs match the Solidity contract signatures."""
         from kms_registry import _KMS_REGISTRY_ABI
@@ -74,6 +116,26 @@ class TestKMSRegistryABI:
                 assert entry["inputs"][0]["type"] == "address"
             elif name == "operatorAt":
                 assert entry["inputs"][0]["type"] == "uint256"
+            elif name == "setMasterSecretHash":
+                assert entry["inputs"][0]["type"] == "bytes32"
+            elif name == "setKmsAppId":
+                assert entry["inputs"][0]["type"] == "uint256"
+            elif name == "setNovaAppRegistry":
+                assert entry["inputs"][0]["type"] == "address"
+            elif name == "addOperator":
+                assert [v["type"] for v in entry["inputs"]] == [
+                    "address",
+                    "uint256",
+                    "uint256",
+                    "uint256",
+                ]
+            elif name == "removeOperator":
+                assert [v["type"] for v in entry["inputs"]] == [
+                    "address",
+                    "uint256",
+                    "uint256",
+                    "uint256",
+                ]
             elif name == "getOperators":
                 assert entry["inputs"] == []
             elif name == "operatorCount":
@@ -92,6 +154,15 @@ class TestKMSRegistryABI:
                 assert entry["outputs"][0]["type"] == "uint256"
             elif name == "operatorAt":
                 assert entry["outputs"][0]["type"] == "address"
+            elif name in {
+                "setMasterSecretHash",
+                "resetMasterSecretHash",
+                "setKmsAppId",
+                "addOperator",
+                "removeOperator",
+                "setNovaAppRegistry",
+            }:
+                assert entry["outputs"] == []
 
     def test_foundry_artifact_exists(self):
         """Verify the compiled artifact from `forge build` is present."""
@@ -101,7 +172,18 @@ class TestKMSRegistryABI:
         data = json.loads(artifact.read_text())
         abi = data.get("abi", [])
         sol_names = {e["name"] for e in abi if e.get("type") == "function"}
-        for name in ["getOperators", "isOperator", "operatorCount", "operatorAt"]:
+        for name in [
+            "getOperators",
+            "isOperator",
+            "operatorCount",
+            "operatorAt",
+            "setMasterSecretHash",
+            "resetMasterSecretHash",
+            "setKmsAppId",
+            "addOperator",
+            "removeOperator",
+            "setNovaAppRegistry",
+        ]:
             assert name in sol_names, f"{name} missing from compiled ABI"
 
     def test_foundry_artifact_selectors_match(self):

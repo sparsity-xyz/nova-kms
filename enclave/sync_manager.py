@@ -101,8 +101,7 @@ class PeerCache:
         self._last_refresh: float = 0
         self._blacklist: Dict[str, float] = {}  # wallet -> expiry_ts
         self._lock = threading.Lock()
-        self._refresh_lock = threading.RLock()
-        self._is_refreshing: bool = False
+        self._refresh_lock = threading.Lock()
 
     @property
     def kms_registry(self):
@@ -133,13 +132,11 @@ class PeerCache:
             True if a refresh was performed, False otherwise.
         """
         if skip_if_refreshing:
-            with self._refresh_lock:
-                if self._is_refreshing:
-                    return False
-                self._is_refreshing = True
+            acquired = self._refresh_lock.acquire(blocking=False)
+            if not acquired:
+                return False
         else:
-            with self._refresh_lock:
-                self._is_refreshing = True
+            self._refresh_lock.acquire()
 
         try:
             # 1. Fetch from chain (slow IO, no lock)
@@ -148,15 +145,14 @@ class PeerCache:
             # 2. Update cache (fast, exclusive lock)
             with self._lock:
                 self._update_cache(new_peers)
-                self._is_refreshing = False
             
             logger.info(f"Peer cache refreshed: {len(self._peers)} active KMS instances")
             return True
         except Exception as exc:
             logger.warning(f"Failed to refresh peer cache: {exc}")
-            with self._lock:
-                self._is_refreshing = False
             return False
+        finally:
+            self._refresh_lock.release()
 
     def remove_peer(self, wallet: str) -> None:
         """Remove a peer from the cache by wallet address (step 4.3)."""
@@ -206,16 +202,8 @@ class PeerCache:
         # Optimized: Check staleness with a read lock (or just access atomic float)
         # If stale and refresh_if_stale is True, perform refresh efficiently.
         if refresh_if_stale and self._is_stale():
-            # Optimization: Try to acquire the refresh lock without blocking.
-            # If we fail, it means someone else is already refreshing, so 
-            # we just return the stale data to avoid thread starvation.
-            if self._refresh_lock.acquire(blocking=False):
-                try:
-                    # Double check staleness under lock
-                    if self._is_stale():
-                        self.refresh(skip_if_refreshing=False)
-                finally:
-                    self._refresh_lock.release()
+            # Singleflight refresh: one caller refreshes, others return stale cache.
+            self.refresh(skip_if_refreshing=True)
 
         with self._lock:
             self._purge_blacklist()
@@ -273,17 +261,24 @@ class PeerCache:
                 logger.debug(f"Skipping instance {wallet}: status is {instance.status} (expected ACTIVE)")
                 continue
 
+            # Require zk verification for any peer that can receive sync payloads.
+            if not bool(getattr(instance, "zk_verified", False)):
+                logger.debug(f"Skipping instance {wallet}: not zk-verified")
+                continue
+
             # Check version status (safety check)
             try:
                 version = self.nova_registry.get_version(kms_app_id, instance.version_id)
-                if version.status == VersionStatus.REVOKED:
-                    logger.debug(f"Skipping instance {wallet}: version {instance.version_id} is REVOKED")
+                if version.status not in (VersionStatus.ENROLLED, VersionStatus.DEPRECATED):
+                    logger.debug(
+                        f"Skipping instance {wallet}: version {instance.version_id} "
+                        f"status is {version.status} (expected ENROLLED/DEPRECATED)"
+                    )
                     continue
             except Exception as exc:
                 logger.debug(f"Version lookup failed for {instance.version_id}: {exc}")
-                # Continue if lookup fails? Better to be safe and require metadata if available.
-                # If we can't get version info, we might be in an inconsistent state.
-                pass
+                # Fail closed: if version metadata is unavailable, peer is not trusted.
+                continue
 
             # Validate peer URL before making request
             try:
@@ -756,15 +751,15 @@ class SyncManager:
         if not verify_peer_identity(
             peer_wallet,
             self.peer_cache.nova_registry,
-            require_zk_verified=False,
+            require_zk_verified=True,
         ):
-            raise ValueError("Peer not valid in NovaAppRegistry")
+            logger.warning(f"Refusing sync request to {url}: peer is not an authorized zk-verified KMS instance")
+            return None
 
         peer_tee_pubkey_hex = get_tee_pubkey_der_hex(peer_wallet, self.peer_cache.nova_registry)
         if not peer_tee_pubkey_hex:
-            raise ValueError(
-                "Peer does not have a valid P-384 teePubkey registered"
-            )
+            logger.warning(f"Refusing sync request to {url}: peer teePubkey missing or invalid")
+            return None
 
         # 4c. Encrypt to the peer
         from secure_channel import encrypt_json_envelope
@@ -907,12 +902,16 @@ class SyncManager:
 
         for peer in peers:
             url = f"{peer['node_url'].rstrip('/')}/sync"
-            resp = self._make_request(url, body)
-            if resp and resp.status_code == 200:
-                success_count += 1
-            elif resp:
-                logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
-                logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
+            try:
+                resp = self._make_request(url, body)
+                if resp and resp.status_code == 200:
+                    success_count += 1
+                elif resp:
+                    logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
+                    logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
+            except Exception as exc:
+                logger.warning(f"Sync push to {peer['node_url']} failed: {exc}")
+                continue
 
         self._last_push_ms = push_start_ms
         logger.info(f"Delta push: {success_count}/{len(peers)} peers synced")
@@ -1144,13 +1143,8 @@ class SyncManager:
 
         mgr: MasterSecretManager = self._master_secret_mgr
         if mgr is None:
-            # Backward compatible fallback (should not be needed in normal operation).
-            try:
-                import app as app_module
-                mgr = getattr(app_module, "master_secret_mgr", None)
-            except Exception:
-                mgr = None
-        if not mgr or not mgr.is_initialized:
+            return {"status": "error", "reason": "Master secret manager unavailable"}
+        if not mgr.is_initialized:
             return {"status": "error", "reason": "Master secret not initialized"}
 
         ecdh_pubkey_hex = body.get("ecdh_pubkey")
