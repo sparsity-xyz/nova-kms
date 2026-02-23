@@ -97,6 +97,7 @@ def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
 
 class Odyn:
     DEFAULT_MOCK_ODYN_API = "http://odyn.sparsity.cloud:18000"
+    DEFAULT_TIMEOUT_SECONDS = 30.0
 
     def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):
         env_endpoint = os.getenv("ODYN_ENDPOINT", "").strip()
@@ -108,7 +109,7 @@ class Odyn:
             is_enclave = os.getenv("IN_ENCLAVE", "false").lower() == "true"
             self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_ODYN_API
         if timeout_seconds is None:
-            timeout_seconds = _float_env("ODYN_TIMEOUT_SECONDS", 10.0)
+            timeout_seconds = _float_env("ODYN_TIMEOUT_SECONDS", self.DEFAULT_TIMEOUT_SECONDS)
         self.timeout_seconds = timeout_seconds
         self._session = requests.Session()
 

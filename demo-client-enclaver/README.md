@@ -49,4 +49,4 @@ The following environment variables can be overridden at runtime:
 - `FIXED_DERIVE_PATH` (default: `nova-kms-client/fixed-derive`)
 - `KV_DATA_KEY` (default: `nova-kms-client/timestamp`)
 - `ODYN_ENDPOINT` (default: `http://localhost:18000` in-enclave, mock endpoint outside enclave)
-- `ODYN_TIMEOUT_SECONDS` (default: `10`)
+- `ODYN_TIMEOUT_SECONDS` (default: `30`)
