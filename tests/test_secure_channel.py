@@ -651,6 +651,20 @@ class TestEncryptEnvelope:
         assert not result["nonce"].startswith("0x")
         assert not result["encrypted_data"].startswith("0x")
 
+    def test_encrypt_normalizes_legacy_32_byte_nonce(self):
+        from secure_channel import encrypt_envelope
+
+        class _LegacyNonceOdyn(_MockOdyn):
+            def encrypt(self, plaintext: str, receiver_pubkey_hex: str) -> dict:
+                return {
+                    "nonce": "0x" + "ab" * 32,
+                    "encrypted_data": "0x" + "cd" * 16,
+                }
+
+        odyn = _LegacyNonceOdyn()
+        result = encrypt_envelope(odyn, "test", "aabbcc")
+        assert result["nonce"] == "ab" * 12
+
 
 class TestDecryptEnvelope:
     def test_basic_decrypt(self):
@@ -693,6 +707,33 @@ class TestDecryptEnvelope:
         }
         with pytest.raises(ValueError, match="decryption failed"):
             decrypt_envelope(odyn, envelope)
+
+    def test_decrypt_normalizes_legacy_32_byte_nonce(self):
+        from secure_channel import decrypt_envelope
+
+        class _CaptureNonceOdyn(_MockOdyn):
+            def __init__(self):
+                super().__init__()
+                self.last_nonce = None
+
+            def decrypt(
+                self,
+                nonce_hex: str,
+                sender_pubkey_hex: str,
+                encrypted_data_hex: str,
+            ) -> str:
+                self.last_nonce = nonce_hex
+                return super().decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
+
+        odyn = _CaptureNonceOdyn()
+        envelope = {
+            "sender_tee_pubkey": "aabbcc",
+            "nonce": "0x" + "12" * 32,
+            "encrypted_data": "445566",
+        }
+        result = decrypt_envelope(odyn, envelope)
+        assert result == '{"test": "data"}'
+        assert odyn.last_nonce == "12" * 12
 
 
 class TestEncryptJsonEnvelope:

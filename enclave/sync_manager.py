@@ -849,7 +849,6 @@ class SyncManager:
                 return None
 
             # 5. Decrypt the response body (E2E)
-            resp_data = None
             try:
                 from secure_channel import decrypt_json_envelope
                 resp_data = resp.json()
@@ -859,22 +858,7 @@ class SyncManager:
                     # Create a new response-like object with decrypted data
                     resp._decrypted_json = decrypted_data
             except Exception as exc:
-                sender_hint = ""
-                nonce_hint = ""
-                if isinstance(resp_data, dict):
-                    sender = str(resp_data.get("sender_tee_pubkey", ""))
-                    nonce = str(resp_data.get("nonce", ""))
-                    if sender:
-                        sender_hint = sender[:32]
-                    if nonce:
-                        nonce_hint = nonce[:24]
-                logger.debug(
-                    "Response decryption skipped: %s [peer=%s sender_tee_pubkey_prefix=%s nonce_prefix=%s]",
-                    exc,
-                    base_url,
-                    sender_hint or "<none>",
-                    nonce_hint or "<none>",
-                )
+                logger.debug(f"Response decryption skipped: {exc}")
 
             return resp
         except Exception as exc:

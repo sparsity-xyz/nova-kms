@@ -49,26 +49,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("nova-kms.secure_channel")
 
+AES_GCM_NONCE_BYTES = 12
+AES_GCM_NONCE_HEX_LEN = AES_GCM_NONCE_BYTES * 2
+LEGACY_AES_GCM_NONCE_BYTES = 32
+LEGACY_AES_GCM_NONCE_HEX_LEN = LEGACY_AES_GCM_NONCE_BYTES * 2
 
-def _http_error_details(exc: Exception) -> str:
-    """
-    Best-effort extraction of HTTP status/body from requests HTTP errors.
-    """
-    response = getattr(exc, "response", None)
-    if response is None:
-        cause = getattr(exc, "__cause__", None)
-        response = getattr(cause, "response", None)
-    if response is None:
-        return ""
 
-    try:
-        body = response.text
-    except Exception:
-        body = "<unavailable>"
-    body_preview = (body or "").strip()
-    if len(body_preview) > 512:
-        body_preview = f"{body_preview[:512]}...(truncated)"
-    return f" (odyn_status={response.status_code}, odyn_body={body_preview})"
+def _normalize_nonce_hex(nonce_hex: str) -> str:
+    value = nonce_hex or ""
+    if value.startswith(("0x", "0X")):
+        value = value[2:]
+    if len(value) == LEGACY_AES_GCM_NONCE_HEX_LEN:
+        return value[:AES_GCM_NONCE_HEX_LEN]
+    return value
 
 
 # =============================================================================
@@ -110,9 +103,7 @@ def encrypt_envelope(
     # Odyn returns 'encrypted_data'
     encrypted_data = result.get("encrypted_data") or ""
 
-    nonce_hex = result.get("nonce", "")
-    if nonce_hex.startswith("0x"):
-        nonce_hex = nonce_hex[2:]
+    nonce_hex = _normalize_nonce_hex(str(result.get("nonce", "")))
 
     enc_data_hex = encrypted_data
     if enc_data_hex.startswith("0x"):
@@ -150,7 +141,7 @@ def decrypt_envelope(
         If the envelope is malformed or decryption fails.
     """
     sender_pubkey_hex = envelope.get("sender_tee_pubkey", "")
-    nonce_hex = envelope.get("nonce", "")
+    nonce_hex = _normalize_nonce_hex(str(envelope.get("nonce", "")))
     encrypted_data_hex = envelope.get("encrypted_data", "")
 
     if not all([sender_pubkey_hex, nonce_hex, encrypted_data_hex]):
@@ -160,8 +151,7 @@ def decrypt_envelope(
         plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
         return plaintext
     except Exception as exc:
-        details = _http_error_details(exc)
-        raise ValueError(f"Envelope decryption failed: {exc}{details}") from exc
+        raise ValueError(f"Envelope decryption failed: {exc}") from exc
 
 
 def encrypt_json_envelope(
