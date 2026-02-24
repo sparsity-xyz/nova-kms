@@ -50,6 +50,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nova-kms.secure_channel")
 
 
+def _http_error_details(exc: Exception) -> str:
+    """
+    Best-effort extraction of HTTP status/body from requests HTTP errors.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        cause = getattr(exc, "__cause__", None)
+        response = getattr(cause, "response", None)
+    if response is None:
+        return ""
+
+    try:
+        body = response.text
+    except Exception:
+        body = "<unavailable>"
+    body_preview = (body or "").strip()
+    if len(body_preview) > 512:
+        body_preview = f"{body_preview[:512]}...(truncated)"
+    return f" (odyn_status={response.status_code}, odyn_body={body_preview})"
+
+
 # =============================================================================
 # E2E Envelope Encryption (teePubkey-based)
 # =============================================================================
@@ -139,7 +160,8 @@ def decrypt_envelope(
         plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
         return plaintext
     except Exception as exc:
-        raise ValueError(f"Envelope decryption failed: {exc}") from exc
+        details = _http_error_details(exc)
+        raise ValueError(f"Envelope decryption failed: {exc}{details}") from exc
 
 
 def encrypt_json_envelope(
