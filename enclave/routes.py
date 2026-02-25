@@ -494,6 +494,10 @@ def list_operators():
                 getattr(p.get("status"), "name", str(p.get("status")))
                 if p.get("status") is not None else None
             ),
+            "status_endpoint_reachable": p.get("status_reachable"),
+            "status_endpoint_http_code": p.get("status_http_code"),
+            "status_probe_ms": p.get("status_probe_ms"),
+            "status_checked_at_ms": p.get("status_checked_at_ms"),
         }
 
         enriched.append({
@@ -729,24 +733,28 @@ async def sync_endpoint(request: Request, response: Response, body: dict = None)
     # Get sender's teePubkey from the envelope for response encryption (if encrypted)
     sender_tee_pubkey = body.get("sender_tee_pubkey") if _is_encrypted_envelope(body) else None
 
-    # SECURITY: Verify sender_tee_pubkey against on-chain registration BEFORE decryption
+    # SECURITY: Verify sender_tee_pubkey against trusted registration BEFORE decryption
     # This prevents MITM from re-encrypting requests with their own teePubkey
     if _is_encrypted_envelope(body):
         peer_wallet = kms_pop.get("wallet")
         if peer_wallet and sender_tee_pubkey:
-            from secure_channel import get_tee_pubkey_der_hex
             try:
-                onchain_pubkey_hex = get_tee_pubkey_der_hex(
-                    peer_wallet,
-                    _sync_manager.peer_cache.nova_registry if _sync_manager.peer_cache else None
-                )
-                if onchain_pubkey_hex:
+                registered_pubkey_hex = None
+                if _sync_manager and getattr(_sync_manager, "peer_cache", None):
+                    registered_pubkey_hex = _sync_manager.peer_cache.get_tee_pubkey_by_wallet(
+                        peer_wallet,
+                        refresh_if_stale=False,
+                    )
+                # No fallback to on-chain lookup — if peer is not cached,
+                # verify_kms_peer() in handle_incoming_sync will reject it.
+
+                if registered_pubkey_hex:
                     sender_hex = _normalize_hex(sender_tee_pubkey)
-                    onchain_hex = _normalize_hex(onchain_pubkey_hex)
-                    if sender_hex != onchain_hex:
+                    registered_hex = _normalize_hex(registered_pubkey_hex)
+                    if sender_hex != registered_hex:
                         logger.warning(
                             f"Sync E2E envelope sender_tee_pubkey mismatch for {peer_wallet}: "
-                            f"envelope={sender_hex[:32]}..., onchain={onchain_hex[:32]}..."
+                            f"envelope={sender_hex[:32]}..., registered={registered_hex[:32]}..."
                         )
                         raise HTTPException(
                             status_code=403,

@@ -45,6 +45,15 @@ The system implements a **Defense in Depth** strategy with four layers of securi
 *   **Purpose**: Defense-in-depth for inter-node sync; rejects peers that don’t share the cluster sync key.
 *   **Details**: When a sync key is configured, nodes require `X-Sync-Signature` on `/sync`.
 
+## Registry and Cache Model
+
+Runtime authorization uses two explicit paths:
+
+1. **App requests (`/kms/*`)** use `CachedNovaRegistry` (read-through cache for `NovaAppRegistry`).
+2. **KMS peer sync (`/sync`)** uses `PeerCache` refreshed by `node_tick`.
+
+Details: see [`docs/cache-and-registry-model.md`](docs/cache-and-registry-model.md).
+
 ## Architecture Diagram
 
 ```mermaid

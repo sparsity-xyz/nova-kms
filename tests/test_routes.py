@@ -457,6 +457,32 @@ class TestData:
 
 
 class TestSync:
+    @staticmethod
+    def _seed_sync_peer(wallet: str) -> None:
+        """Seed PeerCache with a valid sync peer for cache-only /sync auth."""
+        import routes
+        from nova_registry import InstanceStatus
+
+        cache = routes._sync_manager.peer_cache
+        lower_wallet = wallet.lower()
+        if any((p.get("tee_wallet_address") or "").lower() == lower_wallet for p in cache._peers):
+            return
+
+        cache._peers.append(
+            {
+                "tee_wallet_address": lower_wallet,
+                "node_url": f"http://peer-{lower_wallet[:10]}",
+                "tee_pubkey": "senderpubkey",  # matches sender_tee_pubkey="0xSenderPubkey" after normalization
+                "app_id": 49,
+                "operator": lower_wallet,
+                "status": InstanceStatus.ACTIVE,
+                "zk_verified": True,
+                "version_id": 1,
+                "instance_id": 999,
+                "registered_at": 0,
+            }
+        )
+
     def test_sync_unavailable_without_master_secret(self, client):
         import routes
         from kdf import MasterSecretManager
@@ -475,6 +501,7 @@ class TestSync:
         headers, sender_wallet = _kms_pop_headers(
             client, recipient_wallet="0xTestNode", private_key_hex="0x" + "11" * 32
         )
+        self._seed_sync_peer(sender_wallet)
         resp = client.post(
             "/sync",
             json={
@@ -501,6 +528,7 @@ class TestSync:
         headers, sender_wallet = _kms_pop_headers(
             client, recipient_wallet="0xTestNode", private_key_hex="0x" + "22" * 32
         )
+        self._seed_sync_peer(sender_wallet)
         resp = client.post(
             "/sync",
             json={"type": "snapshot_request", "sender_wallet": sender_wallet, "sender_tee_pubkey": "0xSenderPubkey"},
@@ -508,6 +536,35 @@ class TestSync:
         )
         assert resp.status_code == 200
         assert "data" in resp.json()
+
+    def test_sync_path_uses_peer_cache_without_registry_calls(self, client):
+        import routes
+
+        headers, sender_wallet = _kms_pop_headers(
+            client, recipient_wallet="0xTestNode", private_key_hex="0x" + "66" * 32
+        )
+        self._seed_sync_peer(sender_wallet)
+
+        reg = routes._sync_manager.peer_cache.nova_registry
+        reg.get_instance_by_wallet.reset_mock()
+        reg.get_app.reset_mock()
+        reg.get_version.reset_mock()
+
+        resp = client.post(
+            "/sync",
+            json={
+                "type": "delta",
+                "sender_wallet": sender_wallet,
+                "sender_tee_pubkey": "0xSenderPubkey",
+                "data": {},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        reg.get_instance_by_wallet.assert_not_called()
+        reg.get_app.assert_not_called()
+        reg.get_version.assert_not_called()
 
     def test_sync_without_pop_rejected(self, client):
         """Sync without PoP headers should be rejected."""

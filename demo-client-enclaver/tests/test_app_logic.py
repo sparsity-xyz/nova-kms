@@ -1,6 +1,7 @@
 import importlib
 import os
 import sys
+import base64
 from contextlib import contextmanager
 from pathlib import Path
 import asyncio
@@ -59,7 +60,11 @@ class FakeOdyn:
         return {"key": self._derive_key}
 
     def kms_kv_get(self, key):
-        return {"found": self._read_found, "value": self._read_value}
+        if self._read_value is None:
+            encoded_value = None
+        else:
+            encoded_value = base64.b64encode(str(self._read_value).encode()).decode()
+        return {"found": self._read_found, "value": encoded_value}
 
     def kms_kv_put(self, key, value, ttl_ms=0):
         return {"success": self._put_success}

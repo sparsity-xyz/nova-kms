@@ -19,6 +19,7 @@ import pytest
 import config
 from data_store import DataStore
 from sync_manager import PeerCache, SyncManager
+from nova_registry import InstanceStatus
 
 # =============================================================================
 # Mocking & Setup
@@ -158,7 +159,26 @@ class SimulatedNode:
 
     def set_peers(self, peer_list):
         """peer_list: list of {'tee_wallet_address': ..., 'node_url': ...}"""
-        self.peer_cache._peers = [p for p in peer_list if p['tee_wallet_address'].lower() != self.wallet.lower()]
+        normalized = []
+        for idx, p in enumerate(peer_list, start=1):
+            wallet = (p.get("tee_wallet_address") or "").lower()
+            if wallet == self.wallet.lower():
+                continue
+            normalized.append(
+                {
+                    "tee_wallet_address": wallet,
+                    "node_url": p.get("node_url", ""),
+                    "tee_pubkey": "01" * 32,
+                    "app_id": 49,
+                    "operator": wallet,
+                    "status": InstanceStatus.ACTIVE,
+                    "zk_verified": True,
+                    "version_id": 1,
+                    "instance_id": idx,
+                    "registered_at": 0,
+                }
+            )
+        self.peer_cache._peers = normalized
         self.peer_cache._last_refresh = time.time() + 1000  # Prevent auto-refresh
 
     def sync_loop(self):
@@ -274,9 +294,12 @@ def test_sync_snapshot_under_load(network):
     # New node joins
     new_wallet = "0xNewJoiner"
     new_node = SimulatedNode(new_wallet, network)
-    
-    # It sees the existing nodes
-    new_node.set_peers(peer_list)
+
+    # Both sides refresh peer cache to include the new node before /sync auth.
+    expanded_peer_list = peer_list + [{"tee_wallet_address": new_wallet, "node_url": f"http://{new_wallet}"}]
+    for node in existing_nodes:
+        node.set_peers(expanded_peer_list)
+    new_node.set_peers(expanded_peer_list)
     
     # It requests a snapshot from one of them
     target_peer_url = f"http://{existing_nodes[0].wallet}"

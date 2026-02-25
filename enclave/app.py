@@ -101,8 +101,11 @@ def _startup_production() -> dict:
         logger.error(f"Failed to get TEE wallet: {exc}")
 
     # 3. Initialize on-chain clients
+    # - app_registry_client: canonical NovaAppRegistry reader used by KMS membership flows.
+    # - app_registry_auth_cache: CachedNovaRegistry wrapper used by app auth hot paths.
     kms_registry: KMSRegistryClient | None = None
-    nova_registry: NovaRegistry | None = None
+    app_registry_client: NovaRegistry | None = None
+    app_registry_auth_cache = None
     node_info: dict = {
         "tee_wallet": tee_wallet,
         "node_url": os.getenv("NODE_URL", ""),
@@ -114,16 +117,16 @@ def _startup_production() -> dict:
         if config.KMS_REGISTRY_ADDRESS:
             kms_registry = KMSRegistryClient()
         if config.NOVA_APP_REGISTRY_ADDRESS:
-            nova_registry = NovaRegistry()
+            app_registry_client = NovaRegistry()
     except Exception as exc:
         logger.warning(f"Contract client init failed: {exc}")
 
     # 4. Check if this node is a registered ACTIVE KMS instance (via NovaAppRegistry)
     is_active_instance = False
-    if nova_registry:
+    if app_registry_client:
         try:
             from nova_registry import InstanceStatus, VersionStatus
-            inst = nova_registry.get_instance_by_wallet(tee_wallet)
+            inst = app_registry_client.get_instance_by_wallet(tee_wallet)
             kms_app_id = int(config.KMS_APP_ID or 0)
 
             inst_id = getattr(inst, "instance_id", 0)
@@ -139,7 +142,7 @@ def _startup_production() -> dict:
                 f"zk_verified={inst_zk}, instance_url={inst_url}"
             )
 
-            version = nova_registry.get_version(kms_app_id, inst.version_id)
+            version = app_registry_client.get_version(kms_app_id, inst.version_id)
             is_active_instance = (
                 inst_id != 0
                 and inst_app_id == kms_app_id
@@ -180,7 +183,7 @@ def _startup_production() -> dict:
 
     # 5. Initialize data store & sync
     data_store = DataStore(node_id=tee_wallet, key_callback=data_key_callback)
-    peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=nova_registry)
+    peer_cache = PeerCache(kms_registry_client=kms_registry, nova_registry=app_registry_client)
     sync_manager = SyncManager(data_store, tee_wallet, peer_cache, odyn=odyn, node_info=node_info)
 
     # 6. Master secret and sync are handled by the single periodic node tick.
@@ -188,11 +191,14 @@ def _startup_production() -> dict:
 
     # 7. CA & auth
 
-    # Use CachedNovaRegistry for high-frequency API authorization checks
+    # Use CachedNovaRegistry for high-frequency API authorization checks.
+    # This cache is ONLY for app->kms authorization; KMS peer membership/auth uses PeerCache.
     from nova_registry import CachedNovaRegistry
-    cached_registry = CachedNovaRegistry(nova_registry) if nova_registry else None
-    
-    authorizer = AppAuthorizer(registry=cached_registry)
+    app_registry_auth_cache = (
+        CachedNovaRegistry(app_registry_client) if app_registry_client else None
+    )
+
+    authorizer = AppAuthorizer(registry=app_registry_auth_cache)
     from auth import set_node_wallet
     set_node_wallet(tee_wallet)
     return {

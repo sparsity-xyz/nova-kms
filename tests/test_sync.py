@@ -278,6 +278,24 @@ class TestPeerCache:
         peer_cache.refresh()
         assert peer_cache.get_tee_pubkey_by_url("http://nobody") is None
 
+    def test_probe_status_endpoint_uses_3s_timeout(self, monkeypatch):
+        captured = {}
+
+        def _fake_get(url, timeout):
+            captured["url"] = url
+            captured["timeout"] = timeout
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        monkeypatch.setattr("sync_manager.requests.get", _fake_get)
+        out = PeerCache._probe_status_endpoint("https://peer.example.com")
+
+        assert captured["url"] == "https://peer.example.com/status"
+        assert captured["timeout"] == 3.0
+        assert out["status_reachable"] is True
+        assert out["status_http_code"] == 200
+
     def test_refresh_skip_invalid_url(self, peer_cache, monkeypatch):
         from sync_manager import URLValidationError
         call_count = {"n": 0}
@@ -344,6 +362,72 @@ class TestPeerCache:
         assert len(peers) == len(_PEER_WALLETS)  # refreshed again
 
 
+# =============================================================================
+# PeerCache — verify_kms_peer
+# =============================================================================
+
+
+class TestVerifyKmsPeer:
+    """Direct unit tests for PeerCache.verify_kms_peer()."""
+
+    def _make_peer(self, wallet: str, **overrides) -> dict:
+        base = {
+            "tee_wallet_address": wallet.lower(),
+            "node_url": f"http://peer-{wallet[:8]}",
+            "tee_pubkey": "01" * 32,
+            "app_id": 49,
+            "operator": wallet.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 100,
+            "registered_at": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_peer_not_in_cache_rejected(self, peer_cache):
+        result = peer_cache.verify_kms_peer("0xunknown")
+        assert not result["authorized"]
+        assert "not found in PeerCache" in result["reason"]
+
+    def test_wrong_app_id_rejected(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xbad_app", app_id=999))
+        result = peer_cache.verify_kms_peer("0xbad_app")
+        assert not result["authorized"]
+        assert "app_id" in result["reason"]
+
+    def test_inactive_peer_rejected(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xinactive", status=InstanceStatus.STOPPED))
+        result = peer_cache.verify_kms_peer("0xinactive")
+        assert not result["authorized"]
+        assert "ACTIVE" in result["reason"]
+
+    def test_not_zk_verified_rejected(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xno_zk", zk_verified=False))
+        result = peer_cache.verify_kms_peer("0xno_zk")
+        assert not result["authorized"]
+        assert "zk-verified" in result["reason"]
+
+    def test_no_tee_pubkey_rejected(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xno_pk", tee_pubkey=""))
+        result = peer_cache.verify_kms_peer("0xno_pk")
+        assert not result["authorized"]
+        assert "teePubkey" in result["reason"]
+
+    def test_valid_peer_authorized(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xvalid"))
+        result = peer_cache.verify_kms_peer("0xvalid")
+        assert result["authorized"]
+        assert result["tee_pubkey"] == "01" * 32
+        assert result["reason"] is None
+
+    def test_blacklisted_peer_rejected(self, peer_cache):
+        peer_cache._peers.append(self._make_peer("0xblacklisted"))
+        peer_cache.blacklist_peer("0xblacklisted")
+        result = peer_cache.verify_kms_peer("0xblacklisted")
+        assert not result["authorized"]
+        assert "not found in PeerCache" in result["reason"]
 # =============================================================================
 # SyncManager — construction / basic
 # =============================================================================
@@ -422,6 +506,22 @@ class TestHandleIncomingSync:
             "nonce": nonce_b64,
         }, acct.address
 
+    def _seed_peer_in_cache(self, sync_mgr, wallet: str):
+        """Seed PeerCache with a valid KMS peer entry for the given wallet."""
+        from nova_registry import InstanceStatus
+        sync_mgr.peer_cache._peers.append({
+            "tee_wallet_address": wallet.lower(),
+            "node_url": f"http://peer-{wallet[:8]}",
+            "tee_pubkey": "01" * 32,
+            "app_id": 49,
+            "operator": wallet.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 100,
+            "registered_at": 0,
+        })
+
     def test_missing_pop_returns_error(self, sync_mgr):
         result = sync_mgr.handle_incoming_sync({"type": "delta", "data": {}})
         assert result["status"] == "error"
@@ -436,6 +536,7 @@ class TestHandleIncomingSync:
 
     def test_delta_sync_via_pop(self, sync_mgr, kms_reg):
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {
             "type": "delta",
             "sender_wallet": wallet,
@@ -456,6 +557,7 @@ class TestHandleIncomingSync:
 
     def test_snapshot_request_via_pop(self, sync_mgr, kms_reg):
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {"type": "snapshot_request", "sender_wallet": wallet}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "ok"
@@ -463,6 +565,7 @@ class TestHandleIncomingSync:
 
     def test_unknown_type_returns_error(self, sync_mgr, kms_reg):
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {"type": "unknown", "sender_wallet": wallet}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "error"
@@ -476,30 +579,32 @@ class TestHandleIncomingSync:
         assert "sender_wallet does not match" in result["reason"]
 
     def test_non_operator_rejected(self, sync_mgr, kms_reg, nova_reg, monkeypatch):
-        """Non-KMS peer (different app_id) should be rejected."""
-        kms_reg.is_operator.return_value = False
-        
-        # Override registry to return an instance with wrong app_id (not KMS_APP_ID)
-        def _get_non_kms_instance(w):
-            return _FakeInstance(
-                instance_id=999,
-                app_id=123,  # Not KMS_APP_ID (49)
-                version_id=1,
-                tee_wallet_address=w,
-                status=InstanceStatus.ACTIVE,
-                zk_verified=True,
-            )
-        nova_reg.get_instance_by_wallet.side_effect = _get_non_kms_instance
-        
+        """Non-KMS peer (different app_id) should be rejected by verify_kms_peer."""
         pop, wallet = self._make_pop(sync_mgr)
+        # Seed peer in cache with wrong app_id (not KMS_APP_ID=49)
+        from nova_registry import InstanceStatus
+        sync_mgr.peer_cache._peers.append({
+            "tee_wallet_address": wallet.lower(),
+            "node_url": "http://peer-wrong-app",
+            "tee_pubkey": "01" * 32,
+            "app_id": 123,  # Not KMS_APP_ID (49)
+            "operator": wallet.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 999,
+            "registered_at": 0,
+        })
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "error"
         assert "Peer authorization failed" in result["reason"]
+        assert "app_id" in result["reason"]
 
     def test_hmac_required_when_key_set(self, sync_mgr, kms_reg):
         sync_mgr.set_sync_key(b"shared-key")
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         # No signature → rejected
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
@@ -510,6 +615,7 @@ class TestHandleIncomingSync:
         key = b"shared-key"
         sync_mgr.set_sync_key(key)
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         payload = json.dumps(body, sort_keys=True, separators=(",", ":"))
         sig = _compute_hmac(key, payload.encode())
@@ -519,6 +625,7 @@ class TestHandleIncomingSync:
     def test_hmac_invalid_rejected(self, sync_mgr, kms_reg):
         sync_mgr.set_sync_key(b"k")
         pop, wallet = self._make_pop(sync_mgr)
+        self._seed_peer_in_cache(sync_mgr, wallet)
         body = {"type": "delta", "sender_wallet": wallet, "data": {}}
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop, signature="bad")
         assert result["status"] == "error"
@@ -553,6 +660,7 @@ class TestMasterSecretRequest:
         """master_secret_request with ecdh_pubkey returns sealed envelope."""
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives import serialization
+        from nova_registry import InstanceStatus
 
         mgr = MasterSecretManager()
         mgr.initialize_from_peer(b"\xAB" * 32)
@@ -583,6 +691,20 @@ class TestMasterSecretRequest:
 
         body["sender_wallet"] = acct.address
 
+        # Seed peer in cache
+        sync_mgr.peer_cache._peers.append({
+            "tee_wallet_address": acct.address.lower(),
+            "node_url": "http://peer-sealed",
+            "tee_pubkey": "01" * 32,
+            "app_id": 49,
+            "operator": acct.address.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 100,
+            "registered_at": 0,
+        })
+
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "ok"
         assert "sealed" in result
@@ -594,6 +716,7 @@ class TestMasterSecretRequest:
         from auth import issue_nonce
         from eth_account import Account
         from eth_account.messages import encode_defunct
+        from nova_registry import InstanceStatus
 
         nonce = issue_nonce()
         nonce_b64 = base64.b64encode(nonce).decode()
@@ -603,6 +726,20 @@ class TestMasterSecretRequest:
         sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
         pop = {"wallet": acct.address, "signature": sig, "timestamp": ts, "nonce": nonce_b64}
         body["sender_wallet"] = acct.address
+
+        # Seed peer in cache
+        sync_mgr.peer_cache._peers.append({
+            "tee_wallet_address": acct.address.lower(),
+            "node_url": "http://peer-mgr-unavail",
+            "tee_pubkey": "01" * 32,
+            "app_id": 49,
+            "operator": acct.address.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 101,
+            "registered_at": 0,
+        })
 
         result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
         assert result["status"] == "error"
@@ -710,6 +847,67 @@ class TestPushDeltasResilience:
         peer_count = len(sync_mgr.peer_cache.get_peers(exclude_wallet=sync_mgr.node_wallet))
         success = sync_mgr.push_deltas()
         assert success == max(0, peer_count - 1)
+
+    def test_status_reachable_flag_does_not_filter_outbound_sync(self, sync_mgr):
+        from nova_registry import InstanceStatus
+
+        sync_mgr.peer_cache._peers = [
+            {
+                "tee_wallet_address": "0xpeer1",
+                "node_url": "http://peer1",
+                "tee_pubkey": "01" * 32,
+                "app_id": 49,
+                "operator": "0xpeer1",
+                "status": InstanceStatus.ACTIVE,
+                "zk_verified": True,
+                "version_id": 1,
+                "instance_id": 1,
+                "registered_at": 0,
+                "status_reachable": False,  # should not block outbound sync fanout
+            }
+        ]
+        # Prevent auto-refresh so the test exercises the seeded cache entry directly.
+        sync_mgr.peer_cache._last_refresh = time.time() + 1000
+        sync_mgr.data_store.put(1, "k", b"v")
+
+        calls = {"count": 0}
+
+        def _make_request(url, body, timeout=None):
+            calls["count"] += 1
+            resp = MagicMock()
+            resp.status_code = 200
+            return resp
+
+        sync_mgr._make_request = _make_request
+        success = sync_mgr.push_deltas()
+        assert calls["count"] == 1
+        assert success == 1
+
+
+class TestRequestTimeouts:
+    def test_request_master_secret_uses_45s_timeout(self, sync_mgr):
+        captured = {}
+
+        def _make_request(url, body, timeout=None):
+            captured["timeout"] = timeout
+            resp = MagicMock()
+            resp._decrypted_json = None
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "sealed": {
+                    "ephemeral_pubkey": "00",
+                    "nonce": "00",
+                    "ciphertext": "00",
+                    "tag": "00",
+                }
+            }
+            return resp
+
+        sync_mgr._make_request = _make_request
+        result = sync_mgr.request_master_secret("http://peer", ecdh_pubkey=b"\x01\x02")
+
+        assert captured["timeout"] == 45
+        assert result is not None
 
 
 # =============================================================================

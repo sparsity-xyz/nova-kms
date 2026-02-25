@@ -214,6 +214,31 @@ class PeerCache:
             peers = [p for p in peers if p["tee_wallet_address"].lower() != exclude]
         return peers
 
+    def get_peer_by_wallet(self, wallet: str, refresh_if_stale: bool = True) -> Optional[dict]:
+        """Look up a cached peer entry by wallet address."""
+        target = (wallet or "").lower()
+        if not target:
+            return None
+        if refresh_if_stale and self._is_stale():
+            self.refresh(skip_if_refreshing=True)
+        with self._lock:
+            self._purge_blacklist()
+            if target in self._blacklist:
+                return None
+            for p in self._peers:
+                if (p.get("tee_wallet_address") or "").lower() == target:
+                    return p
+        return None
+
+    @staticmethod
+    def _normalize_tee_pubkey_hex(tee_pubkey: object) -> Optional[str]:
+        if isinstance(tee_pubkey, bytes):
+            return tee_pubkey.hex()
+        if isinstance(tee_pubkey, str):
+            normalized = tee_pubkey.lower().removeprefix("0x")
+            return normalized or None
+        return None
+
     def get_wallet_by_url(self, url: str) -> Optional[str]:
         """Look up a peer's wallet address by their base URL."""
         base = url.rstrip("/")
@@ -223,19 +248,112 @@ class PeerCache:
                     return p["tee_wallet_address"]
         return None
 
+    def get_tee_pubkey_by_wallet(self, wallet: str, refresh_if_stale: bool = True) -> Optional[str]:
+        """Look up a peer's cached teePubkey (hex) by wallet."""
+        peer = self.get_peer_by_wallet(wallet, refresh_if_stale=refresh_if_stale)
+        if not peer:
+            return None
+        return self._normalize_tee_pubkey_hex(peer.get("tee_pubkey"))
+
     def get_tee_pubkey_by_url(self, url: str) -> Optional[str]:
         """Look up a peer's cached teePubkey (hex) by base URL."""
         base = url.rstrip("/")
         with self._lock:
             for p in self._peers:
                 if p["node_url"].rstrip("/") == base:
-                    tee_pubkey = p.get("tee_pubkey", "")
-                    if isinstance(tee_pubkey, bytes):
-                        return tee_pubkey.hex()
-                    if isinstance(tee_pubkey, str):
-                        return tee_pubkey.lower().removeprefix("0x")
-                    return None
+                    return self._normalize_tee_pubkey_hex(p.get("tee_pubkey"))
         return None
+
+    @staticmethod
+    def _probe_status_endpoint(node_url: str, timeout: float = 3.0) -> dict:
+        """Probe peer /status and return lightweight connectivity metadata."""
+        checked_at_ms = int(time.time() * 1000)
+        start = time.time()
+        status_url = f"{node_url.rstrip('/')}/status"
+        try:
+            resp = requests.get(status_url, timeout=timeout)
+            probe_ms = int((time.time() - start) * 1000)
+            return {
+                "status_reachable": resp.status_code == 200,
+                "status_http_code": resp.status_code,
+                "status_probe_ms": probe_ms,
+                "status_checked_at_ms": checked_at_ms,
+            }
+        except Exception:
+            probe_ms = int((time.time() - start) * 1000)
+            return {
+                "status_reachable": False,
+                "status_http_code": None,
+                "status_probe_ms": probe_ms,
+                "status_checked_at_ms": checked_at_ms,
+            }
+
+    def verify_kms_peer(self, wallet: str) -> dict:
+        """Fast KMS peer verification using cached PeerCache data (no RPC calls).
+
+        Checks:
+          1. Peer is in the cache (refreshed during node_tick)
+          2. status == ACTIVE
+          3. zk_verified == True
+          4. app_id == KMS_APP_ID
+          5. teePubkey is present
+
+        If the wallet is not in the cache, the sync is rejected.
+        The sender must wait until the next PeerCache refresh cycle.
+
+        Returns:
+            dict with keys: authorized (bool), tee_pubkey (str|None), reason (str|None)
+        """
+        from config import KMS_APP_ID
+        from nova_registry import InstanceStatus
+
+        peer = self.get_peer_by_wallet(wallet, refresh_if_stale=False)
+        if not peer:
+            return {
+                "authorized": False,
+                "tee_pubkey": None,
+                "reason": f"Peer {wallet} not found in PeerCache (not yet discovered or blacklisted)",
+            }
+
+        # Status must be ACTIVE
+        if peer.get("status") != InstanceStatus.ACTIVE:
+            return {
+                "authorized": False,
+                "tee_pubkey": None,
+                "reason": f"Peer {wallet} status is {peer.get('status')} (expected ACTIVE)",
+            }
+
+        # Must be zk-verified
+        if not peer.get("zk_verified"):
+            return {
+                "authorized": False,
+                "tee_pubkey": None,
+                "reason": f"Peer {wallet} not zk-verified",
+            }
+
+        # app_id must match KMS_APP_ID
+        kms_app_id = int(KMS_APP_ID or 0)
+        if kms_app_id and peer.get("app_id") != kms_app_id:
+            return {
+                "authorized": False,
+                "tee_pubkey": None,
+                "reason": f"Peer {wallet} app_id {peer.get('app_id')} != KMS_APP_ID {kms_app_id}",
+            }
+
+        # teePubkey must be present
+        tee_pubkey_hex = self._normalize_tee_pubkey_hex(peer.get("tee_pubkey"))
+        if not tee_pubkey_hex:
+            return {
+                "authorized": False,
+                "tee_pubkey": None,
+                "reason": f"Peer {wallet} has no teePubkey in cache",
+            }
+
+        return {
+            "authorized": True,
+            "tee_pubkey": tee_pubkey_hex,
+            "reason": None,
+        }
 
     def _fetch_peers_from_chain(self) -> List[dict]:
         """Fetch peer list from NovaAppRegistry using getActiveInstances. Slow IO, NO LOCK."""
@@ -322,6 +440,9 @@ class PeerCache:
                     "registered_at": getattr(instance, "registered_at", 0),
                 }
             )
+            if config_module.IN_ENCLAVE:
+                # Refresh peer connectivity metadata out-of-band from request paths.
+                peers[-1].update(self._probe_status_endpoint(instance.instance_url))
             seen_wallets.add(wallet)
             logger.debug(f"Added peer {wallet}")
 
@@ -987,7 +1108,7 @@ class SyncManager:
         if ecdh_pubkey:
             body["ecdh_pubkey"] = ecdh_pubkey.hex()
 
-        resp = self._make_request(url, body, timeout=15)
+        resp = self._make_request(url, body, timeout=45)
         if not resp:
             return None
         try:
@@ -1099,27 +1220,13 @@ class SyncManager:
             logger.warning(f"Sync rejected: sender_wallet {body_sender} does not match PoP signer {p_wallet}")
             return {"status": "error", "reason": "sender_wallet does not match PoP signature"}
 
-        # C. Verify that peer is an authorized KMS instance (same pattern as App→KMS)
-        # KMS nodes are regular Nova apps, so we use AppAuthorizer with require_app_id:
-        #   - Instance is ACTIVE + zkVerified
-        #   - Instance app_id == KMS_APP_ID
-        #   - Version is ENROLLED
-        #   - teePubkey is valid P-384
-        from auth import AppAuthorizer, ClientIdentity
-        from config import KMS_APP_ID
-        try:
-            peer_identity = ClientIdentity(tee_wallet=p_wallet, signature=p_sig)
-            peer_authorizer = AppAuthorizer(
-                registry=self.peer_cache.nova_registry,
-                require_app_id=int(KMS_APP_ID or 0)
-            )
-            auth_result = peer_authorizer.verify(peer_identity)
-            if not auth_result.authorized:
-                logger.warning(f"Peer authorization failed for {p_wallet}: {auth_result.reason}")
-                return {"status": "error", "reason": f"Peer authorization failed: {auth_result.reason}"}
-        except Exception as exc:
-            logger.warning(f"Peer authorization error for {p_wallet}: {exc}")
-            return {"status": "error", "reason": "Peer authorization failed"}
+        # C. Verify peer KMS authorization (cache-only, no RPC calls).
+        # PeerCache is refreshed during node_tick. If peer is not yet cached,
+        # the sync is rejected — sender must wait for the next refresh cycle.
+        cache_auth = self.peer_cache.verify_kms_peer(p_wallet)
+        if not cache_auth["authorized"]:
+            logger.warning(f"Peer authorization failed for {p_wallet}: {cache_auth['reason']}")
+            return {"status": "error", "reason": f"Peer authorization failed: {cache_auth['reason']}"}
 
         logger.debug(f"KMS PoP verified for {p_wallet}")
 

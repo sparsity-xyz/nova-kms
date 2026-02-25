@@ -339,7 +339,7 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 - **Membership source**: nodes discover peers via NovaAppRegistry (`KMS_APP_ID` → ACTIVE instances with non-REVOKED versions), cached in `PeerCache`.
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
-- **Security**: sync messages are authenticated with PoP and authorize the sender as an ACTIVE + zkVerified instance of the KMS app with a non-REVOKED version.
+- **Security**: sync messages are authenticated with PoP and authorize the sender via `PeerCache` (which is refreshed from `NovaAppRegistry` and keeps only ACTIVE + zkVerified KMS instances on non-REVOKED versions).
 - **Backpressure**: rate-limit sync and snapshot requests to avoid amplification during spikes.
 
 ### 4.2 Vector Clock Based Sync
@@ -412,7 +412,7 @@ class DataRecord:
 | App Code Upgrade Leak | App/Version hierarchy allows owners to rotate approved measurements |
 | Man-in-the-middle | TLS + in-app PoP verification (no trusted proxies) |
 | Replay attack | PoP nonce + timestamp window (configurable) |
-| Node impersonation during sync | PoP + NovaAppRegistry authorization (KMS app, ACTIVE+zkVerified, non-REVOKED version) + (if encrypted) sender_tee_pubkey checked against registered teePubkey before decryption |
+| Node impersonation during sync | PoP + PeerCache authorization (PeerCache refreshed from NovaAppRegistry: KMS app, ACTIVE+zkVerified, non-REVOKED version) + (if encrypted) sender_tee_pubkey checked against registered teePubkey before decryption |
 
 ### 5.2 Access Control Matrix (Instance Based)
 
@@ -431,12 +431,12 @@ def verify_sync_request(identity: ClientIdentity) -> bool:
         The implementation verifies:
         - PoP timestamp freshness + nonce single-use
         - PoP message signature (NovaKMS:Auth:...)
-        - Sender is authorized as a KMS instance via NovaAppRegistry (AppAuthorizer(require_app_id=KMS_APP_ID))
+        - Sender is authorized as a KMS instance via PeerCache
+          (PeerCache is refreshed from NovaAppRegistry in node_tick)
         - Optional HMAC (x-sync-signature) is required when a sync key is configured,
             except for bootstrap master_secret_request.
         """
-        peer_auth = AppAuthorizer(registry=nova_app_registry, require_app_id=KMS_APP_ID)
-        return peer_auth.verify(identity).authorized
+        return peer_cache.verify_kms_peer(identity.tee_wallet)["authorized"]
 ```
 
 ---

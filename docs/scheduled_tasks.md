@@ -17,6 +17,8 @@ This matches `enclave/app.py`, which registers both jobs via APScheduler.
 ### What `node_tick` does
 
 1. Refresh peer cache from `NovaAppRegistry` and update local membership view.
+   - `PeerCache` is the KMS peer authorization source for `/sync`.
+   - In enclave mode, refresh also probes peer `/status` (3s timeout) and caches connectivity metadata.
 2. If this node is not currently an eligible KMS instance, keep service unavailable (`503`).
 3. Read `masterSecretHash` from `KMSRegistry`:
    - If hash is zero and this node is eligible, attempt bootstrap hash claim.
@@ -52,3 +54,4 @@ Note:
 | `KMS_NODE_TICK_SECONDS` | `60` | core heartbeat interval |
 | `DATA_SYNC_INTERVAL_SECONDS` | `10` | interval for pushing data deltas to peers |
 | `PEER_CACHE_TTL_SECONDS` | `180` | (internal) max age of peer cache before forced refresh |
+| `REGISTRY_CACHE_TTL_SECONDS` | `180` | TTL for app authorization read-through cache (`CachedNovaRegistry`) |
