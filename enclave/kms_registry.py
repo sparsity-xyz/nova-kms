@@ -221,7 +221,7 @@ _KMS_REGISTRY_ABI = [
 
 
 
-# _abi_type_to_eth_abi_str and _decode_outputs imported from abi_helpers above.
+# _decode_outputs imported from abi_helpers above.
 
 
 # =============================================================================

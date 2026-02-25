@@ -40,7 +40,7 @@ Synchronization between KMS nodes is a multi-layered process ensuring state conv
     - **PoP Handshake**: Mutual Proof-of-Possession based on `tee_wallet` signatures.
     - **HMAC Signing**: All sync payloads are signed with a transient sync key derived from the shared master secret.
 - **Sync Modes**:
-    1. **Delta Push**: Periodic push (default 60s) of recent changes since the last sync.
+    1. **Delta Push**: Periodic push (default 10s) of recent changes since the last sync.
     2. **Full Snapshot**: Performed during startup or after prolonged network isolation to ensure full state parity.
 
 ## 5. Conflict Resolution (Vector Clocks + LWW)

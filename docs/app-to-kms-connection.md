@@ -226,21 +226,22 @@ Example client implementation: `demo-client/enclave/kms_identity.py`:
 
 ## Appendix A: KMS ↔ KMS Authentication and Sync
 
-KMS nodes are regular Nova apps registered under `KMS_APP_ID`. The KMS↔KMS authentication follows the **same pattern as App→KMS**, using `AppAuthorizer(require_app_id=KMS_APP_ID)`:
+KMS nodes are regular Nova apps registered under `KMS_APP_ID`. The KMS↔KMS authentication uses a **PeerCache-based** authorization path, not `AppAuthorizer`:
 
-### A.1 KMS Peer Authorization (Same as App→KMS)
+### A.1 KMS Peer Authorization (Cache-Based)
 
-When KMS node A sends a sync request to KMS node B, node B verifies A using:
+When KMS node A sends a sync request to KMS node B, node B verifies A using `PeerCache.verify_kms_peer()`:
 
-1. `getInstanceByWallet(peer_wallet)` → instance
-2. instance must satisfy:
+1. `PeerCache` (refreshed from `NovaAppRegistry` during `node_tick`) stores authorized peers
+2. The peer must be present in the cache with:
    - `status == ACTIVE`
    - `zkVerified == true`
-3. `instance.app_id == KMS_APP_ID` (verify it's a KMS instance)
-4. `getVersion(KMS_APP_ID, versionId)`: Version must not be `REVOKED` (currently `ENROLLED` or `DEPRECATED`)
-5. `teePubkey` must be a valid P-384 public key
+   - `app_id == KMS_APP_ID`
+   - Version not `REVOKED`
+3. `teePubkey` must be a valid P-384 public key
+4. If the peer is not in `PeerCache`, `/sync` is rejected without an on-chain lookup
 
-Implementation: `nova-kms/enclave/auth.py` → `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
+Implementation: `nova-kms/enclave/sync_manager.py` → `PeerCache.verify_kms_peer()`
 
 ### A.2 KMS↔KMS Sync Request Flow
 

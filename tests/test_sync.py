@@ -745,6 +745,50 @@ class TestMasterSecretRequest:
         assert result["status"] == "error"
         assert "manager unavailable" in result["reason"]
 
+    def test_master_secret_request_rejected_without_ecdh_pubkey(self, sync_mgr, kms_reg):
+        """master_secret_request without ecdh_pubkey must be rejected (no plaintext fallback)."""
+        from nova_registry import InstanceStatus
+
+        mgr = MasterSecretManager()
+        mgr.initialize_from_peer(b"\xAB" * 32)
+        sync_mgr._master_secret_mgr = mgr
+
+        # No ecdh_pubkey in body → should be rejected
+        body = {
+            "type": "master_secret_request",
+            "sender_wallet": "0xSender",
+        }
+
+        from auth import issue_nonce
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+
+        nonce = issue_nonce()
+        nonce_b64 = base64.b64encode(nonce).decode()
+        ts = str(int(time.time()))
+        acct = Account.from_key(bytes.fromhex("66" * 32))
+        msg = f"NovaKMS:Auth:{nonce_b64}:{sync_mgr.node_wallet}:{ts}"
+        sig = acct.sign_message(encode_defunct(text=msg)).signature.hex()
+        pop = {"wallet": acct.address, "signature": sig, "timestamp": ts, "nonce": nonce_b64}
+        body["sender_wallet"] = acct.address
+
+        sync_mgr.peer_cache._peers.append({
+            "tee_wallet_address": acct.address.lower(),
+            "node_url": "http://peer-no-ecdh",
+            "tee_pubkey": "01" * 32,
+            "app_id": 49,
+            "operator": acct.address.lower(),
+            "status": InstanceStatus.ACTIVE,
+            "zk_verified": True,
+            "version_id": 1,
+            "instance_id": 102,
+            "registered_at": 0,
+        })
+
+        result = sync_mgr.handle_incoming_sync(body, kms_pop=pop)
+        assert result["status"] == "error"
+        assert "ECDH" in result["reason"] or "pubkey" in result["reason"].lower()
+
 
 # =============================================================================
 # SyncManager — verify_and_sync_peers

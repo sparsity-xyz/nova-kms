@@ -75,7 +75,8 @@ class TokenBucket:
 # =============================================================================
 
 _rate_limiter = TokenBucket(config.RATE_LIMIT_PER_MINUTE)
-_cleanup_counter = 0
+_last_cleanup_time: float = 0.0
+_CLEANUP_INTERVAL_SECONDS: float = 60.0
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -87,8 +88,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        global _cleanup_counter
-
         # Skip rate limiting for health checks
         if request.url.path == "/health":
             return await call_next(request)
@@ -157,9 +156,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             request._receive = _receive
 
-        # Periodic cleanup of stale rate limit entries
-        _cleanup_counter += 1
-        if _cleanup_counter % 100 == 0:
+        # Periodic cleanup of stale rate limit entries (time-based)
+        global _last_cleanup_time
+        now = time.monotonic()
+        if now - _last_cleanup_time > _CLEANUP_INTERVAL_SECONDS:
+            _last_cleanup_time = now
             _rate_limiter.cleanup()
 
         return await call_next(request)

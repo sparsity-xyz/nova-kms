@@ -85,9 +85,11 @@ pip install -r enclave/requirements.txt
 pip install pytest httpx  # for testing
 ```
 
+> **Note:** The `nova-kms` application is designed to run in a trusted execution environment. For local development, you can run the application directly, but it will lack the cryptographic attestation context.
+
 ### 2. Configure `enclave/config.py`
 
-Edit the configuration constants:
+Ensure `enclave/config.py` is configured with valid contract addresses for your chain:
 
 ```python
 # config.py — fill in your values
@@ -116,32 +118,6 @@ python app.py
  ```
  
  > **Note:** In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`). For local development, overrides may apply if the `IN_ENCLAVE` environment variable is set to `false` (for example, `export IN_ENCLAVE=false` before running; see config documentation), but full identity verification still requires valid on-chain registration.
-
----
-
-## Local Development
- 
- The `nova-kms` application is designed to run in a trusted execution environment. For local development, you can run the application directly, but it will lack the cryptographic attestation context.
- 
- ### 1. Setup Python Environment
- 
- ```bash
- cd nova-kms
- python3 -m venv .venv
- source .venv/bin/activate
- pip install -r enclave/requirements.txt
- ```
- 
- ### 2. Configuration
- 
- Ensure `enclave/config.py` is configured with valid contract addresses for your chain.
- 
- ### 3. Run
- 
- ```bash
- cd enclave
- python app.py
- ```
 
 ---
 

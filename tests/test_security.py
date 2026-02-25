@@ -123,6 +123,74 @@ class TestTokenBucket:
         assert key not in tb._buckets
 
 
+class TestRateLimitMiddlewareCleanup:
+    """Verify that the middleware triggers cleanup based on elapsed time."""
+
+    def test_cleanup_triggered_after_interval(self, monkeypatch):
+        import rate_limiter
+
+        # Force _last_cleanup_time to the distant past so cleanup triggers
+        monkeypatch.setattr(rate_limiter, "_last_cleanup_time", 0.0)
+        monkeypatch.setattr(rate_limiter, "_CLEANUP_INTERVAL_SECONDS", 1.0)
+
+        cleanup_calls = {"count": 0}
+        original_cleanup = rate_limiter._rate_limiter.cleanup
+
+        def _counting_cleanup(*args, **kwargs):
+            cleanup_calls["count"] += 1
+            return original_cleanup(*args, **kwargs)
+
+        monkeypatch.setattr(rate_limiter._rate_limiter, "cleanup", _counting_cleanup)
+
+        from starlette.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.responses import PlainTextResponse
+        from starlette.routing import Route
+
+        def homepage(request):
+            return PlainTextResponse("ok")
+
+        app = Starlette(routes=[Route("/test", homepage)])
+        app.add_middleware(rate_limiter.RateLimitMiddleware)
+
+        client = TestClient(app)
+        resp = client.get("/test")
+        assert resp.status_code == 200
+        assert cleanup_calls["count"] == 1
+
+    def test_cleanup_not_triggered_within_interval(self, monkeypatch):
+        import rate_limiter
+
+        # Set _last_cleanup_time to now so cleanup should NOT trigger
+        monkeypatch.setattr(rate_limiter, "_last_cleanup_time", time.monotonic())
+        monkeypatch.setattr(rate_limiter, "_CLEANUP_INTERVAL_SECONDS", 9999.0)
+
+        cleanup_calls = {"count": 0}
+        original_cleanup = rate_limiter._rate_limiter.cleanup
+
+        def _counting_cleanup(*args, **kwargs):
+            cleanup_calls["count"] += 1
+            return original_cleanup(*args, **kwargs)
+
+        monkeypatch.setattr(rate_limiter._rate_limiter, "cleanup", _counting_cleanup)
+
+        from starlette.testclient import TestClient
+        from starlette.applications import Starlette
+        from starlette.responses import PlainTextResponse
+        from starlette.routing import Route
+
+        def homepage(request):
+            return PlainTextResponse("ok")
+
+        app = Starlette(routes=[Route("/test", homepage)])
+        app.add_middleware(rate_limiter.RateLimitMiddleware)
+
+        client = TestClient(app)
+        resp = client.get("/test")
+        assert resp.status_code == 200
+        assert cleanup_calls["count"] == 0
+
+
 # =============================================================================
 # Chain — eth_call_finalized
 # =============================================================================

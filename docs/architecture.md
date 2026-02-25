@@ -123,6 +123,7 @@ interface INovaAppRegistry {
         address owner;
         bytes32 teeArch;
         address dappContract;
+        address appWallet;
         string metadataUri;
         uint256 latestVersionId;
         uint256 createdAt;
@@ -284,7 +285,7 @@ The `/status` endpoint returns a merged view of local health and cluster overvie
         "master_secret_initialized": true
     },
     "cluster": {
-        "kms_app_id": 9001,
+        "kms_app_id": "<KMS_APP_ID>",
         "registry_address": "0xabc...",
         "total_instances": 12
     }

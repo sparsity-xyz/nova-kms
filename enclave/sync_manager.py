@@ -769,7 +769,6 @@ class SyncManager:
             _set_available()
 
         # 4) Data sync is now handled by an independent scheduled task (sync_tick).
-        pass
 
     def sync_tick(self) -> None:
         """
@@ -821,25 +820,6 @@ class SyncManager:
 
             self.request_snapshot(peer_url)
             logger.info(f"Master secret received via sealed ECDH from {peer_url}")
-            return True
-        elif result and isinstance(result, bytes):
-            # Legacy plaintext fallback — ONLY allowed outside enclave (dev).
-            # C1 fix: production nodes must never accept an unencrypted master secret.
-            if config_module.IN_ENCLAVE:
-                logger.warning(
-                    f"Rejecting plaintext master secret from {peer_url}: "
-                    "plaintext exchange is disabled in production (IN_ENCLAVE=true)"
-                )
-                return False
-            master_secret_mgr.initialize_from_peer(result, peer_url=peer_url)
-
-            try:
-                self.set_sync_key(master_secret_mgr.get_sync_key())
-            except Exception as exc:
-                logger.warning(f"Failed to derive sync key after master secret sync: {exc}")
-
-            self.request_snapshot(peer_url)
-            logger.info(f"Master secret received via plaintext from {peer_url}")
             return True
         return False
 
@@ -903,7 +883,6 @@ class SyncManager:
             return None
 
         # 4c. Encrypt to the peer
-        from secure_channel import encrypt_json_envelope
         # Prevent self-sync: do not send requests to ourselves.
         if peer_wallet.lower() == self.node_wallet.lower():
             logger.warning(f"Refusing sync request to {url}: destination wallet match self ({peer_wallet})")
@@ -961,11 +940,11 @@ class SyncManager:
             # Check HTTP status first — error responses won't have mutual auth headers
             if not resp.ok:
                 try:
-                    body = resp.json()
+                    err_body = resp.json()
                     err_detail = (
-                        body.get("message")
-                        or body.get("detail")
-                        or body.get("error")
+                        err_body.get("message")
+                        or err_body.get("detail")
+                        or err_body.get("error")
                         or resp.text[:200]
                     )
                 except Exception:
@@ -1054,7 +1033,6 @@ class SyncManager:
                 if resp and resp.status_code == 200:
                     success_count += 1
                 elif resp:
-                    logger.debug(f"Sync push to {peer['node_url']} returned {resp.status_code}")
                     logger.warning(f"Sync push to {peer['node_url']} returned {resp.status_code}")
             except Exception as exc:
                 logger.warning(f"Sync push to {peer['node_url']} failed: {exc}")
@@ -1098,7 +1076,6 @@ class SyncManager:
 
         If ecdh_pubkey is provided, the peer will encrypt the master secret
         using ECDH + AES-GCM.  Returns the sealed envelope dict.
-        If ecdh_pubkey is None, returns raw secret bytes (legacy dev mode).
         """
         url = f"{peer_url.rstrip('/')}/sync"
         body: dict = {
@@ -1117,10 +1094,6 @@ class SyncManager:
             # Sealed envelope response
             if "sealed" in data:
                 return data["sealed"]
-            # Legacy plaintext response (dev mode only)
-            secret_hex = data.get("master_secret")
-            if secret_hex:
-                return bytes.fromhex(secret_hex)
             return None
         except Exception as exc:
             logger.warning(f"Master secret request to {peer_url} failed: {exc}")
@@ -1291,12 +1264,8 @@ class SyncManager:
                 logger.error(f"Sealed key exchange failed: {exc}")
                 return {"status": "error", "reason": "Sealed exchange failed"}
         else:
-            # Legacy plaintext (only in sim/dev mode)
-            from config import IN_ENCLAVE
-            if IN_ENCLAVE:
-                logger.warning("Rejecting plaintext master secret request in production")
-                return {"status": "error", "reason": "Plaintext secret exchange disabled in production"}
-            return {"status": "ok", "master_secret": mgr.secret.hex()}
+            # Sealed exchange required — reject requests without ECDH pubkey
+            return {"status": "error", "reason": "Sealed ECDH pubkey required for master secret exchange"}
 
     # ------------------------------------------------------------------
     # Serialization helpers
