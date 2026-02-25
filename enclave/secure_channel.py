@@ -51,16 +51,13 @@ logger = logging.getLogger("nova-kms.secure_channel")
 
 AES_GCM_NONCE_BYTES = 12
 AES_GCM_NONCE_HEX_LEN = AES_GCM_NONCE_BYTES * 2
-LEGACY_AES_GCM_NONCE_BYTES = 32
-LEGACY_AES_GCM_NONCE_HEX_LEN = LEGACY_AES_GCM_NONCE_BYTES * 2
 
 
 def _normalize_nonce_hex(nonce_hex: str) -> str:
+    """Strip optional 0x prefix from a nonce hex string."""
     value = nonce_hex or ""
     if value.startswith(("0x", "0X")):
         value = value[2:]
-    if len(value) == LEGACY_AES_GCM_NONCE_HEX_LEN:
-        return value[:AES_GCM_NONCE_HEX_LEN]
     return value
 
 

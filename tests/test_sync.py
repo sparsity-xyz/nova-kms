@@ -261,10 +261,22 @@ class TestPeerCache:
         wallet = peer_cache.get_wallet_by_url(url)
         assert wallet == peer_cache._peers[0]["tee_wallet_address"]
 
+    def test_get_tee_pubkey_by_url(self, peer_cache, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        peer_cache.refresh()
+        url = peer_cache._peers[0]["node_url"]
+        tee_pubkey_hex = peer_cache.get_tee_pubkey_by_url(url)
+        assert tee_pubkey_hex == "01" * 32
+
     def test_get_wallet_by_url_unknown(self, peer_cache, monkeypatch):
         monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
         peer_cache.refresh()
         assert peer_cache.get_wallet_by_url("http://nobody") is None
+
+    def test_get_tee_pubkey_by_url_unknown(self, peer_cache, monkeypatch):
+        monkeypatch.setattr("sync_manager.validate_peer_url", lambda url: url)
+        peer_cache.refresh()
+        assert peer_cache.get_tee_pubkey_by_url("http://nobody") is None
 
     def test_refresh_skip_invalid_url(self, peer_cache, monkeypatch):
         from sync_manager import URLValidationError

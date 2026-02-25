@@ -651,19 +651,21 @@ class TestEncryptEnvelope:
         assert not result["nonce"].startswith("0x")
         assert not result["encrypted_data"].startswith("0x")
 
-    def test_encrypt_normalizes_legacy_32_byte_nonce(self):
+    def test_no_legacy_nonce_truncation(self):
+        """32-byte nonces are NOT truncated — new enclaver rejects them server-side."""
         from secure_channel import encrypt_envelope
 
-        class _LegacyNonceOdyn(_MockOdyn):
+        class _LargeNonceOdyn(_MockOdyn):
             def encrypt(self, plaintext: str, receiver_pubkey_hex: str) -> dict:
                 return {
                     "nonce": "0x" + "ab" * 32,
                     "encrypted_data": "0x" + "cd" * 16,
                 }
 
-        odyn = _LegacyNonceOdyn()
+        odyn = _LargeNonceOdyn()
         result = encrypt_envelope(odyn, "test", "aabbcc")
-        assert result["nonce"] == "ab" * 12
+        # No truncation — the full 32-byte nonce is preserved (0x stripped only)
+        assert result["nonce"] == "ab" * 32
 
 
 class TestDecryptEnvelope:
@@ -708,7 +710,8 @@ class TestDecryptEnvelope:
         with pytest.raises(ValueError, match="decryption failed"):
             decrypt_envelope(odyn, envelope)
 
-    def test_decrypt_normalizes_legacy_32_byte_nonce(self):
+    def test_32_byte_nonce_passed_as_is(self):
+        """32-byte nonces are NOT truncated — new enclaver rejects them server-side."""
         from secure_channel import decrypt_envelope
 
         class _CaptureNonceOdyn(_MockOdyn):
@@ -733,7 +736,8 @@ class TestDecryptEnvelope:
         }
         result = decrypt_envelope(odyn, envelope)
         assert result == '{"test": "data"}'
-        assert odyn.last_nonce == "12" * 12
+        # No truncation — the full 32-byte nonce is preserved (0x stripped only)
+        assert odyn.last_nonce == "12" * 32
 
 
 class TestEncryptJsonEnvelope:

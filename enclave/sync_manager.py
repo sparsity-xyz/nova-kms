@@ -223,6 +223,20 @@ class PeerCache:
                     return p["tee_wallet_address"]
         return None
 
+    def get_tee_pubkey_by_url(self, url: str) -> Optional[str]:
+        """Look up a peer's cached teePubkey (hex) by base URL."""
+        base = url.rstrip("/")
+        with self._lock:
+            for p in self._peers:
+                if p["node_url"].rstrip("/") == base:
+                    tee_pubkey = p.get("tee_pubkey", "")
+                    if isinstance(tee_pubkey, bytes):
+                        return tee_pubkey.hex()
+                    if isinstance(tee_pubkey, str):
+                        return tee_pubkey.lower().removeprefix("0x")
+                    return None
+        return None
+
     def _fetch_peers_from_chain(self) -> List[dict]:
         """Fetch peer list from NovaAppRegistry using getActiveInstances. Slow IO, NO LOCK."""
         from config import KMS_APP_ID
@@ -294,6 +308,11 @@ class PeerCache:
                 {
                     "tee_wallet_address": wallet,
                     "node_url": instance.instance_url,
+                    "tee_pubkey": (
+                        (getattr(instance, "tee_pubkey", b"") or b"").hex()
+                        if isinstance(getattr(instance, "tee_pubkey", b""), (bytes, bytearray))
+                        else str(getattr(instance, "tee_pubkey", "") or "").lower().removeprefix("0x")
+                    ),
                     "app_id": instance.app_id,
                     "operator": _normalize_wallet(getattr(instance, "operator", "")),
                     "status": instance.status,
@@ -740,12 +759,10 @@ class SyncManager:
             logger.warning(f"Refusing sync request to {url}: unknown peer wallet for {base_url}")
             return None
 
-        # H1 fix: verify peer teePubkey against on-chain registry before
-        # transmitting any data to the peer.  This prevents MitM by a host
-        # that intercepts the TLS connection but cannot forge the on-chain
-        # teePubkey registration.
+        # H1 fix: verify peer identity against on-chain registry before
+        # transmitting any data to the peer. This prevents MitM by a host
+        # that intercepts TLS but cannot satisfy on-chain identity checks.
         # 4b. Identify peer public key
-        # Must be retrieved reliably from the chain
         from secure_channel import verify_peer_identity, get_tee_pubkey_der_hex
 
         if not verify_peer_identity(
@@ -756,7 +773,10 @@ class SyncManager:
             logger.warning(f"Refusing sync request to {url}: peer is not an authorized zk-verified KMS instance")
             return None
 
-        peer_tee_pubkey_hex = get_tee_pubkey_der_hex(peer_wallet, self.peer_cache.nova_registry)
+        peer_tee_pubkey_hex = self.peer_cache.get_tee_pubkey_by_url(base_url)
+        if not peer_tee_pubkey_hex:
+            # Fallback for legacy cache entries that predate tee_pubkey caching.
+            peer_tee_pubkey_hex = get_tee_pubkey_der_hex(peer_wallet, self.peer_cache.nova_registry)
         if not peer_tee_pubkey_hex:
             logger.warning(f"Refusing sync request to {url}: peer teePubkey missing or invalid")
             return None
