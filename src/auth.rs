@@ -93,7 +93,12 @@ fn now_secs() -> u64 {
 
 pub fn canonical_wallet(wallet: &str) -> Result<String, KmsError> {
     let trimmed = wallet.trim();
-    let addr = Address::from_str(trimmed)
+    let candidate = if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+        trimmed.to_string()
+    } else {
+        format!("0x{}", trimmed)
+    };
+    let addr = Address::from_str(&candidate)
         .map_err(|_| KmsError::Unauthorized("Invalid wallet address".to_string()))?;
     Ok(format!("0x{}", hex::encode(addr.as_slice())))
 }
@@ -364,6 +369,12 @@ mod tests {
     #[test]
     fn test_canonical_wallet_format() {
         let w = canonical_wallet("0xA000000000000000000000000000000000000000").unwrap();
+        assert_eq!(w, "0xa000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_canonical_wallet_accepts_no_prefix() {
+        let w = canonical_wallet("A000000000000000000000000000000000000000").unwrap();
         assert_eq!(w, "0xa000000000000000000000000000000000000000");
     }
 

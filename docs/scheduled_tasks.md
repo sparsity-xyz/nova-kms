@@ -5,13 +5,13 @@ The Nova KMS uses **two periodic scheduler jobs**:
 - `node_tick` (cluster state / readiness / master secret alignment)
 - `sync_tick` (delta push for KV convergence)
 
-This matches `enclave/app.py`, which registers both jobs via APScheduler.
+In Rust, both loops are started from `src/main.rs` (`start_background_tasks`) using Tokio tasks.
 
 ## Task 1: `node_tick`
 
 `node_tick` is the core heartbeat:
 
-- **Function**: `sync_manager.node_tick(master_secret_mgr)`
+- **Function**: `sync::node_tick(&SharedState)`
 - **Configuration**: `KMS_NODE_TICK_SECONDS`
 
 ### What `node_tick` does
@@ -38,7 +38,7 @@ Note:
 
 `sync_tick` is the lightweight data convergence task:
 
-- **Function**: `sync_manager.sync_tick()`
+- **Function**: `sync::sync_tick(&SharedState)`
 - **Configuration**: `DATA_SYNC_INTERVAL_SECONDS`
 
 ### What `sync_tick` does

@@ -43,6 +43,28 @@ impl AppState {
         let max_tombstones_per_app = config.max_tombstones_per_app;
         let nonce_store = NonceStore::new(config.max_nonces, config.pop_timeout_seconds);
         let odyn = OdynClient::new(config.in_enclave);
+
+        // Keep node wallet bound to the signing identity currently exposed by Odyn.
+        // This mirrors the Python startup path and avoids PoP recipient mismatches.
+        if config.in_enclave {
+            match odyn.eth_address().await {
+                Ok(wallet) => match canonical_wallet(&wallet) {
+                    Ok(canonical) => {
+                        config.node_wallet = canonical;
+                    }
+                    Err(err) => {
+                        tracing::warn!("Failed to canonicalize Odyn wallet '{}': {}", wallet, err);
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to read Odyn wallet at startup; falling back to configured NODE_WALLET: {}",
+                        err
+                    );
+                }
+            }
+        }
+
         let registry = RegistryClient::new(
             &config.node_url,
             &config.nova_app_registry_address,

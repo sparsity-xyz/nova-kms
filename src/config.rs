@@ -39,6 +39,7 @@ pub struct Config {
     pub max_nonces: usize,
     pub max_request_body_bytes: usize,
     pub max_sync_payload_bytes: usize,
+    pub max_clock_skew_ms: u64,
     pub allow_plaintext_dev: bool,
     pub master_secret_hex: Option<String>,
 
@@ -73,6 +74,7 @@ impl Default for Config {
             max_nonces: 4096,
             max_request_body_bytes: 2 * 1024 * 1024,
             max_sync_payload_bytes: 50 * 1024 * 1024,
+            max_clock_skew_ms: 5_000,
             allow_plaintext_dev: false,
             master_secret_hex: None,
             rate_limit_per_minute: 120,

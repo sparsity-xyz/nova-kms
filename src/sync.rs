@@ -11,7 +11,8 @@ use tokio::time::Duration;
 
 use crate::auth::{canonical_wallet, sign_message_for_node, verify_wallet_signature};
 use crate::crypto::{
-    SealedMasterSecretEnvelope, derive_sync_key, random_secret_32, unseal_master_secret,
+    SealedMasterSecretEnvelope, decrypt_data, derive_data_key, derive_sync_key, random_secret_32,
+    unseal_master_secret,
 };
 use crate::error::KmsError;
 use crate::models::DataRecord;
@@ -150,35 +151,40 @@ impl PeerCache {
                 continue;
             }
 
-            if let Ok(url) = Url::parse(&instance.instance_url) {
-                if url.scheme() != "http" && url.scheme() != "https" {
-                    continue;
-                }
-                let mut peer = Peer {
-                    tee_wallet_address: instance.tee_wallet_address,
-                    node_url: instance.instance_url,
-                    tee_pubkey: hex::encode(&instance.tee_pubkey),
-                    app_id: instance.app_id,
-                    operator: instance.operator,
-                    status: instance.status,
-                    zk_verified: instance.zk_verified,
-                    version_id: instance.version_id,
-                    instance_id: instance.instance_id,
-                    registered_at: instance.registered_at,
-                    status_reachable: None,
-                    status_http_code: None,
-                    status_probe_ms: None,
-                    status_checked_at_ms: None,
-                };
-                if in_enclave {
-                    let probe = probe_status_endpoint(&peer.node_url).await;
-                    peer.status_reachable = Some(probe.status_reachable);
-                    peer.status_http_code = probe.status_http_code;
-                    peer.status_probe_ms = Some(probe.status_probe_ms);
-                    peer.status_checked_at_ms = Some(probe.status_checked_at_ms);
-                }
-                new_peers.push(peer);
+            if let Err(err) = validate_peer_url(&instance.instance_url, in_enclave) {
+                tracing::warn!(
+                    "Skipping peer {} due to invalid URL '{}': {}",
+                    wallet,
+                    instance.instance_url,
+                    err
+                );
+                continue;
             }
+
+            let mut peer = Peer {
+                tee_wallet_address: instance.tee_wallet_address,
+                node_url: instance.instance_url,
+                tee_pubkey: hex::encode(&instance.tee_pubkey),
+                app_id: instance.app_id,
+                operator: instance.operator,
+                status: instance.status,
+                zk_verified: instance.zk_verified,
+                version_id: instance.version_id,
+                instance_id: instance.instance_id,
+                registered_at: instance.registered_at,
+                status_reachable: None,
+                status_http_code: None,
+                status_probe_ms: None,
+                status_checked_at_ms: None,
+            };
+            if in_enclave {
+                let probe = probe_status_endpoint(&peer.node_url).await;
+                peer.status_reachable = Some(probe.status_reachable);
+                peer.status_http_code = probe.status_http_code;
+                peer.status_probe_ms = Some(probe.status_probe_ms);
+                peer.status_checked_at_ms = Some(probe.status_checked_at_ms);
+            }
+            new_peers.push(peer);
         }
 
         let mut p = self.peers.write().await;
@@ -216,6 +222,36 @@ struct StatusProbe {
     status_http_code: Option<u16>,
     status_probe_ms: u64,
     status_checked_at_ms: u64,
+}
+
+fn validate_peer_url(node_url: &str, in_enclave: bool) -> Result<(), KmsError> {
+    let parsed = Url::parse(node_url).map_err(|e| {
+        KmsError::ValidationError(format!("Invalid peer URL '{}': {}", node_url, e))
+    })?;
+
+    let scheme = parsed.scheme();
+    let scheme_allowed = if in_enclave {
+        scheme == "https"
+    } else {
+        scheme == "https" || scheme == "http"
+    };
+    if !scheme_allowed {
+        return Err(KmsError::ValidationError(format!(
+            "Peer URL scheme '{}' not allowed",
+            scheme
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(KmsError::ValidationError(
+            "Peer URL has no hostname".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(KmsError::ValidationError(
+            "Peer URL with embedded credentials is not allowed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn probe_status_endpoint(node_url: &str) -> StatusProbe {
@@ -378,15 +414,40 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         return Ok(());
     }
 
+    let own_peer = peers
+        .iter()
+        .find(|p| p.tee_wallet_address.eq_ignore_ascii_case(&self_wallet))
+        .cloned();
+
     {
         let mut s = state.write().await;
         s.is_operator = true;
         if s.config.node_instance_url.trim().is_empty()
-            && let Some(own_peer) = peers
-                .iter()
-                .find(|p| p.tee_wallet_address.eq_ignore_ascii_case(&self_wallet))
+            && let Some(own_peer) = own_peer.as_ref()
         {
             s.config.node_instance_url = own_peer.node_url.clone();
+        }
+    }
+
+    if let Some(own_peer) = own_peer {
+        let local_pubkey_hex = {
+            let s = state.read().await;
+            match s.odyn.get_encryption_public_key_der().await {
+                Ok(pubkey) => hex::encode(pubkey),
+                Err(err) => {
+                    tracing::warn!("Failed to read local teePubkey: {}", err);
+                    set_service_availability(state, false, "cannot read local teePubkey").await;
+                    return Ok(());
+                }
+            }
+        };
+        if !own_peer.tee_pubkey.eq_ignore_ascii_case(&local_pubkey_hex) {
+            tracing::warn!(
+                "Local teePubkey does not match NovaAppRegistry for self wallet {}",
+                self_wallet
+            );
+            set_service_availability(state, false, "local teePubkey mismatch with registry").await;
+            return Ok(());
         }
     }
 
@@ -800,14 +861,6 @@ async fn post_sync_request_to_peer(
 }
 
 pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, KmsError> {
-    let already_initialized = {
-        let s = state.read().await;
-        s.master_secret.is_initialized().await
-    };
-    if already_initialized {
-        return Ok(true);
-    }
-
     refresh_peers_if_needed(state).await?;
     let peers = {
         let s = state.read().await;
@@ -882,8 +935,11 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             && let Some(data_obj) = snapshot_resp.get("data").and_then(|v| v.as_object())
         {
             let records = parse_sync_data_object(data_obj);
-            let s = state.read().await;
             for (app_id, record) in records {
+                if !validate_incoming_record(state, app_id, &record).await {
+                    continue;
+                }
+                let s = state.read().await;
                 let _ = s.store.merge_record(app_id, record).await;
             }
         }
@@ -910,6 +966,81 @@ fn parse_sync_data_object(data: &Map<String, Value>) -> Vec<(u64, DataRecord)> {
         }
     }
     out
+}
+
+pub async fn validate_incoming_record(
+    state: &SharedState,
+    app_id: u64,
+    record: &DataRecord,
+) -> bool {
+    let (in_enclave, max_value_size_bytes, max_clock_skew_ms) = {
+        let s = state.read().await;
+        (
+            s.config.in_enclave,
+            s.config.max_kv_value_size_bytes,
+            s.config.max_clock_skew_ms,
+        )
+    };
+
+    if !record.tombstone {
+        let max_with_overhead = max_value_size_bytes.saturating_add(128);
+        if record.encrypted_value.len() > max_with_overhead {
+            tracing::warn!(
+                "Rejecting incoming sync record '{}': encrypted value too large ({} bytes)",
+                record.key,
+                record.encrypted_value.len()
+            );
+            return false;
+        }
+
+        if in_enclave {
+            if record.encrypted_value.len() < (12 + 16) {
+                tracing::warn!(
+                    "Rejecting incoming sync record '{}': ciphertext too short ({} bytes)",
+                    record.key,
+                    record.encrypted_value.len()
+                );
+                return false;
+            }
+            let data_key = {
+                let s = state.read().await;
+                let secret = match s.master_secret.get_secret().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Rejecting incoming sync record '{}': master secret unavailable: {}",
+                            record.key,
+                            err
+                        );
+                        return false;
+                    }
+                };
+                derive_data_key(&secret, app_id)
+            };
+
+            if decrypt_data(&record.encrypted_value, &data_key).is_err() {
+                tracing::warn!(
+                    "Rejecting incoming sync record '{}': ciphertext failed validation",
+                    record.key
+                );
+                return false;
+            }
+        }
+    }
+
+    if max_clock_skew_ms > 0 {
+        let now = now_ms();
+        if record.updated_at_ms > now.saturating_add(max_clock_skew_ms) {
+            tracing::warn!(
+                "Rejecting incoming sync record '{}': future timestamp {} exceeds allowed skew",
+                record.key,
+                record.updated_at_ms
+            );
+            return false;
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]

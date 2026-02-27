@@ -55,7 +55,7 @@ graph TB
 
 ### 1.1 KMS Enclave Application
 
-A Python/FastAPI application running inside AWS Nitro Enclave, packaged and deployed on the Nova Platform. It serves other Nova apps and enforces access control using on-chain app registration data.
+A Rust/Axum application running inside AWS Nitro Enclave, packaged and deployed on the Nova Platform. It serves other Nova apps and enforces access control using on-chain app registration data.
 
 **Core Features:**
 
@@ -85,16 +85,16 @@ These keypairs are **completely independent**:
 
 **Odyn API Usage:**
 
-```python
-# Get KMS node identity on startup (secp256k1 wallet)
-eth_address = odyn.eth_address()       # KMS Ethereum address for signing
-random_bytes = odyn.get_random_bytes() # Hardware RNG
-sig_res = odyn.sign_message(msg)       # EIP-191 signing for PoP
+```rust
+// Get KMS node identity on startup (secp256k1 wallet)
+let eth_address = odyn.eth_address().await?;       // KMS Ethereum address for signing
+let random_bytes = odyn.get_random_bytes().await?; // Hardware RNG
+let sig_res = odyn.sign_message(&msg).await?;      // EIP-191 signing for PoP
 
-# P-384 encryption (teePubkey)
-pub = odyn.get_encryption_public_key()             # includes public_key_der (hex)
-enc = odyn.encrypt("plaintext", peer_pubkey_hex)
-plaintext = odyn.decrypt(enc["nonce"], peer_pubkey_hex, enc["encrypted_data"])
+// P-384 encryption (teePubkey)
+let pubkey = odyn.get_encryption_public_key().await?; // includes public_key_der (hex)
+let enc = odyn.encrypt("plaintext", &peer_pubkey_hex).await?;
+let plaintext = odyn.decrypt(&enc.nonce, &peer_pubkey_hex, &enc.encrypted_data).await?;
 ```
 
 ### 1.2 On-chain Contracts
@@ -235,9 +235,9 @@ See [KMS Core Workflows & Security Architecture - Section 5: Nova App Access to 
 
 ### 2.3 App Authorization Logic (Instance + App Registry)
 
-```python
-def verify_app_request(identity: ClientIdentity) -> tuple[bool, str | None]:
-    """Verify that a request comes from a valid and authorized Nova application.
+```rust
+pub async fn verify_app_request(identity: &ClientIdentity) -> Result<bool, KmsError> {
+    /* Verify that a request comes from a valid and authorized Nova application.
 
     The current implementation authorizes based on NovaAppRegistry state:
     - Instance is ACTIVE and zkVerified
@@ -245,10 +245,11 @@ def verify_app_request(identity: ClientIdentity) -> tuple[bool, str | None]:
     - Version status is not REVOKED (ENROLLED or DEPRECATED)
 
     (No code-measurement comparison is performed in this layer.)
-    """
-    auth = AppAuthorizer(registry=nova_app_registry)
-    result = auth.verify(identity)
-    return (result.authorized, None if result.authorized else result.reason)
+    */
+    let auth = AppAuthorizer::new(&nova_app_registry);
+    let result = auth.verify(identity).await?;
+    Ok(result.authorized)
+}
 ```
 
 ### 2.4 Data Synchronization Flow
@@ -320,15 +321,11 @@ Payload format is simple JSON.
 
 KMS uses a Cluster Master Secret (held in TEE memory) to derive keys using HKDF.
 
-```python
-def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
-    """Derive a stable, unique key for an app."""
-    return HKDF(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=app_id.encode(),
-        info=path.encode()
-    ).derive(master_secret)
+```rust
+fn derive_app_key(master_secret: &[u8], app_id: u64, path: &str) -> Result<Vec<u8>, KmsError> {
+    // Derive a stable, unique key for an app.
+    // ... Ring HKDF implementation
+}
 ```
 
 ---
@@ -341,38 +338,23 @@ def derive_app_key(master_secret: bytes, app_id: str, path: str) -> bytes:
 - **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
 - **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
 - **Security**: sync messages are authenticated with PoP and authorize the sender via `PeerCache` (which is refreshed from `NovaAppRegistry` and keeps only ACTIVE + zkVerified KMS instances on non-REVOKED versions).
-- **Backpressure**: rate-limit sync and snapshot requests to avoid amplification during spikes.
+- **Record validation**: inbound sync records are rejected if ciphertext size/format is invalid, probe-decrypt fails (in enclave mode), or timestamp exceeds `MAX_CLOCK_SKEW_MS`.
 
 ### 4.2 Vector Clock Based Sync
 
 Uses Vector Clock for eventual consistency to avoid conflicts.
 
-```python
-class VectorClock:
-    """Vector clock for distributed consistency."""
-    
-    def __init__(self, node_id: str):
-        self.node_id = node_id
-        self.clock: dict[str, int] = {}
-    
-    def increment(self):
-        self.clock[self.node_id] = self.clock.get(self.node_id, 0) + 1
-    
-    def merge(self, other: "VectorClock"):
-        for node_id, count in other.clock.items():
-            self.clock[node_id] = max(self.clock.get(node_id, 0), count)
-    
-    def is_concurrent(self, other: "VectorClock") -> bool:
-        """Check if two clocks are concurrent (neither happened-before)."""
-        self_greater = any(
-            self.clock.get(k, 0) > other.clock.get(k, 0) 
-            for k in self.clock
-        )
-        other_greater = any(
-            other.clock.get(k, 0) > self.clock.get(k, 0) 
-            for k in other.clock
-        )
-        return self_greater and other_greater
+```rust
+pub struct VectorClock {
+    pub clock: HashMap<String, u64>,
+}
+
+impl VectorClock {
+    pub fn new() -> Self { ... }
+    pub fn increment(&mut self, node_id: &str) { ... }
+    pub fn merge(&mut self, other: &VectorClock) { ... }
+    pub fn is_concurrent(&self, other: &VectorClock) -> bool { ... }
+}
 ```
 
 ### 4.3 Conflict Resolution
@@ -385,14 +367,15 @@ The KMS **does not persist data to disk**. All state lives in enclave memory and
 
 **Storage Model (per App ID namespace):**
 
-```python
-class DataRecord:
-    key: str
-    value: bytes              # optionally encrypted with per-app data key
-    version: VectorClock
-    updated_at_ms: int
-    tombstone: bool
-    ttl_ms: int | None
+```rust
+pub struct DataRecord {
+    pub key: String,
+    pub encrypted_value: Vec<u8>,
+    pub version: VectorClock,
+    pub updated_at_ms: u64,
+    pub tombstone: bool,
+    pub ttl_ms: u64,
+}
 ```
 
 **Notes:**
@@ -425,19 +408,20 @@ class DataRecord:
 
 ### 5.3 Sync Request Verification
 
-```python
-def verify_sync_request(identity: ClientIdentity) -> bool:
-        """Verify that a sync request comes from a valid KMS peer.
+```rust
+pub fn verify_sync_request(identity: &ClientIdentity) -> bool {
+    /* Verify that a sync request comes from a valid KMS peer.
 
-        The implementation verifies:
-        - PoP timestamp freshness + nonce single-use
-        - PoP message signature (NovaKMS:Auth:...)
-        - Sender is authorized as a KMS instance via PeerCache
-          (PeerCache is refreshed from NovaAppRegistry in node_tick)
-        - Optional HMAC (x-sync-signature) is required when a sync key is configured,
-            except for bootstrap master_secret_request.
-        """
-        return peer_cache.verify_kms_peer(identity.tee_wallet)["authorized"]
+    The implementation verifies:
+    - PoP timestamp freshness + nonce single-use
+    - PoP message signature (NovaKMS:Auth:...)
+    - Sender is authorized as a KMS instance via PeerCache
+      (PeerCache is refreshed from NovaAppRegistry in node_tick)
+    - Optional HMAC (x-sync-signature) is required when a sync key is configured,
+        except for bootstrap master_secret_request.
+    */
+    peer_cache.verify_kms_peer(&identity.tee_wallet).is_ok()
+}
 ```
 
 ---

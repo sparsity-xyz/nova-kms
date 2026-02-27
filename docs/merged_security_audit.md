@@ -8,7 +8,7 @@ It summarizes the **security-relevant behaviors that are implemented in this rep
 
 ## Scope
 
-- KMS service: FastAPI app under `nova-kms/enclave/`
+- KMS service: Rust/Axum app under `nova-kms/src/`
 - On-chain trust roots: `NovaAppRegistry` and `KMSRegistry` clients
 - App↔KMS and KMS↔KMS request authentication, authorization, encryption, and sync integrity
 
@@ -31,7 +31,7 @@ It summarizes the **security-relevant behaviors that are implemented in this rep
   - instance must be `zkVerified`
   - app must be `ACTIVE`
   - version must not be `REVOKED` (current app logic accepts `ENROLLED` and `DEPRECATED`)
-- **KMS↔KMS** sync uses the same authorizer, additionally requiring `require_app_id=KMS_APP_ID`.
+- **KMS↔KMS** sync authorizes peers via `PeerCache.verify_kms_peer()` (cache refreshed from `NovaAppRegistry` with `KMS_APP_ID` membership, `ACTIVE`, `zkVerified`, version status checks).
 
 ### 2) Mutual PoP authentication (EIP-191)
 
@@ -59,7 +59,7 @@ This prevents a class of MitM “re-encryption” attacks where an attacker subs
 
 ### 5) Sealed master secret exchange
 
-- Master secret transfer supports a sealed ECDH exchange (ephemeral P‑384 + HKDF + AES‑GCM) via `kdf.py`.
+- Master secret transfer supports a sealed ECDH exchange (ephemeral P‑384 + HKDF + AES‑GCM) via `src/crypto.rs`.
 - Plaintext master secret exchange is rejected in production (`IN_ENCLAVE=true`).
 
 ### 6) SSRF and network hardening for peer URLs
@@ -68,11 +68,10 @@ This prevents a class of MitM “re-encryption” attacks where an attacker subs
 - In production, default allowed peer URL schemes are `https` (via `ALLOWED_PEER_URL_SCHEMES`).
 - DNS/IP allow/deny and egress controls are expected to be enforced by network policy/proxy.
 
-### 7) DoS protection (rate limiting + body size limits)
+### 7) DoS protection
 
-- Global per-IP rate limiting middleware.
-- Request body size limits enforce actual bytes read from the stream (not just `Content-Length`).
-- `/nonce` additionally uses a token bucket limiter.
+- `/nonce` is guarded by a token-bucket limiter.
+- Additional ingress/body-size controls are expected at the deployment edge (load balancer / proxy policy).
 
 ---
 

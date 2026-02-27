@@ -122,7 +122,7 @@ The encryption uses Odyn's built-in ECDH + AES-256-GCM:
 
 - `GET /nonce`
 - returns: `{"nonce": "<base64>"}`
-- the server applies a simple rate limit to `/nonce` (see `routes.py`)
+- the server applies a simple rate limit to `/nonce` (see `src/server.rs` `nonce_handler`)
 
 
 
@@ -141,7 +141,7 @@ Where:
 
 **Wallet canonicalization**: `KMS_Wallet` MUST be a canonical Ethereum address string: `0x` + 40 lowercase hex characters.
 
-Server-side logic in `nova-kms/enclave/auth.py`:
+Server-side logic in `src/auth.rs` (`authenticate_app`):
 - nonce must be single-use and unexpired (it is consumed)
 - timestamp must be within the allowed window (`POP_MAX_AGE_SECONDS`)
 - the recovered wallet from the signature is the real identity (`X-App-Wallet` is an optional hint, but if provided must match)
@@ -187,7 +187,7 @@ The signed message is:
 
 - `NovaKMS:Response:<client_sig>:<kms_wallet>`
 
-Implementation: `_add_mutual_signature()` in `nova-kms/enclave/routes.py`.
+Implementation: `maybe_add_app_response_signature()` in `src/server.rs`.
 
 ---
 
@@ -202,7 +202,7 @@ After authentication succeeds, the server authorizes the request via `AppAuthori
 3. `getApp(appId)`: App must be `ACTIVE`
 4. `getVersion(appId, versionId)`: Version must not be `REVOKED` (currently `ENROLLED` or `DEPRECATED`)
 
-Implementation: `nova-kms/enclave/auth.py`.
+Implementation: `lookup_and_authorize_instance()` in `src/auth.rs`.
 
 ---
 
@@ -241,7 +241,7 @@ When KMS node A sends a sync request to KMS node B, node B verifies A using `Pee
 3. `teePubkey` must be a valid P-384 public key
 4. If the peer is not in `PeerCache`, `/sync` is rejected without an on-chain lookup
 
-Implementation: `nova-kms/enclave/sync_manager.py` → `PeerCache.verify_kms_peer()`
+Implementation: `src/sync.rs` → `PeerCache::verify_kms_peer()` and `src/server.rs` `/sync` handler.
 
 ### A.2 KMS↔KMS Sync Request Flow
 
@@ -269,10 +269,7 @@ sequenceDiagram
   KMS_B->>KMS_B: recover A_wallet from signature
   KMS_B->>KMS_B: decrypt request body (E2E)
 
-  KMS_B->>Chain: getInstanceByWallet(A_wallet)
-  Chain-->>KMS_B: instance(app_id/version_id/zkVerified/status/teePubkey)
-
-  Note over KMS_B: AppAuthorizer(require_app_id=KMS_APP_ID).verify():<br/>ACTIVE + zkVerified + app_id==KMS_APP_ID + version not REVOKED
+  Note over KMS_B: verify A via PeerCache (refreshed from NovaAppRegistry):<br/>ACTIVE + zkVerified + app_id==KMS_APP_ID + teePubkey present
 
   Note over KMS_B: process sync request
   Note over KMS_B: E2E encrypt response with A's teePubkey
@@ -311,15 +308,17 @@ Response body (inside the E2E encrypted envelope):
 ```
 
 Implementation:
-- `nova-kms/enclave/kdf.py`: `seal_master_secret()` / `unseal_master_secret()`
-- `nova-kms/enclave/secure_channel.py`: P-384 public key parsing/validation
-- `nova-kms/enclave/sync_manager.py`: `request_master_secret()` and the pre-send `verify_peer_identity()` check
+- `src/crypto.rs`: `seal_master_secret()` / `unseal_master_secret()`
+- `src/server.rs`: `/sync` enforces sender teePubkey binding before decrypt
+- `src/sync.rs`: `attempt_master_secret_sync()` + snapshot pull after sealed exchange
 
 ---
 
 ## Appendix B: Security Summary
 
-The current implementation provides a **unified authorization model** for both App→KMS and KMS↔KMS using `AppAuthorizer`:
+The current implementation uses **split authorization paths**:
+- App→KMS: `authenticate_app()` with `CachedNovaRegistry` lookups
+- KMS↔KMS: `PeerCache::verify_kms_peer()` (cache refreshed from `NovaAppRegistry`)
 
 ### Transport Layer Assumption
 
@@ -333,16 +332,16 @@ Practical notes from the current code:
 
 | Check | App→KMS | KMS↔KMS |
 |-------|---------|---------|
-| `require_app_id` | 0 (any app) | KMS_APP_ID |
+| source | CachedNovaRegistry (read-through) | PeerCache (cache-first) |
 | Instance ACTIVE | ✓ | ✓ |
 | Instance zkVerified | ✓ | ✓ |
 | App ID matches | - | ✓ |
-| App ACTIVE | ✓ | ✓ |
-| Version not REVOKED | ✓ | ✓ |
+| App ACTIVE | ✓ | (evaluated during PeerCache refresh) |
+| Version not REVOKED | ✓ | (evaluated during PeerCache refresh) |
 
 Usage:
-- **App→KMS**: `AppAuthorizer(require_app_id=0).verify(identity)`
-- **KMS↔KMS**: `AppAuthorizer(require_app_id=KMS_APP_ID).verify(identity)`
+- **App→KMS**: `authenticate_app()` in `src/auth.rs`
+- **KMS↔KMS**: `PeerCache::verify_kms_peer()` in `src/sync.rs`
 
 ### E2E Encryption teePubkey Verification
 
@@ -370,7 +369,7 @@ This ensures:
 
 - **KMS↔KMS**:
   - PoP (secp256k1 EIP-191 signatures) for peer authentication
-  - On-chain authorization via `AppAuthorizer(require_app_id=KMS_APP_ID).verify()`
+  - Cache-first peer authorization via `PeerCache::verify_kms_peer()` (cache built from NovaAppRegistry)
   - HMAC-signed sync messages (additional integrity layer; enforced when the node has a sync key, except bootstrap `master_secret_request`)
   - **E2E encryption** of all sync payloads using teePubkey
   - **sender_tee_pubkey verification** against on-chain registry
@@ -378,5 +377,5 @@ This ensures:
 
 ### Implementation Files
 
-- E2E encryption helpers: `nova-kms/enclave/secure_channel.py` (`encrypt_json_envelope`, `decrypt_json_envelope`)
-- teePubkey verification: `nova-kms/enclave/routes.py` (`_decrypt_request_body`, `/sync`)
+- E2E envelope handling: `src/server.rs` (`decode_payload`, `encrypt_payload`, `/sync`)
+- teePubkey verification: `src/server.rs` (`decrypt_envelope_payload`, `/sync` sender-pubkey checks)

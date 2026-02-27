@@ -12,7 +12,7 @@ This guide covers deploying Nova KMS to production on the Nova Platform (AWS Nit
 │  ┌─────────────────────────────────────────────┐         │
 │  │  nova-kms (Docker)                          │         │
 │  │  ┌──────────┐  ┌────────────┐  ┌─────────┐ │         │
-│  │  │ FastAPI   │  │ Helios RPC │  │ Odyn API│ │         │
+│  │  │ Axum      │  │ Helios RPC │  │ Odyn API│ │         │
 │  │  │ :8000     │  │ :18545     │  │ :18000  │ │         │
 │  │  └──────────┘  └────────────┘  └─────────┘ │         │
 │  └─────────────────────────────────────────────┘         │
@@ -78,14 +78,18 @@ cast call <KMS_REGISTRY_ADDRESS> "OWNER()" --rpc-url https://sepolia.base.org
 
 ## Step 2: Configure the Enclave Application
 
-### 2.1 Update `enclave/config.py`
+### 2.1 Update Configuration
 
-```python
-CHAIN_ID = 84532
-NOVA_APP_REGISTRY_ADDRESS = "0x..."     # NovaAppRegistry proxy
-KMS_REGISTRY_ADDRESS = "0x..."          # KMSRegistry (from Step 1)
-KMS_APP_ID = ...                        # appId assigned by platform
+In the Rust deployment, configuration is sourced from environment variables. Example `.env` or enclave manifest `env` section:
+
+```ini
+CHAIN_ID=84532
+NOVA_APP_REGISTRY_ADDRESS="0x..."     # NovaAppRegistry proxy
+KMS_REGISTRY_ADDRESS="0x..."          # KMSRegistry (from Step 1)
+KMS_APP_ID=...                        # appId assigned by platform
 ```
+
+`NODE_WALLET` can still be provided as a fallback, but at runtime the service binds to the wallet reported by Odyn (`/v1/eth/address`) to keep PoP recipient binding consistent with the enclave signer.
 
 ### 2.2 Update `enclaver.yaml`
 

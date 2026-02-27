@@ -17,7 +17,7 @@ use crate::crypto::{derive_app_key_extended, derive_data_key, seal_master_secret
 use crate::error::KmsError;
 use crate::models::{DataRecord, VectorClock};
 use crate::state::SharedState;
-use crate::sync::{canonical_json, now_ms, verify_hmac_hex};
+use crate::sync::{canonical_json, now_ms, validate_incoming_record, verify_hmac_hex};
 
 pub fn app_router(state: SharedState) -> Router {
     Router::new()
@@ -107,11 +107,8 @@ async fn decode_payload(
     if is_envelope(body) {
         return decrypt_envelope_payload(state, body, expected_sender_pubkey_hex).await;
     }
-    if state.config.allow_plaintext_fallback() {
-        return Ok(body.clone());
-    }
     Err(KmsError::ValidationError(
-        "Request must be E2E encrypted".to_string(),
+        "Request must be E2E encrypted. Plaintext fallback is disabled.".to_string(),
     ))
 }
 
@@ -133,9 +130,6 @@ async fn encrypt_payload(
         }));
     }
 
-    if state.config.allow_plaintext_fallback() {
-        return Ok(payload.clone());
-    }
     Err(KmsError::ValidationError(
         "Receiver teePubkey required for response encryption".to_string(),
     ))
@@ -335,7 +329,7 @@ async fn derive_key(
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, KmsError> {
     let mut response_headers = HeaderMap::new();
-    let (auth, payload, derived_b64) = {
+    let (auth, payload, derived_b64, length) = {
         let s = state.read().await;
         ensure_service_available(&s).await?;
         let auth =
@@ -347,16 +341,49 @@ async fn derive_key(
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| KmsError::ValidationError("Missing 'path' field".to_string()))?;
-        let context = payload
-            .get("context")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let length = payload.get("length").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+        if path.is_empty() {
+            return Err(KmsError::ValidationError(
+                "Missing 'path' field".to_string(),
+            ));
+        }
+        let context = match payload.get("context") {
+            None => "",
+            Some(v) => v.as_str().ok_or_else(|| {
+                KmsError::ValidationError("'context' must be a string".to_string())
+            })?,
+        };
+        let length = match payload.get("length") {
+            None => 32usize,
+            Some(v) if v.is_boolean() => {
+                return Err(KmsError::ValidationError(
+                    "'length' must be an integer".to_string(),
+                ));
+            }
+            Some(v) => {
+                let parsed = if let Some(u) = v.as_u64() {
+                    Some(u as usize)
+                } else if let Some(i) = v.as_i64() {
+                    if i >= 0 { Some(i as usize) } else { None }
+                } else if let Some(s) = v.as_str() {
+                    s.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                parsed.ok_or_else(|| {
+                    KmsError::ValidationError("'length' must be an integer".to_string())
+                })?
+            }
+        };
+        if !(1..=1024).contains(&length) {
+            return Err(KmsError::ValidationError(
+                "'length' must be in range 1..1024".to_string(),
+            ));
+        }
 
         let master_secret = s.master_secret.get_secret().await?;
         let derived = derive_app_key_extended(&master_secret, auth.app_id, path, context, length)?;
         let derived_b64 = b64.encode(derived);
-        (auth, payload, derived_b64)
+        (auth, payload, derived_b64, length)
     };
 
     {
@@ -367,7 +394,7 @@ async fn derive_key(
             "app_id": auth.app_id,
             "path": payload.get("path").and_then(|v| v.as_str()).unwrap_or_default(),
             "key": derived_b64,
-            "length": payload.get("length").and_then(|v| v.as_u64()).unwrap_or(32),
+            "length": length,
         });
         let encrypted =
             encrypt_payload(&s, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await?;
@@ -644,6 +671,9 @@ async fn sync_handler(
                 if let Some(data) = payload_obj.get("data").and_then(|v| v.as_object()) {
                     let records = parse_sync_records(data);
                     for (app_id, record) in records {
+                        if !validate_incoming_record(&state, app_id, &record).await {
+                            continue;
+                        }
                         if s.store.merge_record(app_id, record).await {
                             merged += 1;
                         }
