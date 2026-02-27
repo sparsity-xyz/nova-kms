@@ -5,10 +5,11 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tokio::time::Duration;
+use tokio::time::{Duration, sleep};
 
 use crate::auth::{canonical_wallet, sign_message_for_node, verify_wallet_signature};
 use crate::crypto::{
@@ -361,6 +362,48 @@ pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
     Value::Object(map)
 }
 
+const INIT_RETRY_ATTEMPTS: usize = 5;
+const INIT_RETRY_BASE_DELAY_MS: u64 = 500;
+const INIT_RETRY_MAX_DELAY_MS: u64 = 5_000;
+
+fn retry_delay_for_attempt(attempt: usize) -> Duration {
+    let exp = attempt.saturating_sub(1).min(6) as u32;
+    let ms = INIT_RETRY_BASE_DELAY_MS
+        .saturating_mul(1u64 << exp)
+        .min(INIT_RETRY_MAX_DELAY_MS);
+    Duration::from_millis(ms)
+}
+
+async fn retry_init_op<T, F, Fut>(label: &str, mut op: F) -> Result<T, KmsError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, KmsError>>,
+{
+    let attempts = INIT_RETRY_ATTEMPTS.max(1);
+    let mut attempt = 1usize;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                if attempt >= attempts {
+                    return Err(err);
+                }
+                let delay = retry_delay_for_attempt(attempt);
+                tracing::warn!(
+                    "{} failed on attempt {}/{}: {}. Retrying in {}ms",
+                    label,
+                    attempt,
+                    attempts,
+                    err,
+                    delay.as_millis()
+                );
+                sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 pub async fn refresh_peers_if_needed(state: &SharedState) -> Result<(), KmsError> {
     let (ttl, peer_cache) = {
         let s = state.read().await;
@@ -369,7 +412,10 @@ pub async fn refresh_peers_if_needed(state: &SharedState) -> Result<(), KmsError
     if ttl == 0 || !peer_cache.is_stale(ttl).await {
         return Ok(());
     }
-    peer_cache.refresh_from_chain(state).await?;
+    retry_init_op("Peer cache refresh", || async {
+        peer_cache.refresh_from_chain(state).await
+    })
+    .await?;
     Ok(())
 }
 
@@ -395,11 +441,46 @@ async fn set_service_availability(state: &SharedState, available: bool, reason: 
 }
 
 pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
-    let peer_cache = {
+    let (peer_cache, odyn, in_enclave) = {
         let s = state.read().await;
-        Arc::clone(&s.peer_cache)
+        (
+            Arc::clone(&s.peer_cache),
+            s.odyn.clone(),
+            s.config.in_enclave,
+        )
     };
-    if let Err(err) = peer_cache.refresh_from_chain(state).await {
+    if in_enclave {
+        match retry_init_op("Odyn eth_address", || async { odyn.eth_address().await }).await {
+            Ok(wallet) => match canonical_wallet(&wallet) {
+                Ok(canonical) => {
+                    let mut s = state.write().await;
+                    if s.config.node_wallet != canonical {
+                        tracing::info!(
+                            "Updating node wallet from Odyn at runtime: {} -> {}",
+                            s.config.node_wallet,
+                            canonical
+                        );
+                        s.config.node_wallet = canonical;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to canonicalize Odyn wallet '{}': {}", wallet, err);
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to read Odyn wallet in node_tick after retries: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    if let Err(err) = retry_init_op("Peer cache refresh", || async {
+        peer_cache.refresh_from_chain(state).await
+    })
+    .await
+    {
         tracing::warn!("Peer cache refresh failed in node_tick: {}", err);
     }
 
@@ -438,15 +519,16 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     }
 
     if let Some(own_peer) = own_peer {
-        let local_pubkey_hex = {
-            let s = state.read().await;
-            match s.odyn.get_encryption_public_key_der().await {
-                Ok(pubkey) => hex::encode(pubkey),
-                Err(err) => {
-                    tracing::warn!("Failed to read local teePubkey: {}", err);
-                    set_service_availability(state, false, "cannot read local teePubkey").await;
-                    return Ok(());
-                }
+        let local_pubkey_hex = match retry_init_op("Odyn encryption public key", || async {
+            odyn.get_encryption_public_key_der().await
+        })
+        .await
+        {
+            Ok(pubkey) => hex::encode(pubkey),
+            Err(err) => {
+                tracing::warn!("Failed to read local teePubkey after retries: {}", err);
+                set_service_availability(state, false, "cannot read local teePubkey").await;
+                return Ok(());
             }
         };
         if !own_peer.tee_pubkey.eq_ignore_ascii_case(&local_pubkey_hex) {
@@ -459,15 +541,20 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         }
     }
 
-    let chain_hash = {
+    let registry = {
         let s = state.read().await;
-        match s.registry.get_master_secret_hash().await {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!("Failed to read masterSecretHash: {}", err);
-                set_service_availability(state, false, "cannot read master secret hash").await;
-                return Ok(());
-            }
+        s.registry.clone()
+    };
+    let chain_hash = match retry_init_op("Registry masterSecretHash", || async {
+        registry.get_master_secret_hash().await
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!("Failed to read masterSecretHash after retries: {}", err);
+            set_service_availability(state, false, "cannot read master secret hash").await;
+            return Ok(());
         }
     };
 
@@ -479,24 +566,30 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         };
 
         if !has_local_secret {
-            let generated_secret = {
-                let s = state.read().await;
-                match s.odyn.get_random_bytes().await {
-                    Ok(random) => {
-                        if random.len() < 32 {
-                            return Err(KmsError::InternalError(
-                                "Odyn returned insufficient random bytes".to_string(),
-                            ));
-                        }
-                        let mut out = [0u8; 32];
-                        out.copy_from_slice(&random[..32]);
-                        out
+            let generated_secret = match retry_init_op("Odyn random bytes", || async {
+                odyn.get_random_bytes().await
+            })
+            .await
+            {
+                Ok(random) => {
+                    if random.len() < 32 {
+                        return Err(KmsError::InternalError(
+                            "Odyn returned insufficient random bytes".to_string(),
+                        ));
                     }
-                    Err(err) if !s.config.in_enclave => {
-                        tracing::warn!("Odyn RNG unavailable in dev mode, falling back: {}", err);
-                        random_secret_32()?
-                    }
-                    Err(err) => return Err(err),
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&random[..32]);
+                    out
+                }
+                Err(err) if !in_enclave => {
+                    tracing::warn!("Odyn RNG unavailable in dev mode, falling back: {}", err);
+                    random_secret_32()?
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to get Odyn random bytes after retries: {}", err);
+                    set_service_availability(state, false, "cannot get random bytes from odyn")
+                        .await;
+                    return Ok(());
                 }
             };
             let s = state.read().await;
@@ -508,12 +601,12 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
             return Ok(());
         };
 
-        let set_result = {
-            let s = state.read().await;
-            s.registry
-                .set_master_secret_hash(&s.odyn, &s.config.node_wallet, local_hash)
+        let set_result = retry_init_op("Registry setMasterSecretHash", || async {
+            registry
+                .set_master_secret_hash(&odyn, &node_wallet, local_hash)
                 .await
-        };
+        })
+        .await;
         match set_result {
             Ok(tx_hash) => {
                 tracing::info!("Submitted setMasterSecretHash tx: {}", tx_hash);

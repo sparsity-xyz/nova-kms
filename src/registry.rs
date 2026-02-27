@@ -4,9 +4,11 @@ use alloy::sol;
 use alloy::transports::http::{Client, Http};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
+use tokio::time::{Duration, timeout};
 
 use crate::error::KmsError;
 use crate::odyn::OdynClient;
@@ -103,6 +105,24 @@ pub struct RegistryClient {
     http: reqwest::Client,
 }
 
+const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn with_timeout<T, I, E>(op: &str, fut: I) -> Result<T, KmsError>
+where
+    I: IntoFuture<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match timeout(LOCAL_RPC_TIMEOUT, fut.into_future()).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(KmsError::InternalError(format!("{} error: {}", op, e))),
+        Err(_) => Err(KmsError::InternalError(format!(
+            "{} timed out after {}s",
+            op,
+            LOCAL_RPC_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 impl RegistryClient {
     pub fn new(
         rpc_url: &str,
@@ -124,19 +144,20 @@ impl RegistryClient {
             rpc_url: rpc_url.to_string(),
             kms_registry_address: format!("0x{}", hex::encode(kms_addr.as_slice())),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(LOCAL_RPC_TIMEOUT)
                 .build()?,
         })
     }
 
     pub async fn get_active_instances(&self, app_id: u64) -> Result<Vec<String>, KmsError> {
-        let wallets = self
-            .nova_registry
-            .getActiveInstances(U256::from(app_id))
-            .call()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Registry error: {}", e)))?
-            ._0;
+        let wallets = with_timeout(
+            "Registry getActiveInstances",
+            self.nova_registry
+                .getActiveInstances(U256::from(app_id))
+                .call(),
+        )
+        .await?
+        ._0;
         Ok(wallets
             .iter()
             .map(|w| format!("0x{}", hex::encode(w.as_slice())))
@@ -149,13 +170,12 @@ impl RegistryClient {
     ) -> Result<RuntimeInstanceInfo, KmsError> {
         let addr = Address::from_str(wallet)
             .map_err(|_| KmsError::Unauthorized("Invalid wallet address".to_string()))?;
-        let instance = self
-            .nova_registry
-            .getInstanceByWallet(addr)
-            .call()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Registry error: {}", e)))?
-            ._0;
+        let instance = with_timeout(
+            "Registry getInstanceByWallet",
+            self.nova_registry.getInstanceByWallet(addr).call(),
+        )
+        .await?
+        ._0;
 
         Ok(RuntimeInstanceInfo {
             instance_id: instance.id.try_into().unwrap_or(0),
@@ -172,13 +192,12 @@ impl RegistryClient {
     }
 
     pub async fn get_app(&self, app_id: u64) -> Result<AppInfo, KmsError> {
-        let app = self
-            .nova_registry
-            .getApp(U256::from(app_id))
-            .call()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Registry error: {}", e)))?
-            ._0;
+        let app = with_timeout(
+            "Registry getApp",
+            self.nova_registry.getApp(U256::from(app_id)).call(),
+        )
+        .await?
+        ._0;
         Ok(AppInfo {
             app_id: app.id.try_into().unwrap_or(0),
             status: app.status,
@@ -186,13 +205,14 @@ impl RegistryClient {
     }
 
     pub async fn get_version(&self, app_id: u64, version_id: u64) -> Result<VersionInfo, KmsError> {
-        let version = self
-            .nova_registry
-            .getVersion(U256::from(app_id), U256::from(version_id))
-            .call()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Registry error: {}", e)))?
-            ._0;
+        let version = with_timeout(
+            "Registry getVersion",
+            self.nova_registry
+                .getVersion(U256::from(app_id), U256::from(version_id))
+                .call(),
+        )
+        .await?
+        ._0;
         Ok(VersionInfo {
             version_id: version.id.try_into().unwrap_or(0),
             status: version.status,
@@ -200,13 +220,12 @@ impl RegistryClient {
     }
 
     pub async fn get_master_secret_hash(&self) -> Result<[u8; 32], KmsError> {
-        let hash = self
-            .kms_registry
-            .masterSecretHash()
-            .call()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Registry error: {}", e)))?
-            ._0;
+        let hash = with_timeout(
+            "Registry masterSecretHash",
+            self.kms_registry.masterSecretHash().call(),
+        )
+        .await?
+        ._0;
         let mut out = [0u8; 32];
         out.copy_from_slice(hash.as_slice());
         Ok(out)

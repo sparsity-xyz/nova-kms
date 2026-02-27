@@ -1,14 +1,43 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::time::{Duration, sleep};
 
 use crate::auth::{NonceStore, canonical_wallet};
 use crate::config::Config;
 use crate::crypto::{MasterSecretManager, derive_sync_key};
+use crate::error::KmsError;
 use crate::odyn::OdynClient;
 use crate::rate_limiter::TokenBucket;
 use crate::registry::{CachedNovaRegistry, RegistryClient};
 use crate::store::DataStore;
 use crate::sync::PeerCache;
+
+const STARTUP_ODYN_WALLET_RETRY_ATTEMPTS: usize = 3;
+const STARTUP_ODYN_WALLET_RETRY_DELAY_MS: u64 = 1_000;
+
+async fn fetch_odyn_wallet_with_retry(odyn: &OdynClient) -> Result<String, KmsError> {
+    let attempts = STARTUP_ODYN_WALLET_RETRY_ATTEMPTS.max(1);
+    let mut attempt = 1usize;
+    loop {
+        match odyn.eth_address().await {
+            Ok(wallet) => return Ok(wallet),
+            Err(err) => {
+                if attempt >= attempts {
+                    return Err(err);
+                }
+                tracing::warn!(
+                    "Odyn wallet query failed at startup (attempt {}/{}): {}. Retrying in {}ms",
+                    attempt,
+                    attempts,
+                    err,
+                    STARTUP_ODYN_WALLET_RETRY_DELAY_MS
+                );
+                sleep(Duration::from_millis(STARTUP_ODYN_WALLET_RETRY_DELAY_MS)).await;
+                attempt += 1;
+            }
+        }
+    }
+}
 
 /// Global application state shared across all route handlers.
 pub struct AppState {
@@ -50,7 +79,7 @@ impl AppState {
         // Keep node wallet bound to the signing identity currently exposed by Odyn.
         // This mirrors the Python startup path and avoids PoP recipient mismatches.
         if config.in_enclave {
-            match odyn.eth_address().await {
+            match fetch_odyn_wallet_with_retry(&odyn).await {
                 Ok(wallet) => match canonical_wallet(&wallet) {
                     Ok(canonical) => {
                         config.node_wallet = canonical;

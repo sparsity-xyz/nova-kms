@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const LOCAL_ODYN_TIMEOUT_SECS: u64 = 3;
+
 #[derive(Clone)]
 pub struct OdynClient {
     endpoint: String,
@@ -50,7 +52,7 @@ impl OdynClient {
         Self {
             endpoint,
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(LOCAL_ODYN_TIMEOUT_SECS))
                 .build()
                 .unwrap_or_default(),
         }
