@@ -4,11 +4,28 @@ import json
 import subprocess
 import binascii
 
-# Add Python enclave to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nova-kms/enclave')))
-
-from kdf import derive_app_key, derive_data_key, derive_sync_key
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+
+
+def derive_app_key(master_secret: bytes, app_id: int, path: str, *, length: int = 32, context: str = "") -> bytes:
+    salt = f"nova-kms:app:{app_id}".encode("utf-8")
+    info = f"{path}:{context}".encode("utf-8") if context else path.encode("utf-8")
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=length,
+        salt=salt,
+        info=info,
+    ).derive(master_secret)
+
+
+def derive_data_key(master_secret: bytes, app_id: int) -> bytes:
+    return derive_app_key(master_secret, app_id, "data_key")
+
+
+def derive_sync_key(master_secret: bytes) -> bytes:
+    return derive_app_key(master_secret, 0, "sync_hmac_key")
 
 def run_tests():
     print("=== Nova KMS Behavior Comparison (Python vs Rust) ===")

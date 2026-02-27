@@ -41,15 +41,41 @@ impl KmsError {
             Self::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    fn code(&self) -> &'static str {
+        match self {
+            Self::ValidationError(_) => "bad_request",
+            Self::Unauthorized(_) => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
+            Self::NotFound(_) => "not_found",
+            Self::RateLimitExceeded => "rate_limited",
+            Self::ServiceUnavailable(_) => "service_unavailable",
+            Self::InternalError(_) => "internal_error",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::ValidationError(m)
+            | Self::Unauthorized(m)
+            | Self::Forbidden(m)
+            | Self::NotFound(m)
+            | Self::ServiceUnavailable(m)
+            | Self::InternalError(m) => m.clone(),
+            Self::RateLimitExceeded => "Rate limit exceeded".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for KmsError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let error_message = self.to_string();
+        let code = self.code();
+        let message = self.message();
 
         let body = Json(json!({
-            "detail": error_message
+            "code": code,
+            "message": message
         }));
 
         (status, body).into_response()

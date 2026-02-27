@@ -12,7 +12,47 @@ It is designed with a **Zero-Trust** architecture where no single node is truste
 | **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction. Values are encrypted-at-rest (AES-GCM). |
 | **Distributed Sync** | Delta + snapshot sync across KMS nodes (Eventual Consistency, Last-Writer-Wins). |
 | **Dual Keypairs** | Separated keys for Identity (secp256k1) and Encryption (P-384/secp384r1). |
-| **Anti-Split-Brain** | Strict initialization logic using the on-chain `masterSecretHash` coordination value. |
+| **Master Secret Bootstrap** | Bootstrap from `MASTER_SECRET_HEX` or sealed ECDH sync from a healthy peer. |
+
+## Rust/Python Compatibility
+
+The Rust node now matches the legacy Python node on protocol surface and sync behavior:
+
+- Same PoP message formats:
+  - `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
+  - `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
+- Same nonce contract: `GET /nonce` returns 16-byte random nonce encoded in base64.
+- Same route surface:
+  - `GET /`, `GET /health`, `GET /status`, `GET /nodes`, `GET /nonce`
+  - `POST /kms/derive`
+  - `GET /kms/data`, `GET /kms/data/{key:path}`, `PUT /kms/data`, `DELETE /kms/data`
+  - `POST /sync`
+- Same `/sync` semantics: PoP + optional HMAC (`X-Sync-Signature`) + E2E envelope + mutual response signature.
+- Same sync payload structure for records (`value` hex, vector clock map, tombstone, ttl, updated timestamp).
+
+This allows mixed Python/Rust KMS clusters to exchange deltas/snapshots and sealed master-secret sync.
+
+## Runtime Configuration
+
+Important environment variables (all are read by `Config::load()`):
+
+- `IN_ENCLAVE` (`true|false`)
+- `BIND_ADDR` (default `0.0.0.0:8000`)
+- `NODE_URL` (RPC URL)
+- `NODE_INSTANCE_URL` (this node public URL)
+- `NODE_WALLET` (TEE wallet address)
+- `NODE_PRIVATE_KEY` (dev-only signing key for PoP/mutual signatures)
+- `MASTER_SECRET_HEX` (optional bootstrap secret)
+- `KMS_APP_ID`
+- `NOVA_APP_REGISTRY_ADDRESS`, `KMS_REGISTRY_ADDRESS`
+- `KMS_NODE_TICK_SECONDS`, `DATA_SYNC_INTERVAL_SECONDS`
+- `PEER_CACHE_TTL_SECONDS`, `REGISTRY_CACHE_TTL_SECONDS`
+- `PEER_BLACKLIST_DURATION_SECONDS`
+- `ALLOW_PLAINTEXT_DEV` (dev-only fallback, defaults to `false`)
+
+Legacy env aliases remain accepted for compatibility:
+- `SYNC_INTERVAL_SECONDS` -> `DATA_SYNC_INTERVAL_SECONDS`
+- `PEER_REFRESH_INTERVAL_SECONDS` -> `KMS_NODE_TICK_SECONDS`
 
 ## Security Architecture
 
@@ -21,7 +61,7 @@ The system implements a **Defense in Depth** strategy with four layers of securi
 ### 1. On-Chain Identity & Authorization (The "Who")
 *   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID`, with app `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
 *   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
-*   **KMSRegistry**: Not used for runtime peer discovery; it is used for cluster coordination via `masterSecretHash`.
+*   **KMSRegistry**: Not used for runtime peer discovery.
 *   **Verification**: All access gates on `NovaAppRegistry` lookups (instance/app/version status + `zkVerified`).
 
 ### 2. Mutual Authentication (The "Handshake")
@@ -80,21 +120,12 @@ graph LR
   K -->|"masterSecretHash coordination"| N1
 ```
 
-## Anti-Split-Brain Initialization
+## Master Secret Bootstrap
 
-To prevent cluster fragmentation, nodes follow a strict startup protocol:
+Nodes support two bootstrap modes:
 
-1.  **Check Chain**: Read `masterSecretHash` from `KMSRegistry`.
-2.  **If `masterSecretHash == 0` (Bootstrap)**:
-    *   **Optimistic Init**: Node generates a new random secret and attempts to set the hash on-chain.
-    *   **Defense**: The contract acts as a mutex—only the first transaction succeeds. Others fail/revert.
-    *   If the transaction fails (race lost), the node retries from Step 1.
-3.  **If `masterSecretHash != 0` (Running)**:
-    *   **Verify**: Does the local secret match the hash?
-        *   **Yes**: Node becomes **Ready**.
-        *   **No**: Node attempts to **Sync** from a verified peer.
-            *   If sync succeeds and hash matches: Node becomes **Ready**.
-            *   If sync fails or hash mismatches: Node stays **Offline** (Retry Loop).
+1.  **Direct bootstrap**: set `MASTER_SECRET_HEX` on startup.
+2.  **Peer bootstrap**: if local secret is missing, request sealed master secret from a verified peer via `/sync` (`master_secret_request` + ECDH envelope), then pull snapshot data.
 
 ## Project Structure
 
@@ -124,6 +155,18 @@ nova-kms/
 ## Quick Start
 
 See `docs/development.md` for local development instructions. Note that `nova-kms` is designed to run within a Nitro Enclave environment.
+
+## Tests
+
+```bash
+cd nova-kms
+
+# Rust unit tests
+cargo test
+
+# Cross-language crypto parity (Python reference vs Rust)
+python3 tests/compare_behavior.py
+```
 
 ## Client Integration
 

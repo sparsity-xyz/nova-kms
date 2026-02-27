@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[derive(Clone)]
 pub struct OdynClient {
     endpoint: String,
     client: Client,

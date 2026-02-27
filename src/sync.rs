@@ -1,10 +1,21 @@
+use alloy::primitives::keccak256;
+use base64::Engine as _;
+use p384::pkcs8::EncodePublicKey;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
+use tokio::time::Duration;
 
-use crate::registry::RegistryClient;
+use crate::auth::{canonical_wallet, sign_message_for_node, verify_wallet_signature};
+use crate::crypto::{
+    SealedMasterSecretEnvelope, derive_sync_key, random_secret_32, unseal_master_secret,
+};
+use crate::error::KmsError;
+use crate::models::DataRecord;
+use crate::state::SharedState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -18,6 +29,10 @@ pub struct Peer {
     pub version_id: u64,
     pub instance_id: u64,
     pub registered_at: u64,
+    pub status_reachable: Option<bool>,
+    pub status_http_code: Option<u16>,
+    pub status_probe_ms: Option<u64>,
+    pub status_checked_at_ms: Option<u64>,
 }
 
 pub struct PeerCache {
@@ -42,33 +57,18 @@ impl PeerCache {
     }
 
     pub async fn blacklist_peer(&self, wallet: &str, duration_secs: u64) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = now_secs();
         let mut b = self.blacklist.write().await;
-        b.insert(wallet.to_lowercase(), now + duration_secs);
-    }
+        let wallet_key = wallet.to_lowercase();
+        b.insert(wallet_key.clone(), now + duration_secs);
+        drop(b);
 
-    pub async fn is_blacklisted(&self, wallet: &str) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let b = self.blacklist.read().await;
-        if let Some(exp) = b.get(&wallet.to_lowercase())
-            && now < *exp
-        {
-            return true;
-        }
-        false
+        let mut peers = self.peers.write().await;
+        peers.retain(|p| p.tee_wallet_address.to_lowercase() != wallet_key);
     }
 
     pub async fn get_peers(&self, exclude_wallet: Option<&str>) -> Vec<Peer> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = now_secs();
         let p = self.peers.read().await;
         let b = self.blacklist.read().await;
 
@@ -79,7 +79,7 @@ impl PeerCache {
                 {
                     return false;
                 }
-                if let Some(exp) = b.get(&peer.tee_wallet_address)
+                if let Some(exp) = b.get(&peer.tee_wallet_address.to_lowercase())
                     && now < *exp
                 {
                     return false;
@@ -90,77 +90,946 @@ impl PeerCache {
             .collect()
     }
 
-    pub async fn get_tee_pubkey_by_wallet(&self, wallet: &str) -> Option<String> {
+    pub async fn get_peer_by_wallet(&self, wallet: &str) -> Option<Peer> {
+        let now = now_secs();
         let p = self.peers.read().await;
+        let b = self.blacklist.read().await;
+        if let Some(exp) = b.get(&wallet.to_lowercase())
+            && now < *exp
+        {
+            return None;
+        }
         p.iter()
             .find(|peer| peer.tee_wallet_address.eq_ignore_ascii_case(wallet))
-            .map(|peer| peer.tee_pubkey.clone())
+            .cloned()
     }
 
-    pub async fn refresh(
-        &self,
-        registry: &RegistryClient,
-        kms_app_id: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let active_instances = registry
-            .nova_registry
-            .getActiveInstances(alloy::primitives::U256::from(kms_app_id))
-            .call()
-            .await?
-            ._0;
+    pub async fn get_wallet_by_url(&self, node_url: &str) -> Option<String> {
+        let base = node_url.trim_end_matches('/');
+        let p = self.peers.read().await;
+        p.iter()
+            .find(|peer| peer.node_url.trim_end_matches('/') == base)
+            .map(|peer| peer.tee_wallet_address.clone())
+    }
+
+    pub async fn get_tee_pubkey_by_wallet(&self, wallet: &str) -> Option<String> {
+        self.get_peer_by_wallet(wallet).await.map(|p| p.tee_pubkey)
+    }
+
+    pub async fn is_stale(&self, ttl_seconds: u64) -> bool {
+        let last = *self.last_refresh.read().await;
+        now_secs().saturating_sub(last) > ttl_seconds
+    }
+
+    pub async fn refresh_from_chain(&self, state: &SharedState) -> Result<usize, KmsError> {
+        let (kms_app_id, in_enclave, registry) = {
+            let s = state.read().await;
+            (s.config.kms_app_id, s.config.in_enclave, s.registry.clone())
+        };
+
+        let active_instances = registry.get_active_instances(kms_app_id).await?;
 
         let mut new_peers = Vec::new();
-
         for wallet in active_instances {
-            let instance = match registry
-                .nova_registry
-                .getInstanceByWallet(wallet)
-                .call()
-                .await
-            {
-                Ok(res) => res._0,
+            let instance = match registry.get_instance_by_wallet(&wallet).await {
+                Ok(res) => res,
                 Err(_) => continue,
             };
-
-            if instance.status != 0 {
-                continue; // Not active
+            if instance.status != 0 || !instance.zk_verified {
+                continue;
             }
-
-            if !instance.zkVerified {
+            // ENROLLED=0, DEPRECATED=1, REVOKED=2
+            let version = match registry
+                .get_version(instance.app_id, instance.version_id)
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if version.status != 0 && version.status != 1 {
                 continue;
             }
 
-            if let Ok(url) = Url::parse(&instance.instanceUrl) {
+            if let Ok(url) = Url::parse(&instance.instance_url) {
                 if url.scheme() != "http" && url.scheme() != "https" {
                     continue;
                 }
-
-                let pubkey_hex = hex::encode(&instance.teePubkey);
-
-                new_peers.push(Peer {
-                    tee_wallet_address: wallet.to_checksum(None).to_lowercase(),
-                    node_url: instance.instanceUrl,
-                    tee_pubkey: pubkey_hex,
-                    app_id: instance.appId.try_into().unwrap_or(0),
-                    operator: instance.operator.to_checksum(None).to_lowercase(),
+                let mut peer = Peer {
+                    tee_wallet_address: instance.tee_wallet_address,
+                    node_url: instance.instance_url,
+                    tee_pubkey: hex::encode(&instance.tee_pubkey),
+                    app_id: instance.app_id,
+                    operator: instance.operator,
                     status: instance.status,
-                    zk_verified: instance.zkVerified,
-                    version_id: instance.versionId.try_into().unwrap_or(0),
-                    instance_id: instance.id.try_into().unwrap_or(0),
-                    registered_at: instance.registeredAt.try_into().unwrap_or(0),
-                });
+                    zk_verified: instance.zk_verified,
+                    version_id: instance.version_id,
+                    instance_id: instance.instance_id,
+                    registered_at: instance.registered_at,
+                    status_reachable: None,
+                    status_http_code: None,
+                    status_probe_ms: None,
+                    status_checked_at_ms: None,
+                };
+                if in_enclave {
+                    let probe = probe_status_endpoint(&peer.node_url).await;
+                    peer.status_reachable = Some(probe.status_reachable);
+                    peer.status_http_code = probe.status_http_code;
+                    peer.status_probe_ms = Some(probe.status_probe_ms);
+                    peer.status_checked_at_ms = Some(probe.status_checked_at_ms);
+                }
+                new_peers.push(peer);
             }
         }
 
         let mut p = self.peers.write().await;
         *p = new_peers;
+        let mut last = self.last_refresh.write().await;
+        *last = now_secs();
+        Ok(p.len())
+    }
 
-        let mut lr = self.last_refresh.write().await;
-        *lr = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    pub async fn verify_kms_peer(&self, wallet: &str, kms_app_id: u64) -> Result<Peer, KmsError> {
+        let Some(peer) = self.get_peer_by_wallet(wallet).await else {
+            return Err(KmsError::Forbidden(format!(
+                "Peer {} not found in PeerCache",
+                wallet
+            )));
+        };
+        if peer.status != 0 {
+            return Err(KmsError::Forbidden("Peer instance not ACTIVE".to_string()));
+        }
+        if !peer.zk_verified {
+            return Err(KmsError::Forbidden("Peer not zk-verified".to_string()));
+        }
+        if peer.app_id != kms_app_id {
+            return Err(KmsError::Forbidden("Peer app_id mismatch".to_string()));
+        }
+        if peer.tee_pubkey.is_empty() {
+            return Err(KmsError::Forbidden("Peer tee_pubkey missing".to_string()));
+        }
+        Ok(peer)
+    }
+}
 
-        Ok(())
+struct StatusProbe {
+    status_reachable: bool,
+    status_http_code: Option<u16>,
+    status_probe_ms: u64,
+    status_checked_at_ms: u64,
+}
+
+async fn probe_status_endpoint(node_url: &str) -> StatusProbe {
+    let checked_at_ms = now_ms();
+    let start = now_ms();
+    let status_url = format!("{}/status", node_url.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(v) => v,
+        Err(_) => {
+            return StatusProbe {
+                status_reachable: false,
+                status_http_code: None,
+                status_probe_ms: 0,
+                status_checked_at_ms: checked_at_ms,
+            };
+        }
+    };
+
+    match client.get(status_url).send().await {
+        Ok(resp) => StatusProbe {
+            status_reachable: resp.status().is_success(),
+            status_http_code: Some(resp.status().as_u16()),
+            status_probe_ms: now_ms().saturating_sub(start),
+            status_checked_at_ms: checked_at_ms,
+        },
+        Err(_) => StatusProbe {
+            status_reachable: false,
+            status_http_code: None,
+            status_probe_ms: now_ms().saturating_sub(start),
+            status_checked_at_ms: checked_at_ms,
+        },
+    }
+}
+
+pub fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn sort_json_value(v: &Value) -> Value {
+    match v {
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_json_value).collect()),
+        Value::Object(map) => {
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            let mut out = Map::new();
+            for k in keys {
+                if let Some(inner) = map.get(&k) {
+                    out.insert(k, sort_json_value(inner));
+                }
+            }
+            Value::Object(out)
+        }
+        _ => v.clone(),
+    }
+}
+
+pub fn canonical_json(v: &Value) -> Result<String, KmsError> {
+    let sorted = sort_json_value(v);
+    serde_json::to_string(&sorted)
+        .map_err(|e| KmsError::InternalError(format!("JSON encode failed: {}", e)))
+}
+
+pub fn hmac_hex(sync_key: &[u8; 32], payload: &[u8]) -> String {
+    hex::encode(crate::crypto::generate_hmac_sha256(sync_key, payload))
+}
+
+pub fn verify_hmac_hex(sync_key: &[u8; 32], payload: &[u8], signature_hex: &str) -> bool {
+    if let Ok(sig) = hex::decode(signature_hex) {
+        crate::crypto::verify_hmac_sha256(sync_key, payload, &sig).is_ok()
+    } else {
+        false
+    }
+}
+
+pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
+    let mut map = Map::new();
+    for (app_id, records) in deltas {
+        map.insert(
+            app_id.to_string(),
+            Value::Array(records.iter().map(|r| r.to_sync_value()).collect()),
+        );
+    }
+    Value::Object(map)
+}
+
+pub async fn refresh_peers_if_needed(state: &SharedState) -> Result<(), KmsError> {
+    let (ttl, stale) = {
+        let s = state.read().await;
+        let ttl = s.config.peer_cache_ttl_seconds;
+        let stale = s.peer_cache.is_stale(ttl).await;
+        (ttl, stale)
+    };
+    if !stale || ttl == 0 {
+        return Ok(());
+    }
+    let s = state.read().await;
+    s.peer_cache.refresh_from_chain(state).await?;
+    Ok(())
+}
+
+async fn local_master_secret_hash(state: &SharedState) -> Option<[u8; 32]> {
+    let secret = {
+        let s = state.read().await;
+        s.master_secret.get_secret().await.ok()?
+    };
+    let hash = keccak256(secret.bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(hash.as_slice());
+    Some(out)
+}
+
+async fn set_service_availability(state: &SharedState, available: bool, reason: &str) {
+    let mut s = state.write().await;
+    s.service_available = available;
+    if available {
+        s.service_unavailable_reason.clear();
+    } else {
+        s.service_unavailable_reason = reason.to_string();
+    }
+}
+
+pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
+    {
+        let s = state.read().await;
+        if let Err(err) = s.peer_cache.refresh_from_chain(state).await {
+            tracing::warn!("Peer cache refresh failed in node_tick: {}", err);
+        }
+    }
+
+    let (node_wallet, peers) = {
+        let s = state.read().await;
+        (
+            s.config.node_wallet.clone(),
+            s.peer_cache.get_peers(None).await,
+        )
+    };
+
+    let self_wallet = node_wallet.to_lowercase();
+    let self_in_membership = peers
+        .iter()
+        .any(|p| p.tee_wallet_address.eq_ignore_ascii_case(&self_wallet));
+    if !self_in_membership {
+        let mut s = state.write().await;
+        s.is_operator = false;
+        s.service_available = false;
+        s.service_unavailable_reason = "self not in KMS node list".to_string();
+        return Ok(());
+    }
+
+    {
+        let mut s = state.write().await;
+        s.is_operator = true;
+        if s.config.node_instance_url.trim().is_empty()
+            && let Some(own_peer) = peers
+                .iter()
+                .find(|p| p.tee_wallet_address.eq_ignore_ascii_case(&self_wallet))
+        {
+            s.config.node_instance_url = own_peer.node_url.clone();
+        }
+    }
+
+    let chain_hash = {
+        let s = state.read().await;
+        match s.registry.get_master_secret_hash().await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!("Failed to read masterSecretHash: {}", err);
+                set_service_availability(state, false, "cannot read master secret hash").await;
+                return Ok(());
+            }
+        }
+    };
+
+    let chain_hash_is_zero = chain_hash == [0u8; 32];
+    if chain_hash_is_zero {
+        let has_local_secret = {
+            let s = state.read().await;
+            s.master_secret.is_initialized().await
+        };
+
+        if !has_local_secret {
+            let generated_secret = {
+                let s = state.read().await;
+                match s.odyn.get_random_bytes().await {
+                    Ok(random) => {
+                        if random.len() < 32 {
+                            return Err(KmsError::InternalError(
+                                "Odyn returned insufficient random bytes".to_string(),
+                            ));
+                        }
+                        let mut out = [0u8; 32];
+                        out.copy_from_slice(&random[..32]);
+                        out
+                    }
+                    Err(err) if !s.config.in_enclave => {
+                        tracing::warn!("Odyn RNG unavailable in dev mode, falling back: {}", err);
+                        random_secret_32()?
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            let s = state.read().await;
+            s.master_secret.initialize_generated(generated_secret).await;
+        }
+
+        let Some(local_hash) = local_master_secret_hash(state).await else {
+            set_service_availability(state, false, "local master secret hash unavailable").await;
+            return Ok(());
+        };
+
+        let set_result = {
+            let s = state.read().await;
+            s.registry
+                .set_master_secret_hash(&s.odyn, &s.config.node_wallet, local_hash)
+                .await
+        };
+        match set_result {
+            Ok(tx_hash) => {
+                tracing::info!("Submitted setMasterSecretHash tx: {}", tx_hash);
+                set_service_availability(state, false, "awaiting on-chain master secret hash")
+                    .await;
+            }
+            Err(err) => {
+                tracing::warn!("Failed to set masterSecretHash on-chain: {}", err);
+                set_service_availability(state, false, "failed to set master secret hash").await;
+            }
+        }
+        return Ok(());
+    }
+
+    if local_master_secret_hash(state).await != Some(chain_hash) {
+        let synced = match attempt_master_secret_sync(state).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!("Master secret sync failed: {}", err);
+                false
+            }
+        };
+        if !synced {
+            set_service_availability(state, false, "master secret sync failed").await;
+            return Ok(());
+        }
+        if local_master_secret_hash(state).await != Some(chain_hash) {
+            set_service_availability(state, false, "synced master secret hash mismatch").await;
+            return Ok(());
+        }
+    }
+
+    let sync_key = {
+        let s = state.read().await;
+        let secret = match s.master_secret.get_secret().await {
+            Ok(v) => v,
+            Err(_) => {
+                set_service_availability(state, false, "master secret not initialized").await;
+                return Ok(());
+            }
+        };
+        derive_sync_key(&secret)
+    };
+
+    {
+        let mut s = state.write().await;
+        s.sync_key = Some(sync_key);
+    }
+    set_service_availability(state, true, "").await;
+    Ok(())
+}
+
+pub async fn sync_tick(state: &SharedState) -> Result<usize, KmsError> {
+    let should_sync = {
+        let s = state.read().await;
+        s.sync_key.is_some() && s.service_available
+    };
+    if !should_sync {
+        return Ok(0);
+    }
+    push_deltas(state).await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NonceResponse {
+    nonce: String,
+}
+
+fn normalize_hex_no_prefix(v: &str) -> String {
+    v.strip_prefix("0x").unwrap_or(v).to_lowercase()
+}
+
+async fn encrypt_json_envelope(
+    state: &SharedState,
+    payload: &Value,
+    receiver_tee_pubkey_hex: &str,
+) -> Result<Value, KmsError> {
+    let (odyn, plaintext) = {
+        let s = state.read().await;
+        let plaintext = canonical_json(payload)?;
+        (s.odyn.clone(), plaintext)
+    };
+
+    let sender_pubkey_hex = hex::encode(odyn.get_encryption_public_key_der().await?);
+    let encrypted = odyn.encrypt(&plaintext, receiver_tee_pubkey_hex).await?;
+
+    Ok(json!({
+        "sender_tee_pubkey": sender_pubkey_hex,
+        "nonce": normalize_hex_no_prefix(&encrypted.nonce),
+        "encrypted_data": normalize_hex_no_prefix(&encrypted.encrypted_data),
+    }))
+}
+
+async fn decrypt_json_envelope(state: &SharedState, envelope: &Value) -> Result<Value, KmsError> {
+    let obj = envelope
+        .as_object()
+        .ok_or_else(|| KmsError::ValidationError("Invalid envelope".to_string()))?;
+    let sender_pubkey = obj
+        .get("sender_tee_pubkey")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| KmsError::ValidationError("Missing sender_tee_pubkey".to_string()))?;
+    let nonce = obj
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| KmsError::ValidationError("Missing nonce".to_string()))?;
+    let encrypted_data = obj
+        .get("encrypted_data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| KmsError::ValidationError("Missing encrypted_data".to_string()))?;
+    let plaintext = {
+        let s = state.read().await;
+        s.odyn.decrypt(nonce, sender_pubkey, encrypted_data).await?
+    };
+    serde_json::from_str(&plaintext).map_err(|e| {
+        KmsError::ValidationError(format!("Decrypted payload is not valid JSON: {}", e))
+    })
+}
+
+fn is_envelope(v: &Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    obj.contains_key("sender_tee_pubkey")
+        && obj.contains_key("nonce")
+        && obj.contains_key("encrypted_data")
+}
+
+pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
+    refresh_peers_if_needed(state).await?;
+
+    let (sync_key, node_wallet, deltas_payload, peers) = {
+        let mut s = state.write().await;
+        if !s.service_available {
+            return Ok(0);
+        }
+        let Some(sync_key) = s.sync_key else {
+            return Ok(0);
+        };
+        let current = now_ms();
+        let since = s.last_push_ms.saturating_sub(1);
+        let deltas = s.store.get_deltas_since(since, current).await;
+        s.last_push_ms = current;
+        if deltas.is_empty() {
+            return Ok(0);
+        }
+
+        let node_wallet = s.config.node_wallet.clone();
+        let peers = s.peer_cache.get_peers(Some(&node_wallet)).await;
+        (sync_key, node_wallet, serialize_deltas(&deltas), peers)
+    };
+
+    if peers.is_empty() {
+        return Ok(0);
+    }
+
+    let body = json!({
+        "type": "delta",
+        "sender_wallet": node_wallet,
+        "data": deltas_payload,
+    });
+
+    let mut success = 0usize;
+    for peer in peers {
+        let peer_wallet = match canonical_wallet(&peer.tee_wallet_address) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let endpoint = format!("{}/sync", peer.node_url.trim_end_matches('/'));
+        let base = peer.node_url.trim_end_matches('/').to_string();
+
+        // PoP nonce
+        let nonce_resp = match reqwest::Client::new()
+            .get(format!("{}/nonce", base))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !nonce_resp.status().is_success() {
+            continue;
+        }
+        let nonce_data: NonceResponse = match nonce_resp.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if base64::engine::general_purpose::STANDARD
+            .decode(nonce_data.nonce.as_bytes())
+            .is_err()
+        {
+            continue;
+        }
+
+        let ts = now_secs();
+        let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
+        let (signature, signer_wallet) = {
+            let s = state.read().await;
+            match sign_message_for_node(&s.config, &s.odyn, &message).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+        };
+
+        let envelope = match encrypt_json_envelope(state, &body, &peer.tee_pubkey).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let canonical = match canonical_json(&envelope) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let sync_sig = hmac_hex(&sync_key, canonical.as_bytes());
+
+        let response = match reqwest::Client::new()
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .header("x-kms-signature", signature.clone())
+            .header("x-kms-wallet", signer_wallet)
+            .header("x-kms-timestamp", ts.to_string())
+            .header("x-kms-nonce", nonce_data.nonce)
+            .header("x-sync-signature", sync_sig)
+            .json(&envelope)
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+
+        let Some(resp_sig) = response.headers().get("x-kms-peer-signature") else {
+            continue;
+        };
+        let Ok(resp_sig) = resp_sig.to_str() else {
+            continue;
+        };
+        let expected = format!("NovaKMS:Response:{}:{}", signature, peer_wallet);
+        if !verify_wallet_signature(&peer_wallet, &expected, resp_sig) {
+            continue;
+        }
+
+        let resp_json: Value = match response.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if is_envelope(&resp_json) {
+            if decrypt_json_envelope(state, &resp_json).await.is_err() {
+                continue;
+            }
+        }
+        success += 1;
+    }
+
+    Ok(success)
+}
+
+async fn post_sync_request_to_peer(
+    state: &SharedState,
+    peer: &Peer,
+    inner_payload: &Value,
+    maybe_sync_key: Option<[u8; 32]>,
+) -> Result<Value, KmsError> {
+    let peer_wallet = canonical_wallet(&peer.tee_wallet_address)?;
+    let base = peer.node_url.trim_end_matches('/').to_string();
+    let endpoint = format!("{}/sync", base);
+
+    let nonce_resp = reqwest::Client::new()
+        .get(format!("{}/nonce", base))
+        .send()
+        .await
+        .map_err(|e| KmsError::InternalError(format!("Failed to fetch nonce: {}", e)))?;
+    if !nonce_resp.status().is_success() {
+        return Err(KmsError::ServiceUnavailable(format!(
+            "Peer nonce endpoint returned {}",
+            nonce_resp.status()
+        )));
+    }
+    let nonce_data: NonceResponse = nonce_resp
+        .json()
+        .await
+        .map_err(|e| KmsError::ValidationError(format!("Invalid nonce response: {}", e)))?;
+    if base64::engine::general_purpose::STANDARD
+        .decode(nonce_data.nonce.as_bytes())
+        .is_err()
+    {
+        return Err(KmsError::ValidationError(
+            "Peer nonce is not valid base64".to_string(),
+        ));
+    }
+
+    let ts = now_secs();
+    let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
+    let (signature, signer_wallet) = {
+        let s = state.read().await;
+        sign_message_for_node(&s.config, &s.odyn, &message).await?
+    };
+
+    let envelope = encrypt_json_envelope(state, inner_payload, &peer.tee_pubkey).await?;
+    let canonical = canonical_json(&envelope)?;
+
+    let mut req = reqwest::Client::new()
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("x-kms-signature", signature.clone())
+        .header("x-kms-wallet", signer_wallet)
+        .header("x-kms-timestamp", ts.to_string())
+        .header("x-kms-nonce", nonce_data.nonce)
+        .json(&envelope);
+
+    if let Some(sync_key) = maybe_sync_key {
+        req = req.header(
+            "x-sync-signature",
+            hmac_hex(&sync_key, canonical.as_bytes()),
+        );
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| KmsError::InternalError(format!("Sync request failed: {}", e)))?;
+    if !response.status().is_success() {
+        return Err(KmsError::ServiceUnavailable(format!(
+            "Peer sync endpoint returned {}",
+            response.status()
+        )));
+    }
+
+    let resp_sig = response
+        .headers()
+        .get("x-kms-peer-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            KmsError::Unauthorized("Missing X-KMS-Peer-Signature in sync response".to_string())
+        })?;
+    let expected = format!("NovaKMS:Response:{}:{}", signature, peer_wallet);
+    if !verify_wallet_signature(&peer_wallet, &expected, resp_sig) {
+        return Err(KmsError::Unauthorized(
+            "Invalid peer response signature".to_string(),
+        ));
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| KmsError::ValidationError(format!("Invalid sync response body: {}", e)))?;
+    if is_envelope(&body) {
+        decrypt_json_envelope(state, &body).await
+    } else {
+        Ok(body)
+    }
+}
+
+pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, KmsError> {
+    let already_initialized = {
+        let s = state.read().await;
+        s.master_secret.is_initialized().await
+    };
+    if already_initialized {
+        return Ok(true);
+    }
+
+    refresh_peers_if_needed(state).await?;
+    let peers = {
+        let s = state.read().await;
+        s.peer_cache.get_peers(Some(&s.config.node_wallet)).await
+    };
+    if peers.is_empty() {
+        return Ok(false);
+    }
+
+    let local_wallet = {
+        let s = state.read().await;
+        s.config.node_wallet.clone()
+    };
+
+    for peer in peers {
+        let local_secret = p384::SecretKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
+        let local_pub_der = match local_secret.public_key().to_public_key_der() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let req_body = json!({
+            "type": "master_secret_request",
+            "sender_wallet": local_wallet,
+            "ecdh_pubkey": hex::encode(local_pub_der.as_ref()),
+        });
+
+        let maybe_sync_key = {
+            let s = state.read().await;
+            s.sync_key
+        };
+        let response =
+            match post_sync_request_to_peer(state, &peer, &req_body, maybe_sync_key).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+        let sealed_val = response
+            .get("sealed")
+            .cloned()
+            .or_else(|| response.get("data").and_then(|d| d.get("sealed")).cloned());
+        let Some(sealed_val) = sealed_val else {
+            continue;
+        };
+        let sealed: SealedMasterSecretEnvelope = match serde_json::from_value(sealed_val) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let secret = match unseal_master_secret(&sealed, &local_secret) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        {
+            let mut s = state.write().await;
+            s.master_secret
+                .initialize_synced(secret, Some(peer.node_url.clone()))
+                .await;
+            let master = s.master_secret.get_secret().await?;
+            s.sync_key = Some(crate::crypto::derive_sync_key(&master));
+        }
+
+        // Pull snapshot right after getting the secret.
+        let snapshot_req = json!({
+            "type": "snapshot_request",
+            "sender_wallet": local_wallet,
+        });
+        let sync_key = {
+            let s = state.read().await;
+            s.sync_key
+        };
+        if let Ok(snapshot_resp) =
+            post_sync_request_to_peer(state, &peer, &snapshot_req, sync_key).await
+            && let Some(data_obj) = snapshot_resp.get("data").and_then(|v| v.as_object())
+        {
+            let records = parse_sync_data_object(data_obj);
+            let s = state.read().await;
+            for (app_id, record) in records {
+                let _ = s.store.merge_record(app_id, record).await;
+            }
+        }
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn parse_sync_data_object(data: &Map<String, Value>) -> Vec<(u64, DataRecord)> {
+    let mut out = Vec::new();
+    for (app_id_str, records_val) in data {
+        let Ok(app_id) = app_id_str.parse::<u64>() else {
+            continue;
+        };
+        let Some(records) = records_val.as_array() else {
+            continue;
+        };
+        for rec in records {
+            if let Some(parsed) = DataRecord::from_sync_value(rec) {
+                out.push((app_id, parsed));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::VectorClock;
+    use crate::{config::Config, state::AppState};
+    use axum::{Router, routing::get};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tokio::time::Duration;
+
+    #[test]
+    fn test_canonical_json_ordering() {
+        let v = json!({"b":1,"a":{"d":1,"c":2}});
+        let out = canonical_json(&v).unwrap();
+        assert_eq!(out, r#"{"a":{"c":2,"d":1},"b":1}"#);
+    }
+
+    #[test]
+    fn test_hmac_roundtrip() {
+        let key = [0x11u8; 32];
+        let payload = br#"{"k":"v"}"#;
+        let sig = hmac_hex(&key, payload);
+        assert!(verify_hmac_hex(&key, payload, &sig));
+    }
+
+    #[test]
+    fn test_serialize_deltas_shape() {
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let rec = DataRecord {
+            key: "k".to_string(),
+            encrypted_value: vec![1, 2, 3],
+            version: vc,
+            updated_at_ms: 10,
+            tombstone: false,
+            ttl_ms: 0,
+        };
+        let mut deltas = HashMap::new();
+        deltas.insert(49u64, vec![rec]);
+        let out = serialize_deltas(&deltas);
+        assert!(out.get("49").is_some());
+        assert_eq!(out["49"][0]["key"], "k");
+    }
+
+    #[tokio::test]
+    async fn test_blacklist_peer_removes_cached_entry() {
+        let cache = PeerCache::new();
+        let wallet = "0xa000000000000000000000000000000000000000".to_string();
+        cache.peers.write().await.push(Peer {
+            tee_wallet_address: wallet.clone(),
+            node_url: "https://kms.example".to_string(),
+            tee_pubkey: "abcd".to_string(),
+            app_id: 49,
+            operator: "0xb000000000000000000000000000000000000000".to_string(),
+            status: 0,
+            zk_verified: true,
+            version_id: 1,
+            instance_id: 1,
+            registered_at: 1,
+            status_reachable: None,
+            status_http_code: None,
+            status_probe_ms: None,
+            status_checked_at_ms: None,
+        });
+
+        assert!(cache.get_peer_by_wallet(&wallet).await.is_some());
+        cache.blacklist_peer(&wallet, 600).await;
+        assert!(cache.get_peer_by_wallet(&wallet).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_node_tick_marks_unavailable_when_self_not_in_membership() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        config.node_wallet = "0xa000000000000000000000000000000000000000".to_string();
+
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        node_tick(&state).await.unwrap();
+
+        let s = state.read().await;
+        assert!(!s.is_operator);
+        assert!(!s.service_available);
+        assert_eq!(s.service_unavailable_reason, "self not in KMS node list");
+    }
+
+    #[tokio::test]
+    async fn test_sync_tick_skips_when_service_unavailable() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+
+        {
+            let mut s = state.write().await;
+            s.sync_key = Some([7u8; 32]);
+            s.service_available = false;
+        }
+
+        let pushed = sync_tick(&state).await.unwrap();
+        assert_eq!(pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_probe_status_endpoint_captures_metadata() {
+        let app = Router::new().route("/status", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let probe = probe_status_endpoint(&format!("http://{}", addr)).await;
+        assert!(probe.status_reachable);
+        assert_eq!(probe.status_http_code, Some(200));
+        assert!(probe.status_checked_at_ms > 0);
+
+        handle.abort();
     }
 }

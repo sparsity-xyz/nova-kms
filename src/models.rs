@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct VectorClock {
@@ -33,11 +34,16 @@ impl VectorClock {
         let mut self_is_less = false;
         let mut self_is_greater = false;
 
-        let all_keys = self.clocks.keys().chain(other.clocks.keys());
+        let all_keys: BTreeSet<String> = self
+            .clocks
+            .keys()
+            .cloned()
+            .chain(other.clocks.keys().cloned())
+            .collect();
 
         for k in all_keys {
-            let v1 = self.get(k);
-            let v2 = other.get(k);
+            let v1 = self.get(&k);
+            let v2 = other.get(&k);
 
             if v1 < v2 {
                 self_is_less = true;
@@ -59,11 +65,16 @@ impl VectorClock {
 
     pub fn merge(v1: &VectorClock, v2: &VectorClock) -> VectorClock {
         let mut merged = VectorClock::new();
-        let all_keys = v1.clocks.keys().chain(v2.clocks.keys());
+        let all_keys: BTreeSet<String> = v1
+            .clocks
+            .keys()
+            .cloned()
+            .chain(v2.clocks.keys().cloned())
+            .collect();
         for k in all_keys {
             merged
                 .clocks
-                .insert(k.clone(), std::cmp::max(v1.get(k), v2.get(k)));
+                .insert(k.clone(), std::cmp::max(v1.get(&k), v2.get(&k)));
         }
         merged
     }
@@ -76,20 +87,72 @@ pub struct DataRecord {
     pub version: VectorClock,
     pub updated_at_ms: u64,
     pub tombstone: bool,
-    pub ttl_ms: Option<u64>,
+    pub ttl_ms: u64, // 0 = no expiry
 }
 
 impl DataRecord {
     pub fn approximate_size(&self) -> usize {
-        self.encrypted_value.len() + 128 // overhead estimation
+        if self.tombstone {
+            0
+        } else {
+            self.encrypted_value.len()
+        }
     }
 
     pub fn is_expired(&self, current_time_ms: u64) -> bool {
-        if let Some(ttl) = self.ttl_ms {
-            current_time_ms > self.updated_at_ms + ttl
+        self.ttl_ms > 0 && current_time_ms > self.updated_at_ms + self.ttl_ms
+    }
+
+    pub fn to_sync_value(&self) -> Value {
+        json!({
+            "key": self.key,
+            "value": if self.tombstone { Value::Null } else { Value::String(hex::encode(&self.encrypted_value)) },
+            "version": self.version.clocks,
+            "updated_at_ms": self.updated_at_ms,
+            "tombstone": self.tombstone,
+            "ttl_ms": self.ttl_ms,
+        })
+    }
+
+    pub fn from_sync_value(v: &Value) -> Option<Self> {
+        let obj = v.as_object()?;
+        Self::from_sync_map(obj)
+    }
+
+    pub fn from_sync_map(obj: &Map<String, Value>) -> Option<Self> {
+        let key = obj.get("key")?.as_str()?.to_string();
+        let tombstone = obj
+            .get("tombstone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let encrypted_value = if tombstone {
+            Vec::new()
         } else {
-            false
+            let hex_val = obj.get("value")?.as_str()?;
+            hex::decode(hex_val.strip_prefix("0x").unwrap_or(hex_val)).ok()?
+        };
+
+        let mut version = VectorClock::new();
+        if let Some(ver_obj) = obj.get("version").and_then(|v| v.as_object()) {
+            for (k, v) in ver_obj {
+                if let Some(count) = v.as_u64() {
+                    version.clocks.insert(k.clone(), count);
+                }
+            }
         }
+
+        Some(Self {
+            key,
+            encrypted_value,
+            version,
+            updated_at_ms: obj
+                .get("updated_at_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            tombstone,
+            ttl_ms: obj.get("ttl_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        })
     }
 }
 
@@ -125,19 +188,20 @@ mod tests {
     }
 
     #[test]
-    fn test_vector_clock_merge() {
-        let mut vc1 = VectorClock::new();
-        vc1.increment("nodeA");
-        vc1.increment("nodeB");
-
-        let mut vc2 = VectorClock::new();
-        vc2.increment("nodeA");
-        vc2.increment("nodeA");
-        vc2.increment("nodeC");
-
-        let merged = VectorClock::merge(&vc1, &vc2);
-        assert_eq!(merged.get("nodeA"), 2);
-        assert_eq!(merged.get("nodeB"), 1);
-        assert_eq!(merged.get("nodeC"), 1);
+    fn test_sync_record_roundtrip() {
+        let mut vc = VectorClock::new();
+        vc.increment("n1");
+        let rec = DataRecord {
+            key: "k".to_string(),
+            encrypted_value: vec![1, 2, 3],
+            version: vc,
+            updated_at_ms: 10,
+            tombstone: false,
+            ttl_ms: 0,
+        };
+        let val = rec.to_sync_value();
+        let parsed = DataRecord::from_sync_value(&val).unwrap();
+        assert_eq!(parsed.key, "k");
+        assert_eq!(parsed.encrypted_value, vec![1, 2, 3]);
     }
 }

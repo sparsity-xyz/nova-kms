@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::time::{Duration, sleep};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use nova_kms_rust::config::Config;
 use nova_kms_rust::server::app_router;
 use nova_kms_rust::state::AppState;
+use nova_kms_rust::sync::{node_tick, sync_tick};
 
 #[tokio::main]
 async fn main() {
@@ -31,13 +33,13 @@ async fn main() {
     tracing::info!("Starting nova-kms-rust");
     tracing::debug!("Loaded Config: {:?}", config);
 
-    let state = Arc::new(RwLock::new(AppState::new(config)));
+    let bind_addr = config.bind_addr.clone();
+    let state = Arc::new(RwLock::new(AppState::new(config).await));
+    start_background_tasks(state.clone());
     let app = app_router(state);
 
-    // Bind to 0.0.0.0:8000
-    let addr = "0.0.0.0:8000";
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    tracing::info!("Listening on {}", addr);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+    tracing::info!("Listening on {}", bind_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -68,4 +70,31 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("Shutting down signal received, initiating graceful shutdown");
+}
+
+fn start_background_tasks(state: Arc<RwLock<AppState>>) {
+    let node_tick_state = state.clone();
+    tokio::spawn(async move {
+        let _ = node_tick(&node_tick_state).await;
+        loop {
+            let interval = {
+                let s = node_tick_state.read().await;
+                s.config.kms_node_tick_seconds.max(1)
+            };
+            sleep(Duration::from_secs(interval)).await;
+            let _ = node_tick(&node_tick_state).await;
+        }
+    });
+
+    let sync_state = state;
+    tokio::spawn(async move {
+        loop {
+            let interval = {
+                let s = sync_state.read().await;
+                s.config.data_sync_interval_seconds.max(1)
+            };
+            sleep(Duration::from_secs(interval)).await;
+            let _ = sync_tick(&sync_state).await;
+        }
+    });
 }
