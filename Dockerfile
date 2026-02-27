@@ -32,5 +32,6 @@ COPY --from=builder /usr/src/nova-kms-rust/target/release/nova-kms-rust /app/nov
 # Expose default KMS port (8000)
 EXPOSE 8000
 
+ENV IN_ENCLAVE=true
 ENV RUST_LOG=info
 CMD ["/app/nova-kms-rust"]
