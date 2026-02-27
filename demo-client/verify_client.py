@@ -126,9 +126,16 @@ async def run_verification():
             mock_instance.zk_verified = True
             mock_instance.status = nova_registry.InstanceStatus.ACTIVE
 
-            with patch.object(client, "get_operators", return_value=["0xOp1"]):
-                with patch.object(client, "get_instance", return_value=mock_instance):
-                    await client.run_test_cycle()
+            mocked_nodes = [
+                {
+                    "instance": mock_instance,
+                    "instance_url": mock_instance.instance_url,
+                    "version_id": mock_instance.version_id,
+                    "instance_id": mock_instance.instance_id,
+                }
+            ]
+            with patch.object(client, "get_kms_nodes", return_value=mocked_nodes):
+                await client.run_test_cycle()
 
     # Check logs
     print("\nVerification Results:")

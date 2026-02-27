@@ -194,10 +194,13 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
 3.  **Request**: Node A sends `POST /sync` with PoP headers.
 4.  **Verification B**: 
     - Node B recovers $Wallet_A$ from $Sig\_A$.
-    - Node B authorizes $Wallet_A$ as a KMS peer using **NovaAppRegistry** state (same checks as App→KMS, with `require_app_id = KMS_APP_ID`):
+    - Node B validates that `X-KMS-Nonce` is valid base64, single-use, and unexpired.
+    - Node B authorizes $Wallet_A$ as a KMS peer using **PeerCache** (cache refreshed from `NovaAppRegistry` during `node_tick`):
         - Instance is ACTIVE and zkVerified
-        - App status is ACTIVE
+        - `app_id == KMS_APP_ID`
         - Version status is not REVOKED (ENROLLED or DEPRECATED)
+        - `teePubkey` is present
+      - `/sync` request path is cache-first (no synchronous `NovaAppRegistry` read in handler).
 5.  **Mutual Proof**: Node B returns its own signature on the Client's signature ($Sig\_A$) to prove receipt and processing:
     `NovaKMS:Response:<Sig_A>:<Wallet_B>`
     returned in header `X-KMS-Peer-Signature`.
@@ -224,7 +227,6 @@ sequenceDiagram
     autonumber
     participant A as KMS Node A (Client)
     participant B as KMS Node B (Server)
-    participant AppReg as Nova App Registry
 
     A->>B: GET /nonce
     B-->>A: Nonce_B
@@ -235,8 +237,7 @@ sequenceDiagram
     A->>B: POST /sync (Headers: Sig_A, Wallet_A, TS)
     
     B->>B: Recover Wallet_A from Sig_A
-    B->>AppReg: getInstanceByWallet(Wallet_A) + getApp/getVersion
-    AppReg-->>B: ACTIVE + zkVerified + App ACTIVE + Version not REVOKED
+    B->>B: Verify Wallet_A via PeerCache<br/>(ACTIVE + zkVerified + app_id==KMS_APP_ID + non-REVOKED version)
     
     Note over B: Create Response Message:<br/>"NovaKMS:Response:Sig_A:Wallet_B"
     Note over B: Sign with TEE Private Key (Sig_B)
@@ -264,6 +265,7 @@ KMS supports **Lightweight PoP** for high-performance app API calls.
 4.  **Authenticated Request**: App calls KMS API (e.g., `POST /kms/derive`) with PoP headers.
 5.  **Verification & Permission Management**: 
     - KMS recovers App wallet signer from $Sig\_A$.
+    - KMS validates that `X-App-Nonce` is valid base64, single-use, and unexpired.
     - KMS queries **NovaAppRegistry** using the `app_wallet` to find the corresponding **`app_id`**.
     - KMS verifies the app status is `ACTIVE`.
     - KMS uses the **`app_id`** to enforce permission boundaries (e.g., ensuring an app only accesses its own derived keys or KV namespace).
@@ -323,21 +325,37 @@ sequenceDiagram
 The `/kms/derive` endpoint allows an authorized app to derive deterministic keys for specific paths.
 
 ### Request Body (`POST /kms/derive`)
+
+`/kms/derive` uses E2E envelopes. The HTTP body is encrypted and contains the inner payload:
+
 ```json
 {
-  "path": "m/0/1",       // The derivation path string (e.g. BIP-32 style or custom)
-  "context": "signing",  // Optional context string for domain separation
-  "length": 32           // Optional length of the derived key in bytes (default 32)
+  "sender_tee_pubkey": "<app teePubkey hex>",
+  "nonce": "<hex>",
+  "encrypted_data": "<hex of JSON payload>"
+}
+```
+
+Inner JSON payload:
+
+```json
+{
+  "path": "m/0/1",
+  "context": "signing",
+  "length": 32
 }
 ```
 
 ### Response Body
+
+Response is also an E2E envelope. After decryption, payload shape is:
+
 ```json
 {
-  "app_id": 123,         // The verified Application ID
-  "path": "m/0/1",       // The path used for derivation
-  "key": "base64...",    // The derived key (Base64 encoded)
-  "length": 32           // The length of the derived key
+  "app_id": 123,
+  "path": "m/0/1",
+  "key": "base64...",
+  "length": 32
 }
 ```
 
@@ -347,7 +365,7 @@ The `/kms/derive` endpoint allows an authorized app to derive deterministic keys
 
 | Property | Mechanism |
 | :--- | :--- |
-| **Authenticity** | Signatures are recovered into wallet addresses and authorized against `NovaAppRegistry` state (apps and KMS peers are ACTIVE + zkVerified, App ACTIVE, Version not REVOKED). `KMSRegistry` additionally provides cluster coordination via `masterSecretHash`. |
+| **Authenticity** | Signatures are recovered into wallet addresses and authorized against `NovaAppRegistry`-derived state. App path (`/kms/*`) checks instance ACTIVE+zkVerified, App ACTIVE, Version not REVOKED; KMS peer path (`/sync`) checks cached peer ACTIVE+zkVerified, `app_id==KMS_APP_ID`, Version not REVOKED. `KMSRegistry` provides `masterSecretHash` coordination. |
 | **Freshness** | One-time nonces and tight timestamps prevent replay attacks. |
 | **Identity Binding** | Signatures include the recipient's wallet address, preventing "Reflection" or "Re-routing" attacks (a signature for Node B cannot be used to authenticate to Node C). |
 | **Bidirectional Trust** | Mutual signatures ensure both client and server are verified against on-chain status before sensitive data is processed. |
