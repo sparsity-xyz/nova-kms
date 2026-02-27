@@ -99,17 +99,10 @@ impl Namespace {
                     true
                 }
                 VCComparison::Concurrent => {
-                    if new_record.updated_at_ms > existing.updated_at_ms {
-                        let old_size = existing.approximate_size();
-                        let mut merged = new_record.clone();
-                        merged.version = VectorClock::merge(&existing.version, &new_record.version);
-                        self.records.put(key, merged);
-                        self.current_size = self.current_size + size - old_size;
-                        self.evict_if_needed();
-                        true
-                    } else if new_record.updated_at_ms == existing.updated_at_ms
-                        && new_record.encrypted_value > existing.encrypted_value
-                    {
+                    let should_replace = new_record.updated_at_ms > existing.updated_at_ms
+                        || (new_record.updated_at_ms == existing.updated_at_ms
+                            && new_record.encrypted_value > existing.encrypted_value);
+                    if should_replace {
                         let old_size = existing.approximate_size();
                         let mut merged = new_record.clone();
                         merged.version = VectorClock::merge(&existing.version, &new_record.version);

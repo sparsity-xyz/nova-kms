@@ -45,10 +45,10 @@ impl VectorClock {
             let v1 = self.get(&k);
             let v2 = other.get(&k);
 
-            if v1 < v2 {
-                self_is_less = true;
-            } else if v1 > v2 {
-                self_is_greater = true;
+            match v1.cmp(&v2) {
+                std::cmp::Ordering::Less => self_is_less = true,
+                std::cmp::Ordering::Greater => self_is_greater = true,
+                std::cmp::Ordering::Equal => {}
             }
         }
 

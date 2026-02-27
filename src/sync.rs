@@ -75,13 +75,15 @@ impl PeerCache {
 
         p.iter()
             .filter(|peer| {
-                if let Some(exc) = exclude_wallet
-                    && peer.tee_wallet_address.eq_ignore_ascii_case(exc)
+                if exclude_wallet
+                    .map(|exc| peer.tee_wallet_address.eq_ignore_ascii_case(exc))
+                    .unwrap_or(false)
                 {
                     return false;
                 }
-                if let Some(exp) = b.get(&peer.tee_wallet_address.to_lowercase())
-                    && now < *exp
+                if b.get(&peer.tee_wallet_address.to_lowercase())
+                    .map(|exp| now < *exp)
+                    .unwrap_or(false)
                 {
                     return false;
                 }
@@ -95,8 +97,9 @@ impl PeerCache {
         let now = now_secs();
         let p = self.peers.read().await;
         let b = self.blacklist.read().await;
-        if let Some(exp) = b.get(&wallet.to_lowercase())
-            && now < *exp
+        if b.get(&wallet.to_lowercase())
+            .map(|exp| now < *exp)
+            .unwrap_or(false)
         {
             return None;
         }
@@ -422,10 +425,11 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     {
         let mut s = state.write().await;
         s.is_operator = true;
-        if s.config.node_instance_url.trim().is_empty()
-            && let Some(own_peer) = own_peer.as_ref()
-        {
-            s.config.node_instance_url = own_peer.node_url.clone();
+        match own_peer.as_ref() {
+            Some(peer) if s.config.node_instance_url.trim().is_empty() => {
+                s.config.node_instance_url = peer.node_url.clone();
+            }
+            _ => {}
         }
     }
 
@@ -753,10 +757,8 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if is_envelope(&resp_json) {
-            if decrypt_json_envelope(state, &resp_json).await.is_err() {
-                continue;
-            }
+        if is_envelope(&resp_json) && decrypt_json_envelope(state, &resp_json).await.is_err() {
+            continue;
         }
         success += 1;
     }
@@ -930,9 +932,13 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             let s = state.read().await;
             s.sync_key
         };
-        if let Ok(snapshot_resp) =
-            post_sync_request_to_peer(state, &peer, &snapshot_req, sync_key).await
-            && let Some(data_obj) = snapshot_resp.get("data").and_then(|v| v.as_object())
+        let snapshot_resp = post_sync_request_to_peer(state, &peer, &snapshot_req, sync_key)
+            .await
+            .ok();
+        if let Some(data_obj) = snapshot_resp
+            .as_ref()
+            .and_then(|resp| resp.get("data"))
+            .and_then(|v| v.as_object())
         {
             let records = parse_sync_data_object(data_obj);
             for (app_id, record) in records {

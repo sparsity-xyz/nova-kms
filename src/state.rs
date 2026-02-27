@@ -82,15 +82,15 @@ impl AppState {
         let service_available = false;
         let unavailable_reason = "initializing".to_string();
 
-        if let Some(hex_secret) = config.master_secret_hex.clone() {
-            if let Ok(bytes) = hex::decode(hex_secret.trim_start_matches("0x"))
-                && bytes.len() == 32
-            {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                master_secret.initialize_generated(arr).await;
-                sync_key = Some(derive_sync_key(&crate::crypto::MasterSecret { bytes: arr }));
-            }
+        let decoded_master_secret = config.master_secret_hex.clone().and_then(|hex_secret| {
+            let bytes = hex::decode(hex_secret.trim_start_matches("0x")).ok()?;
+            if bytes.len() == 32 { Some(bytes) } else { None }
+        });
+        if let Some(bytes) = decoded_master_secret {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            master_secret.initialize_generated(arr).await;
+            sync_key = Some(derive_sync_key(&crate::crypto::MasterSecret { bytes: arr }));
         }
 
         Self {

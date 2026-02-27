@@ -74,10 +74,10 @@ async fn decrypt_envelope_payload(
         .get("sender_tee_pubkey")
         .and_then(|v| v.as_str())
         .ok_or_else(|| KmsError::ValidationError("Missing sender_tee_pubkey".to_string()))?;
-    if let Some(expected) = expected_sender_pubkey_hex
-        && !expected.is_empty()
-        && normalize_hex(expected) != normalize_hex(sender_pub)
-    {
+    let mismatched_sender = expected_sender_pubkey_hex.is_some_and(|expected| {
+        !expected.is_empty() && normalize_hex(expected) != normalize_hex(sender_pub)
+    });
+    if mismatched_sender {
         return Err(KmsError::Forbidden(
             "sender_tee_pubkey does not match on-chain registration".to_string(),
         ));
@@ -118,22 +118,25 @@ async fn encrypt_payload(
     payload: &Value,
     receiver_pubkey_hex: Option<&str>,
 ) -> Result<Value, KmsError> {
-    if let Some(receiver_pubkey_hex) = receiver_pubkey_hex
-        && !receiver_pubkey_hex.is_empty()
-    {
-        let plaintext = canonical_json(payload)?;
-        let sender_pubkey = hex::encode(state.odyn.get_encryption_public_key_der().await?);
-        let encrypted = state.odyn.encrypt(&plaintext, receiver_pubkey_hex).await?;
-        return Ok(json!({
-            "sender_tee_pubkey": sender_pubkey,
-            "nonce": normalize_hex(&encrypted.nonce),
-            "encrypted_data": normalize_hex(&encrypted.encrypted_data),
-        }));
+    let Some(receiver_pubkey_hex) = receiver_pubkey_hex else {
+        return Err(KmsError::ValidationError(
+            "Receiver teePubkey required for response encryption".to_string(),
+        ));
+    };
+    if receiver_pubkey_hex.is_empty() {
+        return Err(KmsError::ValidationError(
+            "Receiver teePubkey required for response encryption".to_string(),
+        ));
     }
 
-    Err(KmsError::ValidationError(
-        "Receiver teePubkey required for response encryption".to_string(),
-    ))
+    let plaintext = canonical_json(payload)?;
+    let sender_pubkey = hex::encode(state.odyn.get_encryption_public_key_der().await?);
+    let encrypted = state.odyn.encrypt(&plaintext, receiver_pubkey_hex).await?;
+    Ok(json!({
+        "sender_tee_pubkey": sender_pubkey,
+        "nonce": normalize_hex(&encrypted.nonce),
+        "encrypted_data": normalize_hex(&encrypted.encrypted_data),
+    }))
 }
 
 async fn maybe_add_app_response_signature(
@@ -147,8 +150,10 @@ async fn maybe_add_app_response_signature(
             return;
         };
         let msg = format!("NovaKMS:Response:{}:{}", client_sig, current_wallet);
-        if let Ok((sig, _)) = sign_message_for_node(&state.config, &state.odyn, &msg).await
-            && let Ok(value) = sig.parse()
+        if let Some(value) = sign_message_for_node(&state.config, &state.odyn, &msg)
+            .await
+            .ok()
+            .and_then(|(sig, _)| sig.parse().ok())
         {
             response_headers.insert("X-KMS-Response-Signature", value);
         }
@@ -164,8 +169,10 @@ async fn maybe_add_peer_response_signature(
         return;
     };
     let msg = format!("NovaKMS:Response:{}:{}", caller_sig, current_wallet);
-    if let Ok((sig, _)) = sign_message_for_node(&state.config, &state.odyn, &msg).await
-        && let Ok(value) = sig.parse()
+    if let Some(value) = sign_message_for_node(&state.config, &state.odyn, &msg)
+        .await
+        .ok()
+        .and_then(|(sig, _)| sig.parse().ok())
     {
         response_headers.insert("X-KMS-Peer-Signature", value);
     }
@@ -416,7 +423,7 @@ async fn derive_key(
         });
         let encrypted =
             encrypt_payload(&s, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await?;
-        return Ok((StatusCode::OK, response_headers, Json(encrypted)));
+        Ok((StatusCode::OK, response_headers, Json(encrypted)))
     }
 }
 
@@ -656,12 +663,15 @@ async fn sync_handler(
             .as_object()
             .ok_or_else(|| KmsError::ValidationError("Invalid sync payload".to_string()))?;
 
-        if let Some(sender_wallet) = payload_obj.get("sender_wallet").and_then(|v| v.as_str()) {
-            if crate::auth::canonical_wallet(sender_wallet)? != identity.tee_wallet {
-                return Err(KmsError::Unauthorized(
-                    "sender_wallet does not match PoP signature".to_string(),
-                ));
-            }
+        let sender_wallet = payload_obj
+            .get("sender_wallet")
+            .and_then(|v| v.as_str())
+            .map(crate::auth::canonical_wallet)
+            .transpose()?;
+        if sender_wallet.is_some_and(|sender| sender != identity.tee_wallet) {
+            return Err(KmsError::Unauthorized(
+                "sender_wallet does not match PoP signature".to_string(),
+            ));
         }
 
         let sync_type = payload_obj
@@ -669,18 +679,19 @@ async fn sync_handler(
             .and_then(|v| v.as_str())
             .unwrap_or_default();
 
-        if let Some(sync_key) = s.sync_key
-            && sync_type != "master_secret_request"
-        {
-            let sig = headers
-                .get("x-sync-signature")
-                .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| KmsError::Unauthorized("Missing HMAC signature".to_string()))?;
-            let signed_payload = if is_envelope(&body) { &body } else { &payload };
-            let canonical = canonical_json(signed_payload)?;
-            if !verify_hmac_hex(&sync_key, canonical.as_bytes(), sig) {
-                return Err(KmsError::Unauthorized("Invalid HMAC signature".to_string()));
+        match (s.sync_key, sync_type) {
+            (Some(sync_key), st) if st != "master_secret_request" => {
+                let sig = headers
+                    .get("x-sync-signature")
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| KmsError::Unauthorized("Missing HMAC signature".to_string()))?;
+                let signed_payload = if is_envelope(&body) { &body } else { &payload };
+                let canonical = canonical_json(signed_payload)?;
+                if !verify_hmac_hex(&sync_key, canonical.as_bytes(), sig) {
+                    return Err(KmsError::Unauthorized("Invalid HMAC signature".to_string()));
+                }
             }
+            _ => {}
         }
 
         let result = match sync_type {

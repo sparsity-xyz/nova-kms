@@ -365,10 +365,9 @@ impl CachedNovaRegistry {
 
     pub async fn get_app(&self, app_id: u64) -> Result<AppInfo, KmsError> {
         let now = now_secs();
-        if let Some(cached) = self.app_cache.read().await.get(&app_id).cloned()
-            && now <= cached.expires_at
-        {
-            return Ok(cached.value);
+        match self.app_cache.read().await.get(&app_id).cloned() {
+            Some(cached) if now <= cached.expires_at => return Ok(cached.value),
+            _ => {}
         }
         self.app_cache.write().await.remove(&app_id);
 
@@ -386,10 +385,9 @@ impl CachedNovaRegistry {
     pub async fn get_version(&self, app_id: u64, version_id: u64) -> Result<VersionInfo, KmsError> {
         let key = (app_id, version_id);
         let now = now_secs();
-        if let Some(cached) = self.version_cache.read().await.get(&key).cloned()
-            && now <= cached.expires_at
-        {
-            return Ok(cached.value);
+        match self.version_cache.read().await.get(&key).cloned() {
+            Some(cached) if now <= cached.expires_at => return Ok(cached.value),
+            _ => {}
         }
         self.version_cache.write().await.remove(&key);
 
@@ -410,10 +408,9 @@ impl CachedNovaRegistry {
     ) -> Result<RuntimeInstanceInfo, KmsError> {
         let key = wallet.to_lowercase();
         let now = now_secs();
-        if let Some(cached) = self.wallet_cache.read().await.get(&key).cloned()
-            && now <= cached.expires_at
-        {
-            return Ok(cached.value);
+        match self.wallet_cache.read().await.get(&key).cloned() {
+            Some(cached) if now <= cached.expires_at => return Ok(cached.value),
+            _ => {}
         }
         self.wallet_cache.write().await.remove(&key);
 
@@ -435,15 +432,15 @@ impl CachedNovaRegistry {
 
     pub async fn get_active_instances(&self, app_id: u64) -> Result<Vec<String>, KmsError> {
         let now = now_secs();
-        if let Some(cached) = self
+        match self
             .active_instances_cache
             .read()
             .await
             .get(&app_id)
             .cloned()
-            && now <= cached.expires_at
         {
-            return Ok(cached.value);
+            Some(cached) if now <= cached.expires_at => return Ok(cached.value),
+            _ => {}
         }
         self.active_instances_cache.write().await.remove(&app_id);
 
@@ -494,18 +491,16 @@ fn extract_raw_tx(value: &Value) -> Option<String> {
         "transaction",
     ];
     for key in direct_keys {
-        if let Some(v) = value.get(key).and_then(|v| v.as_str())
-            && v.starts_with("0x")
-        {
-            return Some(v.to_string());
+        match value.get(key).and_then(|v| v.as_str()) {
+            Some(v) if v.starts_with("0x") => return Some(v.to_string()),
+            _ => {}
         }
     }
     let nested = value.get("payload")?;
     for key in direct_keys {
-        if let Some(v) = nested.get(key).and_then(|v| v.as_str())
-            && v.starts_with("0x")
-        {
-            return Some(v.to_string());
+        match nested.get(key).and_then(|v| v.as_str()) {
+            Some(v) if v.starts_with("0x") => return Some(v.to_string()),
+            _ => {}
         }
     }
     None
