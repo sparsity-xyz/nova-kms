@@ -455,13 +455,16 @@ nova-kms/
 │   │   └── DeployKMSRegistry.s.sol
 │   └── test/
 │       └── KMSRegistry.t.sol
-├── enclave/
-│   ├── app.py                 # Main application
-│   ├── auth.py                # Authorization logic
-│   ├── nova_registry.py       # NovaAppRegistry client
+├── src/                       # Main Rust application
+│   ├── main.rs                # Tokio async entry point
+│   ├── server.rs              # Axum request handlers
+│   ├── auth.rs                # Authorization logic (PoP and Registry)
+│   ├── registry.rs            # NovaAppRegistry client wrapper (Alloy)
+│   ├── store.rs               # In-memory vector clock KVS
+│   ├── crypto.rs              # Crypto primitives (Ring)
 │   └── ...
 ├── scripts/                   # Development scripts
-├── Dockerfile                 # Production Docker image
+├── Dockerfile                 # Multi-stage production Docker image
 ├── Makefile                   # Project automation
 └── README.md
 ```

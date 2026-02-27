@@ -98,22 +98,27 @@ To prevent cluster fragmentation, nodes follow a strict startup protocol:
 
 ## Project Structure
 
+## Project Structure
+
 ```
 nova-kms/
 ├── contracts/           # Solidity (KMSRegistry + tests)
 ├── demo-client/         # Reference Client (Python, manual PoP/E2E flow)
 ├── demo-client-enclaver/ # Reference Client (Python, using enclaver /v1/kms/*)
-├── enclave/             # Python KMS application
-│   ├── app.py           # FastAPI entry point
-│   ├── auth.py          # PoP auth & Registry integration
-│   ├── kdf.py           # Key Derivation & Master Secret management
-│   ├── secure_channel.py# E2E Encryption (P-384) & ECDH
-│   ├── sync_manager.py  # Peer sync & HMAC logic
+├── src/                 # Rust KMS application
+│   ├── main.rs          # Tokio entry point & graceful shutdown
+│   ├── server.rs        # Axum router & REST API definitions
+│   ├── auth.rs          # PoP auth & Registry integration middleware
+│   ├── crypto.rs        # HKDF / AES-GCM / HMAC utilizing `ring`
+│   ├── sync.rs          # Peer discovery, vector clock active sync
+│   ├── store.rs         # Namespaced thread-safe LRU Key-Value Store
+│   ├── odyn.rs          # Enclaver TEE Client API binding
 │   └── ...
-├── tests/               # Python (pytest) & Solidity (forge) tests
+├── tests/               # Behavior Parity comparisons checks
 ├── docs/                # Detailed Documentation
-├── Dockerfile           # Production Docker image
-└── Makefile             # Developer commands
+├── Dockerfile           # Multi-stage container image for AWS Nitro
+├── enclaver.yaml        # Enclaver deployment properties
+└── Makefile             # Developer commands (Cargo wrappers)
 ```
 
 ## Quick Start
