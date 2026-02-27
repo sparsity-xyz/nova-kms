@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -62,7 +61,9 @@ impl VectorClock {
         let mut merged = VectorClock::new();
         let all_keys = v1.clocks.keys().chain(v2.clocks.keys());
         for k in all_keys {
-            merged.clocks.insert(k.clone(), std::cmp::max(v1.get(k), v2.get(k)));
+            merged
+                .clocks
+                .insert(k.clone(), std::cmp::max(v1.get(k), v2.get(k)));
         }
         merged
     }

@@ -1,7 +1,6 @@
 use crate::models::{DataRecord, VCComparison, VectorClock};
 use lru::LruCache;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -44,16 +43,16 @@ impl Namespace {
         self.current_size += size;
         self.evict_if_needed();
     }
-    
+
     pub fn delete(&mut self, key: &str, node_id: &str, current_time: u64) {
         self.evict_if_needed();
-        
+
         let mut vc = VectorClock::new();
         if let Some(ext) = self.records.get(key) {
             vc = ext.version.clone();
         }
         vc.increment(node_id);
-        
+
         let record = DataRecord {
             key: key.to_string(),
             encrypted_value: Vec::new(),
@@ -62,7 +61,7 @@ impl Namespace {
             tombstone: true,
             ttl_ms: None, // Tombstones persist indefinitely unless garbage collected
         };
-        
+
         self.put(key, record);
     }
 
@@ -116,17 +115,15 @@ impl Namespace {
             }
         }
     }
-    
+
     pub fn get_snapshot(&self) -> Vec<DataRecord> {
         self.records.iter().map(|(_, v)| v.clone()).collect()
     }
-    
+
     pub fn cleanup_tombstones(&mut self, cutoff_time: u64) {
         let mut keys_to_remove = Vec::new();
         for (k, v) in self.records.iter() {
-            if v.tombstone && v.updated_at_ms < cutoff_time {
-                keys_to_remove.push(k.clone());
-            } else if v.is_expired(cutoff_time) {
+            if (v.tombstone && v.updated_at_ms < cutoff_time) || v.is_expired(cutoff_time) {
                 keys_to_remove.push(k.clone());
             }
         }
@@ -154,7 +151,10 @@ impl DataStore {
     pub async fn get_namespace(&self, app_id: u64) -> Arc<RwLock<Namespace>> {
         let mut map = self.namespaces.write().await;
         let ns = map.entry(app_id).or_insert_with(|| {
-            Arc::new(RwLock::new(Namespace::new(app_id, self.max_app_storage_bytes)))
+            Arc::new(RwLock::new(Namespace::new(
+                app_id,
+                self.max_app_storage_bytes,
+            )))
         });
         ns.clone()
     }

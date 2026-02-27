@@ -1,6 +1,6 @@
 use figment::{
-    providers::{Env, Format, Toml, Serialized},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 
@@ -8,25 +8,25 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub in_enclave: bool,
     pub log_level: String,
-    
+
     // Contract Addresses
     pub nova_app_registry_address: String,
     pub kms_registry_address: String,
-    
+
     // Network & Sync
     pub kms_app_id: u64,
     pub node_url: String, // RPC for Web3
     pub node_wallet: String,
     pub sync_interval_seconds: u64,
     pub peer_refresh_interval_seconds: u64,
-    
+
     // Storage Engine Limits
     pub max_app_storage_bytes: usize,
     pub max_kv_value_size_bytes: usize,
-    
+
     // Security & Auth
     pub pop_timeout_seconds: u64,
-    
+
     // Rate Limiting
     pub rate_limit_per_minute: u64,
     pub nonce_rate_limit_per_minute: u64,
@@ -54,10 +54,11 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load() -> Result<Self, figment::Error> {
+    pub fn load() -> Result<Self, Box<figment::Error>> {
         Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file("NovaKms.toml"))
             .merge(Env::raw())
             .extract()
+            .map_err(Box::new)
     }
 }

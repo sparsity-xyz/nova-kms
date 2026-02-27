@@ -1,5 +1,5 @@
 # Build Stage
-FROM docker.io/library/rust:1.76-slim-bookworm AS builder
+FROM docker.io/library/rust:1.85-slim-bookworm AS builder
 
 WORKDIR /usr/src/nova-kms-rust
 

@@ -1,4 +1,4 @@
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::primitives::Address;
 use alloy::providers::{ProviderBuilder, RootProvider};
 use alloy::sol;
 use alloy::transports::http::{Client, Http};
@@ -46,15 +46,20 @@ sol! {
 }
 
 pub struct RegistryClient {
-    pub nova_registry: INovaAppRegistry::INovaAppRegistryInstance<Http<Client>, RootProvider<Http<Client>>>,
+    pub nova_registry:
+        INovaAppRegistry::INovaAppRegistryInstance<Http<Client>, RootProvider<Http<Client>>>,
     pub kms_registry: IKMSRegistry::IKMSRegistryInstance<Http<Client>, RootProvider<Http<Client>>>,
 }
 
 impl RegistryClient {
-    pub fn new(rpc_url: &str, nova_address: &str, kms_address: &str) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        rpc_url: &str,
+        nova_address: &str,
+        kms_address: &str,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let url = reqwest::Url::parse(rpc_url)?;
         let provider = ProviderBuilder::new().on_http(url);
-        
+
         let nova_addr = Address::from_str(nova_address)?;
         let kms_addr = Address::from_str(kms_address)?;
 

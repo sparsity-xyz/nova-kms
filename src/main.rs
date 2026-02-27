@@ -1,13 +1,10 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tracing::info; // Added for tracing::info! macro
-use std::net::SocketAddr; // Added as per instruction
-use std::str::FromStr; // Added as per instruction
 
 use nova_kms_rust::config::Config;
+use nova_kms_rust::server::app_router;
 use nova_kms_rust::state::AppState;
-use nova_kms_rust::server::app_router; // Added for server::app_router
 
 #[tokio::main]
 async fn main() {
@@ -35,7 +32,7 @@ async fn main() {
     tracing::debug!("Loaded Config: {:?}", config);
 
     let state = Arc::new(RwLock::new(AppState::new(config)));
-    let app = server::app_router(state);
+    let app = app_router(state);
 
     // Bind to 0.0.0.0:8000
     let addr = "0.0.0.0:8000";
