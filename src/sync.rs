@@ -5,6 +5,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::Duration;
@@ -70,10 +71,11 @@ impl PeerCache {
 
     pub async fn get_peers(&self, exclude_wallet: Option<&str>) -> Vec<Peer> {
         let now = now_secs();
-        let p = self.peers.read().await;
-        let b = self.blacklist.read().await;
+        let peers_snapshot = self.peers.read().await.clone();
+        let blacklist_snapshot = self.blacklist.read().await.clone();
 
-        p.iter()
+        peers_snapshot
+            .into_iter()
             .filter(|peer| {
                 if exclude_wallet
                     .map(|exc| peer.tee_wallet_address.eq_ignore_ascii_case(exc))
@@ -81,7 +83,8 @@ impl PeerCache {
                 {
                     return false;
                 }
-                if b.get(&peer.tee_wallet_address.to_lowercase())
+                if blacklist_snapshot
+                    .get(&peer.tee_wallet_address.to_lowercase())
                     .map(|exp| now < *exp)
                     .unwrap_or(false)
                 {
@@ -89,20 +92,23 @@ impl PeerCache {
                 }
                 true
             })
-            .cloned()
             .collect()
     }
 
     pub async fn get_peer_by_wallet(&self, wallet: &str) -> Option<Peer> {
         let now = now_secs();
-        let p = self.peers.read().await;
-        let b = self.blacklist.read().await;
-        if b.get(&wallet.to_lowercase())
+        let wallet_key = wallet.to_lowercase();
+        let is_blacklisted = self
+            .blacklist
+            .read()
+            .await
+            .get(&wallet_key)
             .map(|exp| now < *exp)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if is_blacklisted {
             return None;
         }
+        let p = self.peers.read().await;
         p.iter()
             .find(|peer| peer.tee_wallet_address.eq_ignore_ascii_case(wallet))
             .cloned()
@@ -190,11 +196,13 @@ impl PeerCache {
             new_peers.push(peer);
         }
 
-        let mut p = self.peers.write().await;
-        *p = new_peers;
-        let mut last = self.last_refresh.write().await;
-        *last = now_secs();
-        Ok(p.len())
+        let peer_count = new_peers.len();
+        {
+            let mut p = self.peers.write().await;
+            *p = new_peers;
+        }
+        *self.last_refresh.write().await = now_secs();
+        Ok(peer_count)
     }
 
     pub async fn verify_kms_peer(&self, wallet: &str, kms_app_id: u64) -> Result<Peer, KmsError> {
@@ -354,17 +362,14 @@ pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
 }
 
 pub async fn refresh_peers_if_needed(state: &SharedState) -> Result<(), KmsError> {
-    let (ttl, stale) = {
+    let (ttl, peer_cache) = {
         let s = state.read().await;
-        let ttl = s.config.peer_cache_ttl_seconds;
-        let stale = s.peer_cache.is_stale(ttl).await;
-        (ttl, stale)
+        (s.config.peer_cache_ttl_seconds, Arc::clone(&s.peer_cache))
     };
-    if !stale || ttl == 0 {
+    if ttl == 0 || !peer_cache.is_stale(ttl).await {
         return Ok(());
     }
-    let s = state.read().await;
-    s.peer_cache.refresh_from_chain(state).await?;
+    peer_cache.refresh_from_chain(state).await?;
     Ok(())
 }
 
@@ -390,20 +395,19 @@ async fn set_service_availability(state: &SharedState, available: bool, reason: 
 }
 
 pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
-    {
+    let peer_cache = {
         let s = state.read().await;
-        if let Err(err) = s.peer_cache.refresh_from_chain(state).await {
-            tracing::warn!("Peer cache refresh failed in node_tick: {}", err);
-        }
+        Arc::clone(&s.peer_cache)
+    };
+    if let Err(err) = peer_cache.refresh_from_chain(state).await {
+        tracing::warn!("Peer cache refresh failed in node_tick: {}", err);
     }
 
-    let (node_wallet, peers) = {
+    let node_wallet = {
         let s = state.read().await;
-        (
-            s.config.node_wallet.clone(),
-            s.peer_cache.get_peers(None).await,
-        )
+        s.config.node_wallet.clone()
     };
+    let peers = peer_cache.get_peers(None).await;
 
     let self_wallet = node_wallet.to_lowercase();
     let self_in_membership = peers
@@ -640,7 +644,7 @@ fn is_envelope(v: &Value) -> bool {
 pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
     refresh_peers_if_needed(state).await?;
 
-    let (sync_key, node_wallet, deltas_payload, peers) = {
+    let (sync_key, node_wallet, deltas_payload, peer_cache) = {
         let mut s = state.write().await;
         if !s.service_available {
             return Ok(0);
@@ -657,9 +661,14 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         }
 
         let node_wallet = s.config.node_wallet.clone();
-        let peers = s.peer_cache.get_peers(Some(&node_wallet)).await;
-        (sync_key, node_wallet, serialize_deltas(&deltas), peers)
+        (
+            sync_key,
+            node_wallet,
+            serialize_deltas(&deltas),
+            Arc::clone(&s.peer_cache),
+        )
     };
+    let peers = peer_cache.get_peers(Some(&node_wallet)).await;
 
     if peers.is_empty() {
         return Ok(0);
@@ -864,18 +873,16 @@ async fn post_sync_request_to_peer(
 
 pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, KmsError> {
     refresh_peers_if_needed(state).await?;
-    let peers = {
+    let (node_wallet, peer_cache) = {
         let s = state.read().await;
-        s.peer_cache.get_peers(Some(&s.config.node_wallet)).await
+        (s.config.node_wallet.clone(), Arc::clone(&s.peer_cache))
     };
+    let peers = peer_cache.get_peers(Some(&node_wallet)).await;
     if peers.is_empty() {
         return Ok(false);
     }
 
-    let local_wallet = {
-        let s = state.read().await;
-        s.config.node_wallet.clone()
-    };
+    let local_wallet = node_wallet;
 
     for peer in peers {
         let local_secret = p384::SecretKey::random(&mut p384::elliptic_curve::rand_core::OsRng);

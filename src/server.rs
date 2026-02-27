@@ -214,12 +214,16 @@ async fn health_handler() -> (StatusCode, Json<Value>) {
 
 async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoResponse, KmsError> {
     let mut response = json!({});
+    let peer_cache = {
+        let s = state.read().await;
+        s.peer_cache.clone()
+    };
+    let peer_count = peer_cache.get_peers(None).await.len();
     let (
         node_wallet,
         node_url,
         kms_registry_address,
         kms_app_id,
-        peer_count,
         is_operator,
         is_init,
         init_state,
@@ -231,7 +235,6 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
         tee_pubkey_hex,
     ) = {
         let s = state.read().await;
-        let peer_count = s.peer_cache.get_peers(None).await.len();
         let is_init = s.master_secret.is_initialized().await;
         let init_state = s.master_secret.init_state().await;
         let synced_from = s.master_secret.synced_from().await;
@@ -245,7 +248,6 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
             s.config.node_instance_url.clone(),
             s.config.kms_registry_address.clone(),
             s.config.kms_app_id,
-            peer_count,
             s.is_operator,
             is_init,
             init_state,
@@ -309,10 +311,11 @@ async fn nonce_handler(
 }
 
 async fn nodes_handler(State(state): State<SharedState>) -> Result<impl IntoResponse, KmsError> {
-    let peers = {
+    let peer_cache = {
         let s = state.read().await;
-        s.peer_cache.get_peers(None).await
+        s.peer_cache.clone()
     };
+    let peers = peer_cache.get_peers(None).await;
 
     let operators: Vec<Value> = peers
         .into_iter()
