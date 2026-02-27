@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     response::Response,
@@ -9,6 +9,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use crate::auth::{
     authenticate_app, authenticate_kms_peer, current_node_signing_wallet, sign_message_for_node,
@@ -275,9 +276,26 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
     Ok((StatusCode::OK, Json(response)))
 }
 
-async fn nonce_handler(State(state): State<SharedState>) -> Result<impl IntoResponse, KmsError> {
+async fn nonce_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+) -> Result<impl IntoResponse, KmsError> {
+    let client_key = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| connect_info.map(|ci| ci.0.ip().to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
     let nonce = {
         let s = state.read().await;
+        if !s.nonce_rate_limiter.allow(&client_key).await {
+            return Err(KmsError::RateLimitExceeded);
+        }
         s.nonce_store.issue_nonce().await?
     };
     Ok((StatusCode::OK, Json(json!({ "nonce": nonce }))))
@@ -721,4 +739,153 @@ async fn sync_handler(
 
     let _ = response_receiver_pubkey;
     Ok((StatusCode::OK, response_headers, Json(response_body)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::state::AppState;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tower::ServiceExt;
+
+    async fn build_router(nonce_rate_limit_per_minute: u64) -> Router {
+        let mut cfg = Config::default();
+        cfg.in_enclave = false;
+        cfg.node_url = "http://127.0.0.1:1".to_string();
+        cfg.nonce_rate_limit_per_minute = nonce_rate_limit_per_minute;
+        let state = Arc::new(RwLock::new(AppState::new(cfg).await));
+        app_router(state)
+    }
+
+    async fn response_json(resp: Response) -> Value {
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let app = build_router(30).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["status"], "healthy");
+    }
+
+    #[tokio::test]
+    async fn test_nonce_returns_base64_16_bytes() {
+        let app = build_router(30).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nonce")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        let nonce = json["nonce"].as_str().unwrap();
+        let decoded = b64.decode(nonce.as_bytes()).unwrap();
+        assert_eq!(decoded.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_nonce_rate_limit_enforced() {
+        let app = build_router(1).await;
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/nonce")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nonce")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let json = response_json(second).await;
+        assert_eq!(json["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn test_kms_derive_blocked_when_service_unavailable() {
+        let app = build_router(30).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/kms/derive")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"path":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_sync_requires_master_secret_initialization() {
+        let app = build_router(30).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"type":"delta","sender_wallet":"0x0","data":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = response_json(response).await;
+        assert_eq!(json["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_nodes_endpoint_returns_empty_list_by_default() {
+        let app = build_router(30).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nodes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["count"], 0);
+        assert!(json["operators"].as_array().unwrap().is_empty());
+    }
 }

@@ -4,7 +4,7 @@
 
 `nova-kms` now uses Rust as the primary node implementation. Testing is split into:
 
-- Rust unit tests (`cargo test`) for auth/crypto/store/sync primitives.
+- Rust unit tests (`cargo test`) for auth/crypto/store/sync/server primitives.
 - Python parity test (`tests/compare_behavior.py`) to verify HKDF + AES-GCM compatibility against the Python reference algorithm.
 - Solidity tests (`contracts/`, Foundry) for `KMSRegistry`.
 
@@ -30,6 +30,8 @@ Current Rust tests cover:
 - `auth.rs`
   - nonce issue/consume replay protection
   - wallet canonicalization
+  - nonce base64 encoding validation
+  - KMS peer PoP checks (stale timestamp, replay nonce, wallet-header mismatch)
   - EIP-191 signature round-trip verification
 - `crypto.rs`
   - HKDF derivation (path/context separation)
@@ -49,6 +51,14 @@ Current Rust tests cover:
   - `sync_tick` availability gate behavior
   - peer blacklist cache eviction
   - peer `/status` probe metadata capture
+  - incoming sync record validation (oversize payload, future timestamp, invalid ciphertext)
+- `server.rs`
+  - `/health`, `/nodes`, `/nonce` behavior
+  - `/nonce` token-bucket rate limiting
+  - `/kms/*` service availability gate
+  - `/sync` readiness gate (master secret required)
+- `rate_limiter.rs`
+  - token bucket allow/deny and refill behavior
 - `registry.rs`
   - `setMasterSecretHash` calldata encoding
   - Odyn signed-tx payload extraction variants
@@ -78,3 +88,9 @@ Expected: script prints all checks as `True` and ends with success.
 
 - The parity script intentionally does not depend on legacy `enclave/` source files; it embeds the Python reference HKDF/AES logic directly.
 - For full end-to-end cluster sync validation, run at least two nodes and execute sync flows (`/sync` delta + snapshot + master-secret request) under the same registry/network configuration.
+- For coverage details, run:
+
+```bash
+cd nova-kms
+cargo llvm-cov --workspace --all-features --summary-only
+```

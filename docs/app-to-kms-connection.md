@@ -142,6 +142,7 @@ Where:
 **Wallet canonicalization**: `KMS_Wallet` MUST be a canonical Ethereum address string: `0x` + 40 lowercase hex characters.
 
 Server-side logic in `src/auth.rs` (`authenticate_app`):
+- nonce must be valid base64 text
 - nonce must be single-use and unexpired (it is consumed)
 - timestamp must be within the allowed window (`POP_MAX_AGE_SECONDS`)
 - the recovered wallet from the signature is the real identity (`X-App-Wallet` is an optional hint, but if provided must match)

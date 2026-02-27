@@ -1163,4 +1163,99 @@ mod tests {
 
         handle.abort();
     }
+
+    #[tokio::test]
+    async fn test_validate_incoming_record_rejects_oversized_value() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        config.max_kv_value_size_bytes = 16;
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let record = DataRecord {
+            key: "big".to_string(),
+            encrypted_value: vec![0x42; 200], // > max + overhead (16 + 128)
+            version: vc,
+            updated_at_ms: now_ms(),
+            tombstone: false,
+            ttl_ms: 0,
+        };
+
+        assert!(!validate_incoming_record(&state, 49, &record).await);
+    }
+
+    #[tokio::test]
+    async fn test_validate_incoming_record_rejects_future_timestamp() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        config.max_clock_skew_ms = 100;
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let record = DataRecord {
+            key: "future".to_string(),
+            encrypted_value: vec![],
+            version: vc,
+            updated_at_ms: now_ms().saturating_add(1_000),
+            tombstone: true,
+            ttl_ms: 0,
+        };
+
+        assert!(!validate_incoming_record(&state, 49, &record).await);
+    }
+
+    #[tokio::test]
+    async fn test_validate_incoming_record_rejects_short_ciphertext_in_enclave_mode() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        {
+            let mut s = state.write().await;
+            s.config.in_enclave = true;
+        }
+
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let record = DataRecord {
+            key: "short-ct".to_string(),
+            encrypted_value: vec![0u8; 20], // < 12 nonce + 16 tag
+            version: vc,
+            updated_at_ms: now_ms(),
+            tombstone: false,
+            ttl_ms: 0,
+        };
+
+        assert!(!validate_incoming_record(&state, 49, &record).await);
+    }
+
+    #[tokio::test]
+    async fn test_validate_incoming_record_rejects_invalid_ciphertext_in_enclave_mode() {
+        let mut config = Config::default();
+        config.in_enclave = false;
+        config.node_url = "http://127.0.0.1:1".to_string();
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        {
+            let mut s = state.write().await;
+            s.config.in_enclave = true;
+            s.master_secret.initialize_generated([7u8; 32]).await;
+        }
+
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let record = DataRecord {
+            key: "bad-ct".to_string(),
+            encrypted_value: vec![0u8; 40], // long enough shape, fails auth tag check
+            version: vc,
+            updated_at_ms: now_ms(),
+            tombstone: false,
+            ttl_ms: 0,
+        };
+
+        assert!(!validate_incoming_record(&state, 49, &record).await);
+    }
 }

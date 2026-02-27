@@ -194,6 +194,7 @@ Since every KMS node's identity is already verified via ZKP and recorded on-chai
 3.  **Request**: Node A sends `POST /sync` with PoP headers.
 4.  **Verification B**: 
     - Node B recovers $Wallet_A$ from $Sig\_A$.
+    - Node B validates that `X-KMS-Nonce` is valid base64, single-use, and unexpired.
     - Node B authorizes $Wallet_A$ as a KMS peer using **PeerCache** (cache refreshed from `NovaAppRegistry` during `node_tick`):
         - Instance is ACTIVE and zkVerified
         - `app_id == KMS_APP_ID`
@@ -264,6 +265,7 @@ KMS supports **Lightweight PoP** for high-performance app API calls.
 4.  **Authenticated Request**: App calls KMS API (e.g., `POST /kms/derive`) with PoP headers.
 5.  **Verification & Permission Management**: 
     - KMS recovers App wallet signer from $Sig\_A$.
+    - KMS validates that `X-App-Nonce` is valid base64, single-use, and unexpired.
     - KMS queries **NovaAppRegistry** using the `app_wallet` to find the corresponding **`app_id`**.
     - KMS verifies the app status is `ACTIVE`.
     - KMS uses the **`app_id`** to enforce permission boundaries (e.g., ensuring an app only accesses its own derived keys or KV namespace).

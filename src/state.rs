@@ -5,6 +5,7 @@ use crate::auth::{NonceStore, canonical_wallet};
 use crate::config::Config;
 use crate::crypto::{MasterSecretManager, derive_sync_key};
 use crate::odyn::OdynClient;
+use crate::rate_limiter::TokenBucket;
 use crate::registry::{CachedNovaRegistry, RegistryClient};
 use crate::store::DataStore;
 use crate::sync::PeerCache;
@@ -17,6 +18,7 @@ pub struct AppState {
     pub registry: RegistryClient,
     pub app_registry_cache: CachedNovaRegistry,
     pub nonce_store: NonceStore,
+    pub nonce_rate_limiter: TokenBucket,
     pub peer_cache: PeerCache,
     pub master_secret: MasterSecretManager,
     pub sync_key: Option<[u8; 32]>,
@@ -42,6 +44,7 @@ impl AppState {
         let tombstone_retention_ms = config.tombstone_retention_ms;
         let max_tombstones_per_app = config.max_tombstones_per_app;
         let nonce_store = NonceStore::new(config.max_nonces, config.pop_timeout_seconds);
+        let nonce_rate_limiter = TokenBucket::new(config.nonce_rate_limit_per_minute);
         let odyn = OdynClient::new(config.in_enclave);
 
         // Keep node wallet bound to the signing identity currently exposed by Odyn.
@@ -101,6 +104,7 @@ impl AppState {
             registry,
             app_registry_cache,
             nonce_store,
+            nonce_rate_limiter,
             peer_cache: PeerCache::new(),
             master_secret,
             sync_key,

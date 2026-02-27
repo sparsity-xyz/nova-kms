@@ -121,6 +121,13 @@ fn require_fresh_timestamp(timestamp: u64, max_age_seconds: u64) -> Result<(), K
     Ok(())
 }
 
+fn require_valid_base64_nonce(nonce: &str) -> Result<(), KmsError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(nonce.as_bytes())
+        .map_err(|_| KmsError::Unauthorized("Invalid nonce encoding".to_string()))?;
+    Ok(())
+}
+
 pub fn recover_wallet_from_signature(message: &str, signature: &str) -> Result<String, KmsError> {
     let sig = Signature::from_str(signature)
         .map_err(|_| KmsError::Unauthorized("Invalid signature format".to_string()))?;
@@ -210,6 +217,7 @@ pub async fn authenticate_app(
             .parse::<u64>()
             .map_err(|_| KmsError::Unauthorized("Invalid x-app-timestamp".to_string()))?;
         require_fresh_timestamp(ts, config.pop_timeout_seconds)?;
+        require_valid_base64_nonce(&nonce)?;
 
         if !nonce_store.validate_and_consume(&nonce).await {
             return Err(KmsError::Unauthorized(
@@ -288,6 +296,7 @@ pub async fn authenticate_kms_peer(
         .map(str::to_string);
 
     require_fresh_timestamp(timestamp, config.pop_timeout_seconds)?;
+    require_valid_base64_nonce(nonce)?;
     if !nonce_store.validate_and_consume(nonce).await {
         return Err(KmsError::Unauthorized(
             "Invalid or expired nonce".to_string(),
@@ -356,7 +365,42 @@ fn dev_private_key_signer(config: &Config) -> Result<PrivateKeySigner, KmsError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use alloy::signers::local::PrivateKeySigner;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn base_test_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.in_enclave = false;
+        cfg.pop_timeout_seconds = 120;
+        cfg
+    }
+
+    async fn signed_kms_headers(
+        nonce: &str,
+        recipient_wallet: &str,
+        ts: u64,
+        signer: &PrivateKeySigner,
+        wallet_header: Option<&str>,
+    ) -> HeaderMap {
+        let message = format!("NovaKMS:Auth:{}:{}:{}", nonce, recipient_wallet, ts);
+        let sig = signer.sign_message(message.as_bytes()).await.unwrap();
+        let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
+        let signer_wallet = format!("0x{}", hex::encode(signer.address().as_slice()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-kms-signature", HeaderValue::from_str(&sig_hex).unwrap());
+        headers.insert(
+            "x-kms-timestamp",
+            HeaderValue::from_str(&ts.to_string()).unwrap(),
+        );
+        headers.insert("x-kms-nonce", HeaderValue::from_str(nonce).unwrap());
+        headers.insert(
+            "x-kms-wallet",
+            HeaderValue::from_str(wallet_header.unwrap_or(&signer_wallet)).unwrap(),
+        );
+        headers
+    }
 
     #[tokio::test]
     async fn test_nonce_issue_and_consume() {
@@ -378,6 +422,18 @@ mod tests {
         assert_eq!(w, "0xa000000000000000000000000000000000000000");
     }
 
+    #[test]
+    fn test_canonical_wallet_rejects_invalid_value() {
+        assert!(canonical_wallet("0x123").is_err());
+        assert!(canonical_wallet("not-an-address").is_err());
+    }
+
+    #[test]
+    fn test_nonce_encoding_validation() {
+        assert!(require_valid_base64_nonce("YWJjMTIz").is_ok());
+        assert!(require_valid_base64_nonce("%%%").is_err());
+    }
+
     #[tokio::test]
     async fn test_verify_wallet_signature_roundtrip() {
         let signer = PrivateKeySigner::from_str(
@@ -394,5 +450,111 @@ mod tests {
             message,
             &sig_hex
         ));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_kms_peer_success() {
+        let cfg = base_test_config();
+        let recipient = "0x1111111111111111111111111111111111111111";
+        let recipient = canonical_wallet(recipient).unwrap();
+        let signer = PrivateKeySigner::from_str(
+            "59c6995e998f97a5a0044966f094538e1d8e3f52cbd4930f3d3eb24c4f5f2f6b",
+        )
+        .unwrap();
+
+        let nonce_store = NonceStore::new(128, 120);
+        let nonce = nonce_store.issue_nonce().await.unwrap();
+        let ts = now_secs();
+        let headers = signed_kms_headers(&nonce, &recipient, ts, &signer, None).await;
+
+        let identity = authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap();
+        let expected_wallet = format!("0x{}", hex::encode(signer.address().as_slice()));
+        assert_eq!(identity.tee_wallet, expected_wallet);
+        assert!(identity.signature.starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_kms_peer_replay_rejected() {
+        let cfg = base_test_config();
+        let recipient = canonical_wallet("0x1111111111111111111111111111111111111111").unwrap();
+        let signer = PrivateKeySigner::from_str(
+            "8b3a350cf5c34c9194ca3a545d81942fca50a4f7f3b5f4df6f8fcd34f1b8993f",
+        )
+        .unwrap();
+        let nonce_store = NonceStore::new(128, 120);
+        let nonce = nonce_store.issue_nonce().await.unwrap();
+        let ts = now_secs();
+        let headers = signed_kms_headers(&nonce, &recipient, ts, &signer, None).await;
+
+        authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap();
+        let err = authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid or expired nonce"));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_kms_peer_wallet_mismatch_rejected() {
+        let cfg = base_test_config();
+        let recipient = canonical_wallet("0x1111111111111111111111111111111111111111").unwrap();
+        let signer = PrivateKeySigner::from_str(
+            "0dbbe8f6e5f3fa8ad2cf8f1774f17d03f5e3ec11e504f7f3af7f4f53f8ab9474",
+        )
+        .unwrap();
+        let nonce_store = NonceStore::new(128, 120);
+        let nonce = nonce_store.issue_nonce().await.unwrap();
+        let ts = now_secs();
+        let bad_wallet = "0x0000000000000000000000000000000000000000";
+        let headers = signed_kms_headers(&nonce, &recipient, ts, &signer, Some(bad_wallet)).await;
+
+        let err = authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("KMS wallet header does not match signature")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_kms_peer_invalid_nonce_encoding() {
+        let cfg = base_test_config();
+        let recipient = canonical_wallet("0x1111111111111111111111111111111111111111").unwrap();
+        let signer = PrivateKeySigner::from_str(
+            "4f3edf983ac636a65a842ce7c78d9aa706d3b113bce036f90c23f2d25f4f53f8",
+        )
+        .unwrap();
+        let nonce_store = NonceStore::new(128, 120);
+        let ts = now_secs();
+        let headers = signed_kms_headers("%%%not-base64%%%", &recipient, ts, &signer, None).await;
+
+        let err = authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid nonce encoding"));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_kms_peer_stale_timestamp() {
+        let mut cfg = base_test_config();
+        cfg.pop_timeout_seconds = 2;
+        let recipient = canonical_wallet("0x1111111111111111111111111111111111111111").unwrap();
+        let signer = PrivateKeySigner::from_str(
+            "59c6995e998f97a5a0044966f094538e1d8e3f52cbd4930f3d3eb24c4f5f2f6b",
+        )
+        .unwrap();
+        let nonce_store = NonceStore::new(128, 120);
+        let nonce = nonce_store.issue_nonce().await.unwrap();
+        let ts = now_secs().saturating_sub(300);
+        let headers = signed_kms_headers(&nonce, &recipient, ts, &signer, None).await;
+
+        let err = authenticate_kms_peer(&headers, &cfg, &nonce_store, &recipient)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Stale timestamp"));
     }
 }
