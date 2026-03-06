@@ -10,7 +10,6 @@ struct BucketState {
 
 /// Simple in-memory token bucket rate limiter keyed by caller identity.
 ///
-/// Mirrors the Python implementation used by the legacy KMS node:
 /// - capacity = `rate_per_minute`
 /// - refill rate = `rate_per_minute / 60` tokens per second
 pub struct TokenBucket {

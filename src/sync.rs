@@ -1045,31 +1045,40 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         let peer_skipped = resp_body.get("skipped").and_then(|v| v.as_u64());
         let peer_rejected = resp_body.get("rejected").and_then(|v| v.as_u64());
         let peer_skip_reasons = resp_body.get("skip_reasons").and_then(|v| v.as_object());
-        let has_extended_stats = peer_total.is_some()
-            || peer_skipped.is_some()
-            || peer_rejected.is_some()
-            || peer_skip_reasons.is_some();
         if let Some(peer_merged) = peer_merged {
             remote_merged += peer_merged as usize;
             if peer_merged == 0 {
                 zero_merge_peers += 1;
             }
+            let has_extended_stats = peer_total.is_some()
+                || peer_skipped.is_some()
+                || peer_rejected.is_some()
+                || peer_skip_reasons.is_some();
             if has_extended_stats {
+                let total = peer_total
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let skipped = peer_skipped
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let rejected = peer_rejected
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let skip_reasons = peer_skip_reasons
                     .map(|m| format!("{:?}", m))
-                    .unwrap_or_else(|| "{}".to_string());
+                    .unwrap_or_else(|| "unknown".to_string());
                 tracing::info!(
                     "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={} skip_reasons={}",
                     peer_wallet,
-                    peer_total.unwrap_or(record_count as u64),
+                    total,
                     peer_merged,
-                    peer_skipped.unwrap_or(0),
-                    peer_rejected.unwrap_or(0),
+                    skipped,
+                    rejected,
                     skip_reasons
                 );
             } else {
                 tracing::info!(
-                    "Delta push to {} acknowledged with legacy merge-only response: merged={}",
+                    "Delta push to {} acknowledged: merged={} (peer omitted extended stats)",
                     peer_wallet,
                     peer_merged
                 );
