@@ -73,7 +73,6 @@ The application utilizes `figment` to parse configuration out of environment var
 | `NODE_URL` | RPC URL for registry/auth-chain calls | `http://127.0.0.1:18545` |
 | `NODE_INSTANCE_URL` | Public URL of this KMS node | `http://localhost:8000` |
 | `HELIOS_RPC_URL` | Override for local Helios JSON-RPC endpoint | `http://127.0.0.1:18545` |
-| `SYNC_TIMESTAMP_BACKDATE_MS` | Optional outbound `/sync` timestamp backdate to tolerate peer clock skew in mixed clusters | `5000` |
 | `IN_ENCLAVE` | Switch to verify strict TLS behaviors if necessary | `true` |
 
 These can also be provided within a `Kms.toml` root file!

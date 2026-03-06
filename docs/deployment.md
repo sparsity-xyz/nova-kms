@@ -291,7 +291,6 @@ cast send <KMS_REGISTRY_ADDRESS> \
 - [ ] Admin key stored securely (hardware wallet recommended)
 - [ ] `NODE_URL` or `HELIOS_RPC_URL` points to the intended chain RPC endpoint
 - [ ] `NODE_INSTANCE_URL` set to the correct public HTTPS endpoint
-- [ ] If mixing Rust and legacy Python nodes with imperfect clock sync, set `SYNC_TIMESTAMP_BACKDATE_MS` on Rust nodes to stay within peer skew tolerance
 - [ ] All nodes running the same code measurement (version)
 - [ ] ZK verification enabled for the KMS app in NovaAppRegistry
 - [ ] No trusted proxies in front of the enclave app (PoP auth is verified in-app)

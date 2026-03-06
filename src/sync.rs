@@ -357,46 +357,26 @@ pub fn verify_hmac_hex(sync_key: &[u8; 32], payload: &[u8], signature_hex: &str)
     }
 }
 
-fn sync_record_to_value(record: &DataRecord, timestamp_backdate_ms: u64) -> Value {
-    let adjusted_updated_at_ms = record.updated_at_ms.saturating_sub(timestamp_backdate_ms);
-    let applied_backdate_ms = record.updated_at_ms - adjusted_updated_at_ms;
-    let adjusted_ttl_ms = if record.ttl_ms == 0 {
-        0
-    } else {
-        record.ttl_ms.saturating_add(applied_backdate_ms)
-    };
-
+fn sync_record_to_value(record: &DataRecord) -> Value {
     json!({
         "key": record.key,
         "value": if record.tombstone { Value::Null } else { Value::String(hex::encode(&record.encrypted_value)) },
         "version": record.version.clocks,
-        "updated_at_ms": adjusted_updated_at_ms,
+        "updated_at_ms": record.updated_at_ms,
         "tombstone": record.tombstone,
-        "ttl_ms": adjusted_ttl_ms,
+        "ttl_ms": record.ttl_ms,
     })
 }
 
-pub fn serialize_deltas_with_backdate(
-    deltas: &HashMap<u64, Vec<DataRecord>>,
-    timestamp_backdate_ms: u64,
-) -> Value {
+pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
     let mut map = Map::new();
     for (app_id, records) in deltas {
         map.insert(
             app_id.to_string(),
-            Value::Array(
-                records
-                    .iter()
-                    .map(|r| sync_record_to_value(r, timestamp_backdate_ms))
-                    .collect(),
-            ),
+            Value::Array(records.iter().map(sync_record_to_value).collect()),
         );
     }
     Value::Object(map)
-}
-
-pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
-    serialize_deltas_with_backdate(deltas, 0)
 }
 
 const INIT_RETRY_ATTEMPTS: usize = 5;
@@ -804,7 +784,7 @@ fn is_envelope(v: &Value) -> bool {
 pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
     refresh_peers_if_needed(state).await?;
 
-    let (sync_key, node_wallet, deltas_payload, peer_cache, app_count, record_count, backdate_ms) = {
+    let (sync_key, node_wallet, deltas_payload, peer_cache, app_count, record_count) = {
         let mut s = state.write().await;
         if !s.service_available {
             return Ok(0);
@@ -823,28 +803,23 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         let node_wallet = s.config.node_wallet.clone();
         let app_count = deltas.len();
         let record_count = deltas.values().map(std::vec::Vec::len).sum::<usize>();
-        let backdate_ms = s.config.sync_timestamp_backdate_ms;
         for (app_id, records) in &deltas {
             for record in records {
-                let adjusted_updated_at_ms = record.updated_at_ms.saturating_sub(backdate_ms);
                 tracing::debug!(
-                    "Preparing delta record: app_id={} key='{}' raw_updated_at_ms={} adjusted_updated_at_ms={} backdate_ms={}",
+                    "Preparing delta record: app_id={} key='{}' updated_at_ms={}",
                     app_id,
                     record.key,
-                    record.updated_at_ms,
-                    adjusted_updated_at_ms,
-                    backdate_ms
+                    record.updated_at_ms
                 );
             }
         }
         (
             sync_key,
             node_wallet,
-            serialize_deltas_with_backdate(&deltas, backdate_ms),
+            serialize_deltas(&deltas),
             Arc::clone(&s.peer_cache),
             app_count,
             record_count,
-            backdate_ms,
         )
     };
     let peers = peer_cache.get_peers(Some(&node_wallet)).await;
@@ -864,11 +839,10 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         .collect();
 
     tracing::info!(
-        "Delta push: {} records across {} apps to {} peers (backdate={}ms, peers={:?})",
+        "Delta push: {} records across {} apps to {} peers (peers={:?})",
         record_count,
         app_count,
         peer_count,
-        backdate_ms,
         peer_targets
     );
 
@@ -1066,38 +1040,40 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             resp_json
         };
 
-        let peer_total = resp_body
-            .get("total")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(record_count as u64);
+        let peer_total = resp_body.get("total").and_then(|v| v.as_u64());
         let peer_merged = resp_body.get("merged").and_then(|v| v.as_u64());
-        let peer_skipped = resp_body
-            .get("skipped")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let peer_rejected = resp_body
-            .get("rejected")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let peer_skip_reasons = resp_body
-            .get("skip_reasons")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
+        let peer_skipped = resp_body.get("skipped").and_then(|v| v.as_u64());
+        let peer_rejected = resp_body.get("rejected").and_then(|v| v.as_u64());
+        let peer_skip_reasons = resp_body.get("skip_reasons").and_then(|v| v.as_object());
+        let has_extended_stats = peer_total.is_some()
+            || peer_skipped.is_some()
+            || peer_rejected.is_some()
+            || peer_skip_reasons.is_some();
         if let Some(peer_merged) = peer_merged {
             remote_merged += peer_merged as usize;
             if peer_merged == 0 {
                 zero_merge_peers += 1;
             }
-            tracing::info!(
-                "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={} skip_reasons={:?}",
-                peer_wallet,
-                peer_total,
-                peer_merged,
-                peer_skipped,
-                peer_rejected,
-                peer_skip_reasons
-            );
+            if has_extended_stats {
+                let skip_reasons = peer_skip_reasons
+                    .map(|m| format!("{:?}", m))
+                    .unwrap_or_else(|| "{}".to_string());
+                tracing::info!(
+                    "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={} skip_reasons={}",
+                    peer_wallet,
+                    peer_total.unwrap_or(record_count as u64),
+                    peer_merged,
+                    peer_skipped.unwrap_or(0),
+                    peer_rejected.unwrap_or(0),
+                    skip_reasons
+                );
+            } else {
+                tracing::info!(
+                    "Delta push to {} acknowledged with legacy merge-only response: merged={}",
+                    peer_wallet,
+                    peer_merged
+                );
+            }
         } else {
             tracing::info!(
                 "Delta push to {} acknowledged without merge stats in response: body={}",
@@ -1488,26 +1464,6 @@ mod tests {
         let out = serialize_deltas(&deltas);
         assert!(out.get("49").is_some());
         assert_eq!(out["49"][0]["key"], "k");
-    }
-
-    #[test]
-    fn test_serialize_deltas_with_backdate_preserves_expiry() {
-        let mut vc = VectorClock::new();
-        vc.increment("node-a");
-        let rec = DataRecord {
-            key: "k".to_string(),
-            encrypted_value: vec![1, 2, 3],
-            version: vc,
-            updated_at_ms: 10_000,
-            tombstone: false,
-            ttl_ms: 30_000,
-        };
-        let mut deltas = HashMap::new();
-        deltas.insert(49u64, vec![rec]);
-
-        let out = serialize_deltas_with_backdate(&deltas, 8_000);
-        assert_eq!(out["49"][0]["updated_at_ms"], 2_000);
-        assert_eq!(out["49"][0]["ttl_ms"], 38_000);
     }
 
     #[tokio::test]

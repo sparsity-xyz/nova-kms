@@ -794,10 +794,7 @@ async fn sync_handler(
                 );
                 json!({
                     "status":"ok",
-                    "data": crate::sync::serialize_deltas_with_backdate(
-                        &snapshot,
-                        s.config.sync_timestamp_backdate_ms,
-                    ),
+                    "data": crate::sync::serialize_deltas(&snapshot),
                 })
             }
             "master_secret_request" => {

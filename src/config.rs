@@ -28,8 +28,6 @@ pub struct Config {
     pub peer_cache_ttl_seconds: u64,
     pub registry_cache_ttl_seconds: u64,
     pub peer_blacklist_duration_seconds: u64,
-    #[serde(alias = "SYNC_TIMESTAMP_BACKDATE_MS")]
-    pub sync_timestamp_backdate_ms: u64,
 
     // Storage Engine Limits
     pub max_app_storage_bytes: usize,
@@ -69,7 +67,6 @@ impl Default for Config {
             peer_cache_ttl_seconds: 180,
             registry_cache_ttl_seconds: 180,
             peer_blacklist_duration_seconds: 600,
-            sync_timestamp_backdate_ms: 5_000,
             max_app_storage_bytes: 10 * 1024 * 1024, // 10MB
             max_kv_value_size_bytes: 1024 * 1024,    // 1MB
             tombstone_retention_ms: 24 * 60 * 60 * 1000,
@@ -78,7 +75,7 @@ impl Default for Config {
             max_nonces: 4096,
             max_request_body_bytes: 2 * 1024 * 1024,
             max_sync_payload_bytes: 50 * 1024 * 1024,
-            max_clock_skew_ms: 10_000,
+            max_clock_skew_ms: 15_000,
             allow_plaintext_dev: false,
             master_secret_hex: None,
             rate_limit_per_minute: 120,
