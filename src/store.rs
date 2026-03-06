@@ -106,7 +106,7 @@ impl Namespace {
             .records
             .get(key)
             .map(|existing| existing.version.clone())
-            .unwrap_or_else(VectorClock::new);
+            .unwrap_or_default();
         vc.increment(node_id);
 
         let record = DataRecord {
