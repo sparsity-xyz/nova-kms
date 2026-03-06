@@ -94,6 +94,33 @@ impl Namespace {
         self.evict_if_needed();
     }
 
+    pub fn put_local(
+        &mut self,
+        key: &str,
+        encrypted_value: Vec<u8>,
+        node_id: &str,
+        current_time: u64,
+        ttl_ms: u64,
+    ) -> DataRecord {
+        let mut vc = self
+            .records
+            .get(key)
+            .map(|existing| existing.version.clone())
+            .unwrap_or_else(VectorClock::new);
+        vc.increment(node_id);
+
+        let record = DataRecord {
+            key: key.to_string(),
+            encrypted_value,
+            version: vc,
+            updated_at_ms: current_time,
+            tombstone: false,
+            ttl_ms,
+        };
+        self.put(key, record.clone());
+        record
+    }
+
     pub fn delete(&mut self, key: &str, node_id: &str, current_time: u64) -> Option<DataRecord> {
         self.cleanup(current_time);
         let existing = self.records.get(key).cloned()?;
@@ -281,6 +308,21 @@ impl DataStore {
         ns.write().await.keys(current_time)
     }
 
+    pub async fn put_local(
+        &self,
+        app_id: u64,
+        key: &str,
+        encrypted_value: Vec<u8>,
+        node_id: &str,
+        current_time: u64,
+        ttl_ms: u64,
+    ) -> DataRecord {
+        let ns = self.get_namespace(app_id).await;
+        ns.write()
+            .await
+            .put_local(key, encrypted_value, node_id, current_time, ttl_ms)
+    }
+
     pub async fn get_deltas_since(
         &self,
         since_ms: u64,
@@ -359,6 +401,61 @@ mod tests {
         }
     }
 
+    fn record_with_clock(key: &str, value: &[u8], ts: u64, entries: &[(&str, u64)]) -> DataRecord {
+        let mut vc = VectorClock::new();
+        for (node, count) in entries {
+            vc.clocks.insert((*node).to_string(), *count);
+        }
+        DataRecord {
+            key: key.to_string(),
+            encrypted_value: value.to_vec(),
+            version: vc,
+            updated_at_ms: ts,
+            tombstone: false,
+            ttl_ms: 0,
+        }
+    }
+
+    #[test]
+    fn test_put_local_initializes_first_version() {
+        let mut ns = Namespace::new(1, 1024, 10_000, 100);
+        let rec = ns.put_local("k", b"abc".to_vec(), "n1", 10, 1234);
+
+        assert_eq!(rec.version.get("n1"), 1);
+        assert_eq!(rec.updated_at_ms, 10);
+        assert_eq!(rec.ttl_ms, 1234);
+        assert!(!rec.tombstone);
+    }
+
+    #[test]
+    fn test_put_local_inherits_existing_vector_clock() {
+        let mut ns = Namespace::new(1, 1024 * 1024, 10_000, 100);
+        ns.put(
+            "k",
+            record_with_clock("k", b"old", 100, &[("n1", 1), ("n2", 3)]),
+        );
+
+        let rec = ns.put_local("k", b"new".to_vec(), "n1", 200, 0);
+
+        assert_eq!(rec.version.get("n1"), 2);
+        assert_eq!(rec.version.get("n2"), 3);
+        assert_eq!(rec.updated_at_ms, 200);
+    }
+
+    #[test]
+    fn test_put_local_inherits_tombstone_version() {
+        let mut ns = Namespace::new(1, 1024 * 1024, 10_000, 100);
+        ns.put("k", record("k", b"old", 1, "n1"));
+        let tombstone = ns.delete("k", "n1", 100).unwrap();
+        assert!(tombstone.tombstone);
+        assert_eq!(tombstone.version.get("n1"), 2);
+
+        let rec = ns.put_local("k", b"new".to_vec(), "n1", 200, 0);
+
+        assert!(!rec.tombstone);
+        assert_eq!(rec.version.get("n1"), 3);
+    }
+
     #[test]
     fn test_delete_missing_returns_none() {
         let mut ns = Namespace::new(1, 1024, 10_000, 100);
@@ -390,5 +487,26 @@ mod tests {
         ns.put("k", old.clone());
         assert!(ns.merge_record(new.clone()));
         assert_eq!(ns.records.get("k").unwrap().encrypted_value, vec![0x02]);
+    }
+
+    #[tokio::test]
+    async fn test_data_store_put_local_preserves_merged_clock_history() {
+        let store = DataStore::new(1024 * 1024, 10_000, 100);
+        let first = store.put_local(1, "k", b"a".to_vec(), "n1", 10, 0).await;
+        assert_eq!(first.version.get("n1"), 1);
+
+        let incoming = record_with_clock("k", b"b", 20, &[("n2", 1)]);
+        assert!(store.merge_record(1, incoming).await);
+
+        let after_merge = {
+            let ns = store.get_namespace(1).await;
+            ns.write().await.records.get("k").cloned().unwrap()
+        };
+        assert_eq!(after_merge.version.get("n1"), 1);
+        assert_eq!(after_merge.version.get("n2"), 1);
+
+        let local = store.put_local(1, "k", b"c".to_vec(), "n1", 30, 0).await;
+        assert_eq!(local.version.get("n1"), 2);
+        assert_eq!(local.version.get("n2"), 1);
     }
 }
