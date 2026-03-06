@@ -4,6 +4,36 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeOutcome {
+    Inserted,
+    ReplacedByVersion,
+    ReplacedByConcurrentLww,
+    IgnoredEqualVersion,
+    IgnoredExistingNewerVersion,
+    IgnoredConcurrentTieBreak,
+}
+
+impl MergeOutcome {
+    pub fn merged(self) -> bool {
+        matches!(
+            self,
+            Self::Inserted | Self::ReplacedByVersion | Self::ReplacedByConcurrentLww
+        )
+    }
+
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Inserted => "inserted",
+            Self::ReplacedByVersion => "replaced_by_version",
+            Self::ReplacedByConcurrentLww => "replaced_by_concurrent_lww",
+            Self::IgnoredEqualVersion => "ignored_equal_version",
+            Self::IgnoredExistingNewerVersion => "ignored_existing_newer_version",
+            Self::IgnoredConcurrentTieBreak => "ignored_concurrent_tie_break",
+        }
+    }
+}
+
 pub struct Namespace {
     pub app_id: u64,
     records: LruCache<String, DataRecord>,
@@ -85,7 +115,7 @@ impl Namespace {
         Some(tombstone)
     }
 
-    pub fn merge_record(&mut self, new_record: DataRecord) -> bool {
+    pub fn merge_record_with_outcome(&mut self, new_record: DataRecord) -> MergeOutcome {
         let size = new_record.approximate_size();
         let key = new_record.key.clone();
 
@@ -96,7 +126,7 @@ impl Namespace {
                     self.records.put(key, new_record);
                     self.current_size = self.current_size + size - old_size;
                     self.evict_if_needed();
-                    true
+                    MergeOutcome::ReplacedByVersion
                 }
                 VCComparison::Concurrent => {
                     let should_replace = new_record.updated_at_ms > existing.updated_at_ms
@@ -109,19 +139,24 @@ impl Namespace {
                         self.records.put(key, merged);
                         self.current_size = self.current_size + size - old_size;
                         self.evict_if_needed();
-                        true
+                        MergeOutcome::ReplacedByConcurrentLww
                     } else {
-                        false
+                        MergeOutcome::IgnoredConcurrentTieBreak
                     }
                 }
-                _ => false,
+                VCComparison::Equal => MergeOutcome::IgnoredEqualVersion,
+                VCComparison::HappenedAfter => MergeOutcome::IgnoredExistingNewerVersion,
             }
         } else {
             self.records.put(key, new_record);
             self.current_size += size;
             self.evict_if_needed();
-            true
+            MergeOutcome::Inserted
         }
+    }
+
+    pub fn merge_record(&mut self, new_record: DataRecord) -> bool {
+        self.merge_record_with_outcome(new_record).merged()
     }
 
     pub fn get_deltas_since(&mut self, since_ms: u64, current_time: u64) -> Vec<DataRecord> {
@@ -284,6 +319,11 @@ impl DataStore {
     pub async fn merge_record(&self, app_id: u64, record: DataRecord) -> bool {
         let ns = self.get_namespace(app_id).await;
         ns.write().await.merge_record(record)
+    }
+
+    pub async fn merge_record_with_outcome(&self, app_id: u64, record: DataRecord) -> MergeOutcome {
+        let ns = self.get_namespace(app_id).await;
+        ns.write().await.merge_record_with_outcome(record)
     }
 
     pub async fn stats(&self, current_time: u64) -> (usize, usize, usize) {

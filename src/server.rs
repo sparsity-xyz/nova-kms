@@ -719,23 +719,69 @@ async fn sync_handler(
         let result = match sync_type {
             "delta" => {
                 let mut merged = 0usize;
+                let mut skipped = 0usize;
+                let mut rejected = 0usize;
+                let mut total = 0usize;
+                let mut skip_reasons: HashMap<&'static str, usize> = HashMap::new();
                 if let Some(data) = payload_obj.get("data").and_then(|v| v.as_object()) {
                     let records = parse_sync_records(data);
                     for (app_id, record) in records {
-                        if !validate_incoming_record(&state, app_id, &record).await {
+                        total += 1;
+                        let record_key = record.key.clone();
+                        let updated_at_ms = record.updated_at_ms;
+                        if let Err(reason) = validate_incoming_record(&state, app_id, &record).await
+                        {
+                            rejected += 1;
+                            tracing::warn!(
+                                "Incoming delta record from {} rejected: app_id={} key='{}' updated_at_ms={} reason={}",
+                                identity.tee_wallet,
+                                app_id,
+                                record_key,
+                                updated_at_ms,
+                                reason
+                            );
                             continue;
                         }
-                        if s.store.merge_record(app_id, record).await {
+                        let outcome = s.store.merge_record_with_outcome(app_id, record).await;
+                        if outcome.merged() {
                             merged += 1;
+                        } else {
+                            skipped += 1;
+                            *skip_reasons.entry(outcome.reason()).or_default() += 1;
+                            tracing::info!(
+                                "Incoming delta record from {} not applied: app_id={} key='{}' updated_at_ms={} reason={}",
+                                identity.tee_wallet,
+                                app_id,
+                                record_key,
+                                updated_at_ms,
+                                outcome.reason()
+                            );
                         }
                     }
                 }
                 tracing::info!(
-                    "Applied delta sync from {}: merged {} record(s)",
+                    "Processed delta sync from {}: total={} merged={} skipped={} rejected={}",
                     identity.tee_wallet,
-                    merged
+                    total,
+                    merged,
+                    skipped,
+                    rejected
                 );
-                json!({"status":"ok","merged":merged})
+                if !skip_reasons.is_empty() {
+                    tracing::info!(
+                        "Delta sync from {} skip reasons: {:?}",
+                        identity.tee_wallet,
+                        skip_reasons
+                    );
+                }
+                json!({
+                    "status":"ok",
+                    "total": total,
+                    "merged": merged,
+                    "skipped": skipped,
+                    "rejected": rejected,
+                    "skip_reasons": skip_reasons,
+                })
             }
             "snapshot_request" => {
                 let snapshot = s.store.full_snapshot(now_ms()).await;

@@ -874,6 +874,8 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
     });
 
     let mut success = 0usize;
+    let mut remote_merged = 0usize;
+    let mut zero_merge_peers = 0usize;
     for peer in peers {
         let peer_wallet = match canonical_wallet(&peer.tee_wallet_address) {
             Ok(v) => v,
@@ -1036,9 +1038,9 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
                 continue;
             }
         };
-        if is_envelope(&resp_json) {
+        let resp_body = if is_envelope(&resp_json) {
             match decrypt_json_envelope(state, &resp_json).await {
-                Ok(_) => {}
+                Ok(v) => v,
                 Err(err) => {
                     tracing::warn!(
                         "Delta push to {} failed to decrypt response envelope: {}",
@@ -1048,14 +1050,51 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
                     continue;
                 }
             }
+        } else {
+            resp_json
+        };
+
+        let peer_total = resp_body
+            .get("total")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(record_count as u64);
+        let peer_merged = resp_body.get("merged").and_then(|v| v.as_u64());
+        let peer_skipped = resp_body
+            .get("skipped")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let peer_rejected = resp_body
+            .get("rejected")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(peer_merged) = peer_merged {
+            remote_merged += peer_merged as usize;
+            if peer_merged == 0 {
+                zero_merge_peers += 1;
+            }
+            tracing::info!(
+                "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={}",
+                peer_wallet,
+                peer_total,
+                peer_merged,
+                peer_skipped,
+                peer_rejected
+            );
+        } else {
+            tracing::info!(
+                "Delta push to {} acknowledged without merge stats in response",
+                peer_wallet
+            );
         }
         success += 1;
     }
 
     tracing::info!(
-        "Delta push complete: {}/{} peers synced ({} records across {} apps)",
+        "Delta push complete: {}/{} peers acknowledged, remote merged {} record(s), zero-merge peers={} (payload {} records across {} apps)",
         success,
         peer_count,
+        remote_merged,
+        zero_merge_peers,
         record_count,
         app_count
     );
@@ -1280,7 +1319,15 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
         {
             let records = parse_sync_data_object(data_obj);
             for (app_id, record) in records {
-                if !validate_incoming_record(state, app_id, &record).await {
+                if let Err(reason) = validate_incoming_record(state, app_id, &record).await {
+                    tracing::warn!(
+                        "Snapshot sync from peer {} rejected record: app_id={} key='{}' updated_at_ms={} reason={}",
+                        peer.tee_wallet_address,
+                        app_id,
+                        record.key,
+                        record.updated_at_ms,
+                        reason
+                    );
                     continue;
                 }
                 let s = state.read().await;
@@ -1323,7 +1370,7 @@ pub async fn validate_incoming_record(
     state: &SharedState,
     app_id: u64,
     record: &DataRecord,
-) -> bool {
+) -> Result<(), String> {
     let (in_enclave, max_value_size_bytes, max_clock_skew_ms) = {
         let s = state.read().await;
         (
@@ -1336,45 +1383,32 @@ pub async fn validate_incoming_record(
     if !record.tombstone {
         let max_with_overhead = max_value_size_bytes.saturating_add(128);
         if record.encrypted_value.len() > max_with_overhead {
-            tracing::warn!(
-                "Rejecting incoming sync record '{}': encrypted value too large ({} bytes)",
-                record.key,
+            return Err(format!(
+                "encrypted value too large ({} bytes)",
                 record.encrypted_value.len()
-            );
-            return false;
+            ));
         }
 
         if in_enclave {
             if record.encrypted_value.len() < (12 + 16) {
-                tracing::warn!(
-                    "Rejecting incoming sync record '{}': ciphertext too short ({} bytes)",
-                    record.key,
+                return Err(format!(
+                    "ciphertext too short ({} bytes)",
                     record.encrypted_value.len()
-                );
-                return false;
+                ));
             }
             let data_key = {
                 let s = state.read().await;
                 let secret = match s.master_secret.get_secret().await {
                     Ok(v) => v,
                     Err(err) => {
-                        tracing::warn!(
-                            "Rejecting incoming sync record '{}': master secret unavailable: {}",
-                            record.key,
-                            err
-                        );
-                        return false;
+                        return Err(format!("master secret unavailable: {}", err));
                     }
                 };
                 derive_data_key(&secret, app_id)
             };
 
             if decrypt_data(&record.encrypted_value, &data_key).is_err() {
-                tracing::warn!(
-                    "Rejecting incoming sync record '{}': ciphertext failed validation",
-                    record.key
-                );
-                return false;
+                return Err("ciphertext failed validation".to_string());
             }
         }
     }
@@ -1383,19 +1417,14 @@ pub async fn validate_incoming_record(
         let now = now_ms();
         if record.updated_at_ms > now.saturating_add(max_clock_skew_ms) {
             let delta_ms = record.updated_at_ms.saturating_sub(now);
-            tracing::warn!(
-                "Rejecting incoming sync record '{}': future timestamp {}ms exceeds limit (now={}ms + max_skew={}ms, delta={}ms)",
-                record.key,
-                record.updated_at_ms,
-                now,
-                max_clock_skew_ms,
-                delta_ms
-            );
-            return false;
+            return Err(format!(
+                "future timestamp {}ms exceeds limit (now={}ms + max_skew={}ms, delta={}ms)",
+                record.updated_at_ms, now, max_clock_skew_ms, delta_ms
+            ));
         }
     }
 
-    true
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1564,7 +1593,10 @@ mod tests {
             ttl_ms: 0,
         };
 
-        assert!(!validate_incoming_record(&state, 49, &record).await);
+        let err = validate_incoming_record(&state, 49, &record)
+            .await
+            .expect_err("oversized record should be rejected");
+        assert!(err.contains("encrypted value too large"));
     }
 
     #[tokio::test]
@@ -1588,7 +1620,10 @@ mod tests {
             ttl_ms: 0,
         };
 
-        assert!(!validate_incoming_record(&state, 49, &record).await);
+        let err = validate_incoming_record(&state, 49, &record)
+            .await
+            .expect_err("future timestamp should be rejected");
+        assert!(err.contains("future timestamp"));
     }
 
     #[tokio::test]
@@ -1615,7 +1650,10 @@ mod tests {
             ttl_ms: 0,
         };
 
-        assert!(!validate_incoming_record(&state, 49, &record).await);
+        let err = validate_incoming_record(&state, 49, &record)
+            .await
+            .expect_err("short ciphertext should be rejected");
+        assert!(err.contains("ciphertext too short"));
     }
 
     #[tokio::test]
@@ -1643,6 +1681,9 @@ mod tests {
             ttl_ms: 0,
         };
 
-        assert!(!validate_incoming_record(&state, 49, &record).await);
+        let err = validate_incoming_record(&state, 49, &record)
+            .await
+            .expect_err("invalid ciphertext should be rejected");
+        assert!(err.contains("ciphertext failed validation"));
     }
 }
