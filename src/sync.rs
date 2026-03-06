@@ -858,13 +858,18 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         return Ok(0);
     }
     let peer_count = peers.len();
+    let peer_targets: Vec<String> = peers
+        .iter()
+        .map(|peer| format!("{}@{}", peer.tee_wallet_address, peer.node_url))
+        .collect();
 
     tracing::info!(
-        "Delta push: {} records across {} apps to {} peers (backdate={}ms)",
+        "Delta push: {} records across {} apps to {} peers (backdate={}ms, peers={:?})",
         record_count,
         app_count,
         peer_count,
-        backdate_ms
+        backdate_ms,
+        peer_targets
     );
 
     let body = json!({
@@ -883,6 +888,13 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         };
         let endpoint = format!("{}/sync", peer.node_url.trim_end_matches('/'));
         let base = peer.node_url.trim_end_matches('/').to_string();
+        tracing::info!(
+            "Delta push to {} at {}: sending {} record(s) across {} app(s)",
+            peer_wallet,
+            endpoint,
+            record_count,
+            app_count
+        );
 
         // PoP nonce
         let nonce_resp = match reqwest::Client::new()
@@ -1067,23 +1079,30 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             .get("rejected")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let peer_skip_reasons = resp_body
+            .get("skip_reasons")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
         if let Some(peer_merged) = peer_merged {
             remote_merged += peer_merged as usize;
             if peer_merged == 0 {
                 zero_merge_peers += 1;
             }
             tracing::info!(
-                "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={}",
+                "Delta push to {} acknowledged: total={} merged={} skipped={} rejected={} skip_reasons={:?}",
                 peer_wallet,
                 peer_total,
                 peer_merged,
                 peer_skipped,
-                peer_rejected
+                peer_rejected,
+                peer_skip_reasons
             );
         } else {
             tracing::info!(
-                "Delta push to {} acknowledged without merge stats in response",
-                peer_wallet
+                "Delta push to {} acknowledged without merge stats in response: body={}",
+                peer_wallet,
+                resp_body
             );
         }
         success += 1;
