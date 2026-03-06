@@ -15,11 +15,11 @@ Both flows ultimately derive from `NovaAppRegistry` on-chain data, but use diffe
 
 ## 2. Startup Wiring
 
-In `enclave/app.py`:
+In the Rust runtime (`src/state.rs`):
 
-1. Build one canonical registry client: `app_registry_client = NovaRegistry()`.
-2. Inject it into `PeerCache` for KMS peer discovery/verification.
-3. Wrap it in `CachedNovaRegistry` and inject into `AppAuthorizer` for app auth hot paths.
+1. Build one canonical `RegistryClient` (reads both `NovaAppRegistry` and `KMSRegistry`).
+2. Build `PeerCache` for KMS peer discovery/verification (`src/sync.rs`).
+3. Build `CachedNovaRegistry` and inject it into app auth path (`authenticate_app` in `src/auth.rs`).
 
 This keeps registration wiring explicit:
 

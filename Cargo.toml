@@ -1,0 +1,49 @@
+[package]
+name = "nova-kms-rust"
+version = "0.1.0"
+edition = "2024"
+description = "Nova Platform KMS Enclave Node"
+
+[dependencies]
+# Async runtime and Web Framework
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "catch-panic"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+figment = { version = "0.10", features = ["env", "toml"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+lru = "0.12"
+
+# HTTP Client (for Odyn, Helios etc)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Cryptography & Security
+ring = "0.17"
+p384 = { version = "0.13", features = ["ecdh"] }
+elliptic-curve = "0.13"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Web3 / Ethereum
+alloy = { version = "0.2.1", features = ["full"] }
+base64 = "0.21"
+hex = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

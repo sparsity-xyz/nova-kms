@@ -50,3 +50,6 @@ node_modules/
 
 # Demo Client
 request_logs.json
+
+# Rust
+/target

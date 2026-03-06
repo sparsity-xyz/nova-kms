@@ -1,202 +1,96 @@
-# Nova KMS — Testing Guide
+# Nova KMS — Testing Guide (Rust)
 
 ## Overview
 
-Nova KMS has two test suites:
+`nova-kms` now uses Rust as the primary node implementation. Testing is split into:
 
-| Suite | Tool | Location | Scope |
-|-------|------|----------|-------|
-| **Solidity** | Foundry (`forge test`) | `contracts/test/` | KMSRegistry contract logic |
-| **Python** | pytest | `tests/` | Enclave application modules |
+- Rust unit tests (`cargo test`) for auth/crypto/store/sync/server primitives.
+- Python parity test (`tests/compare_behavior.py`) to verify HKDF + AES-GCM compatibility against the Python reference algorithm.
+- Solidity tests (`contracts/`, Foundry) for `KMSRegistry`.
 
 ## Quick Start
 
 ```bash
-# Run all Python tests
 cd nova-kms
-pip install pytest httpx
-pytest tests/ -v
 
-# Run all Solidity tests
-cd nova-kms/contracts
-forge test -vvv
+# 1) Rust unit tests
+cargo test
+
+# 2) Cross-language crypto behavior parity
+python3 tests/compare_behavior.py
+
+# 3) Contract tests
+cd contracts && forge test -vvv
 ```
 
----
+## Rust Test Coverage
 
-## Python Tests
+Current Rust tests cover:
 
-### Setup
+- `auth.rs`
+  - nonce issue/consume replay protection
+  - wallet canonicalization
+  - nonce base64 encoding validation
+  - KMS peer PoP checks (stale timestamp, replay nonce, wallet-header mismatch)
+  - EIP-191 signature round-trip verification
+- `crypto.rs`
+  - HKDF derivation (path/context separation)
+  - AES-GCM encrypt/decrypt
+  - HMAC generation/verification
+  - sealed master-secret exchange (P-384 ECDH + AES-GCM)
+  - master-secret lifecycle state
+- `store.rs`
+  - delete semantics for missing keys
+  - tombstone retention behavior
+  - deterministic conflict resolution on concurrent updates
+- `sync.rs`
+  - canonical JSON for HMAC signing
+  - HMAC round-trip
+  - sync delta serialization shape
+  - `node_tick` self-membership availability gate
+  - `sync_tick` availability gate behavior
+  - peer blacklist cache eviction
+  - peer `/status` probe metadata capture
+  - incoming sync record validation (oversize payload, future timestamp, invalid ciphertext)
+- `server.rs`
+  - `/health`, `/nodes`, `/nonce` behavior
+  - `/nonce` token-bucket rate limiting
+  - `/kms/*` service availability gate
+  - `/sync` readiness gate (master secret required)
+- `rate_limiter.rs`
+  - token bucket allow/deny and refill behavior
+- `registry.rs`
+  - `setMasterSecretHash` calldata encoding
+  - Odyn signed-tx payload extraction variants
+  - `CachedNovaRegistry` wallet cache hit path
+- `models.rs`
+  - vector clock comparison
+  - sync record serialization/deserialization
+
+## Cross-Language Parity Test
+
+`tests/compare_behavior.py` validates:
+
+- `derive_data_key(master_secret, app_id)` compatibility
+- `derive_sync_key(master_secret)` compatibility
+- AES-GCM ciphertext produced by Rust can be decrypted by Python reference implementation
+
+Run:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r enclave/requirements.txt
-pip install pytest httpx
+cd nova-kms
+python3 tests/compare_behavior.py
 ```
 
-### Test Files
+Expected: script prints all checks as `True` and ends with success.
 
-| File | Module Under Test | Coverage |
-|------|-------------------|----------|
-| `test_auth.py` | `auth.py` | PoP helpers, nonce store, AppAuthorizer, dev header identity |
-| `test_data_store.py` | `data_store.py` | CRUD, namespace isolation, merge, deltas, snapshots, TTL/LRU |
-| `test_encryption.py` | `data_store.py` | AES-GCM at-rest behavior and fail-closed semantics |
-| `test_integration_pop.py` | routes + auth | End-to-end App PoP authentication flows through the API |
-| `test_kdf.py` | `kdf.py` | HKDF derivation, master secret lifecycle, sealed exchange helpers |
-| `test_kms_registry.py` | `kms_registry.py` | ABI alignment and read-only registry views |
-| `test_master_secret_operator_guard.py` | `sync_manager.py` | Security guard: Ensures master secret isn't requested from non-operators |
-| `test_nova_registry.py` | `nova_registry.py` | Registry reads and cache behavior |
-| `test_registry_abi.py` | ABI helpers | Selector/type alignment with artifacts (when present) |
-| `test_routes.py` | `routes.py` + `app.py` | Full API integration via FastAPI TestClient |
-| `test_secure_channel.py` | `secure_channel.py` | P-384 validation, verify_peer_identity, ECDH key exchange |
-| `test_security.py` | helpers | SSRF URL validation, rate limiting, finalized eth_call behavior |
-| `test_sync.py` | `sync_manager.py` | PeerCache, delta/snapshot sync, mutual PoP + HMAC verification |
+## Notes
 
-### Running Tests
+- The parity script intentionally does not depend on legacy `enclave/` source files; it embeds the Python reference HKDF/AES logic directly.
+- For full end-to-end cluster sync validation, run at least two nodes and execute sync flows (`/sync` delta + snapshot + master-secret request) under the same registry/network configuration.
+- For coverage details, run:
 
 ```bash
-# All tests
-pytest tests/ -v
-
-# Single module
-pytest tests/test_data_store.py -v
-
-# Single test class
-pytest tests/test_auth.py::TestAppAuthorizer -v
-
-# With coverage
-pip install pytest-cov
-pytest tests/ --cov=enclave --cov-report=term-missing
-```
-
-### Test Architecture
-
-Tests use **mocking** to avoid real blockchain and Odyn calls:
-
-```python
-# Example: mock the NovaRegistry for auth tests
-from unittest.mock import MagicMock
-
-mock_registry = MagicMock(spec=NovaRegistry)
-mock_registry.get_instance_by_wallet.return_value = _make_instance()
-authorizer = AppAuthorizer(registry=mock_registry)
-```
-
-For route tests, `test_routes.py` uses FastAPI's `TestClient` with all dependencies mocked:
-
-```python
-from fastapi.testclient import TestClient
-from app import app
-
-client = TestClient(app)
-resp = client.get("/health")
-assert resp.status_code == 200
-```
-
-### Key Test Scenarios
-
-#### Data Store
-- Put and get a record
-- Namespace isolation (different app_ids don't interfere)
-- Delete creates a tombstone
-- TTL expiration
-- Value size limit enforcement
-- LWW (Last-Writer-Wins) conflict resolution
-- Delta extraction and snapshot merge
-
-#### KDF
-- Deterministic key derivation (same inputs → same key)
-- Different paths / app_ids / secrets → different keys
-- MasterSecretManager lifecycle (uninitialized → error, initialized → works)
-
-
-#### Auth
-- Full success path (ACTIVE instance + zkVerified + ACTIVE app + non-REVOKED version)
-- Missing wallet → rejected
-- Instance not found → rejected
-- Instance STOPPED → rejected
-- Instance not zkVerified → rejected
-- App not ACTIVE → rejected
-- Version REVOKED (or lookup failure) → rejected
-
-#### Sync
-- Delta merge incoming records
-- Snapshot request returns full state
-- Unknown sync type → error
-- PeerCache refresh and self-exclusion
-
-#### Routes (Integration)
-- `/health` → 200
-- `/status` → node and cluster info
-- `/nodes` → operator list
-- `/kms/derive` → returns base64 key
-- `/kms/data` PUT + `/kms/data/{key}` GET → round-trip
-- `/kms/data` DELETE → removes key
-- `/sync` delta + snapshot_request
-
----
-
-## Solidity Tests
-
-### Setup
-
-```bash
-cd contracts
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-```
-
-### Running
-
-```bash
-forge test           # all tests
-forge test -vvv      # verbose with traces
-forge test --match-test test_addOperator_success  # single test
-forge test --gas-report  # gas usage
-```
-
-### Test File: `KMSRegistry.t.sol`
-
-Uses a mock `novaAppRegistry` address to simulate the callback pattern.
-
-| Test | Scenario |
-|------|----------|
-| `test_setNovaAppRegistry_byOwner` | Owner can update registry address |
-| `test_setNovaAppRegistry_revert_notOwner` | Non-owner cannot update registry |
-| `test_setKmsAppId_revert_alreadySet` | `kmsAppId` is write-once |
-| `test_setKmsAppId_revert_notOwner` | Non-owner cannot set app ID |
-| `test_addOperator_success` | Successful operator addition via callback |
-| `test_addOperator_emitsEvent` | OperatorAdded event emitted |
-| `test_removeOperator_success` | Operator removed via callback |
-| `test_constructor_setsState` | Constructor sets registry and owner |
-| `test_getOperators_empty` | Empty operator list |
-| `test_fullLifecycle` | Add 3 operators, remove 1, verify state |
-
----
-
-## CI Integration
-
-Add to your CI pipeline:
-
-```yaml
-# .github/workflows/test.yml
-jobs:
-  python-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: |
-          pip install -r nova-kms/enclave/requirements.txt
-          pip install pytest httpx
-          cd nova-kms && pytest tests/ -v
-
-  solidity-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: foundry-rs/foundry-toolchain@v1
-      - run: cd nova-kms/contracts && forge test -vvv
+cd nova-kms
+cargo llvm-cov --workspace --all-features --summary-only
 ```

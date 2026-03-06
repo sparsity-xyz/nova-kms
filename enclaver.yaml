@@ -1,9 +1,9 @@
 version: v1
-name: "nova-kms"
-target: "nova-kms:latest"
+name: "nova-kms-rust"
+target: "nova-kms-rust:latest"
 
 sources:
-  app: "./enclave"
+  app: "."
 
 api:
   listen_port: 18000
