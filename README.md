@@ -186,7 +186,6 @@ Important detail:
 
 ```bash
 cargo test
-python3 tests/compare_behavior.py
 make build-docker
 ```
 

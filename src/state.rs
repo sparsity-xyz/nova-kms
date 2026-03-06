@@ -76,8 +76,8 @@ impl AppState {
         let nonce_rate_limiter = TokenBucket::new(config.nonce_rate_limit_per_minute);
         let odyn = OdynClient::new(config.in_enclave);
 
-        // Keep node wallet bound to the signing identity currently exposed by Odyn.
-        // This mirrors the Python startup path and avoids PoP recipient mismatches.
+        // Keep node wallet bound to the signing identity currently exposed by Odyn
+        // so PoP recipient binding matches the active enclave signer.
         if config.in_enclave {
             match fetch_odyn_wallet_with_retry(&odyn).await {
                 Ok(wallet) => match canonical_wallet(&wallet) {

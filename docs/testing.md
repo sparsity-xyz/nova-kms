@@ -10,9 +10,6 @@ From the repository root:
 # Rust unit tests
 cargo test
 
-# reference crypto check
-python3 tests/compare_behavior.py
-
 # contract tests
 cd contracts && forge test -vvv
 ```
@@ -90,31 +87,7 @@ Current tests cover:
 - `/kms/*` service-availability gate
 - `/sync` requirement that the master secret already exists
 
-## 3. Reference Crypto Check
-
-`tests/compare_behavior.py` is a reference-value test for the current crypto surface.
-
-It:
-
-1. derives keys with a reference HKDF implementation
-2. builds `src/bin/compare_rust.rs`
-3. compares:
-   - `derive_data_key(master_secret, app_id)`
-   - `derive_sync_key(master_secret)`
-4. decrypts Rust-produced AES-GCM ciphertext with the reference implementation
-
-Run:
-
-```bash
-python3 tests/compare_behavior.py
-```
-
-Expected outcome:
-
-- all comparisons print `True`
-- the script ends with success
-
-## 4. Contract Tests
+## 3. Contract Tests
 
 The Foundry suite in `contracts/` validates `KMSRegistry` behavior, including:
 
@@ -131,7 +104,7 @@ cd contracts
 forge test -vvv
 ```
 
-## 5. What Is Not Covered Automatically
+## 4. What Is Not Covered Automatically
 
 The repository does not contain a current end-to-end cluster test that spins up multiple live Rust nodes and exercises:
 
@@ -145,12 +118,11 @@ For those flows, use a real environment and validate with:
 - `/nodes`
 - application logs
 
-## 6. Recommended Validation Before Shipping
+## 5. Recommended Validation Before Shipping
 
 1. run `cargo test`
-2. run `python3 tests/compare_behavior.py`
-3. run `cd contracts && forge test -vvv`
-4. in a real deployment, verify:
+2. run `cd contracts && forge test -vvv`
+3. in a real deployment, verify:
    - `/status.node.service_available`
    - peer visibility in `/nodes`
    - successful delta push logs

@@ -7,7 +7,6 @@ This guide covers local development against the current Rust codebase.
 Required:
 
 - Rust and Cargo
-- Python 3 for `tests/compare_behavior.py`
 - Foundry for `contracts/`
 - Docker for image builds
 
@@ -29,7 +28,6 @@ Relevant paths:
 - `src/store.rs`: namespaced in-memory KV store
 - `src/crypto.rs`: HKDF, AES-GCM, HMAC, sealed master-secret exchange
 - `src/registry.rs`: contract clients and caches
-- `src/bin/compare_rust.rs`: helper for the reference crypto check
 - `docs/`: code-aligned documentation
 - `contracts/`: `KMSRegistry` contract and Foundry scripts
 
@@ -44,9 +42,6 @@ cargo clippy
 
 # unit tests
 cargo test
-
-# reference crypto check
-python3 tests/compare_behavior.py
 
 # image build
 make build-docker
