@@ -16,7 +16,7 @@ use crate::auth::{
 };
 use crate::crypto::{derive_app_key_extended, derive_data_key, seal_master_secret};
 use crate::error::KmsError;
-use crate::models::{DataRecord, VectorClock};
+use crate::models::DataRecord;
 use crate::state::SharedState;
 use crate::sync::{canonical_json, now_ms, validate_incoming_record, verify_hmac_hex};
 
@@ -544,17 +544,6 @@ async fn put_data(
         let encrypted_value = crate::crypto::encrypt_data(&value, &data_key)?;
         let now = now_ms();
 
-        let mut vc = VectorClock::new();
-        vc.increment(&s.config.node_wallet);
-
-        let rec = DataRecord {
-            key: key.clone(),
-            encrypted_value,
-            version: vc,
-            updated_at_ms: now,
-            tombstone: false,
-            ttl_ms,
-        };
         tracing::debug!(
             "Stored local record for sync: app_id={} key='{}' updated_at_ms={} ttl_ms={}",
             auth.app_id,
@@ -562,12 +551,21 @@ async fn put_data(
             now,
             ttl_ms
         );
-        let ns = s.store.get_namespace(auth.app_id).await;
-        ns.write().await.put(&key, rec);
+        let rec = s
+            .store
+            .put_local(
+                auth.app_id,
+                &key,
+                encrypted_value,
+                &s.config.node_wallet,
+                now,
+                ttl_ms,
+            )
+            .await;
 
         maybe_add_app_response_signature(&s, auth.signature.as_deref(), &mut response_headers)
             .await;
-        (auth, key, now)
+        (auth, key, rec.updated_at_ms)
     };
 
     let s = state.read().await;

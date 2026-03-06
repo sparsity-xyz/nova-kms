@@ -120,8 +120,8 @@ That means different `app_id` namespaces can proceed independently after lookup.
 
 On a local write:
 
-- the handler creates a fresh vector clock
-- increments it once with `config.node_wallet`
+- the handler loads the existing record version for that key if one exists
+- increments that version with `config.node_wallet`
 - stamps `updated_at_ms=now_ms()`
 - stores the encrypted record
 
@@ -150,6 +150,35 @@ Rules:
   - larger timestamp wins
   - if timestamps tie, lexicographically larger ciphertext wins
   - when a concurrent record wins, the stored vector clock becomes the merge of both clocks
+
+Definitions:
+
+- `version` is a vector clock, for example `{A: 2, B: 1}`.
+  - each entry means: for this record, node `A` has advanced this key 2 times, node `B` has advanced it 1 time
+  - missing nodes are treated as `0`
+- `versions are equal` means every node dimension has exactly the same counter in both records.
+  - example: existing `{A: 2, B: 1}`, incoming `{A: 2, B: 1}`
+  - this means both records describe the same causal position in history
+  - the current implementation ignores the incoming record in this case
+- `incoming happened after current` means the incoming vector clock is greater than or equal to the current one in every dimension, and strictly greater in at least one dimension.
+  - example: existing `{A: 1, B: 1}`, incoming `{A: 2, B: 1}`
+  - this means the incoming record clearly includes all history already known by the current record, plus at least one newer write
+- `incoming happened before current` means the current vector clock is greater than or equal to the incoming one in every dimension, and strictly greater in at least one dimension.
+  - example: existing `{A: 2, B: 1}`, incoming `{A: 1, B: 1}`
+  - this means the incoming record is older and is ignored
+- `versions are concurrent` means neither side fully includes the other.
+  - example: existing `{A: 1, B: 2}`, incoming `{A: 2, B: 1}`
+  - on node `A`, the incoming record is newer; on node `B`, the existing record is newer
+  - this means the two writes were made independently without one side first observing the other's latest state
+
+Concurrent case details:
+
+- in the concurrent case, vector clock comparison alone cannot decide a winner
+- the implementation falls back to Last-Writer-Wins using `updated_at_ms`
+- if `updated_at_ms` is also equal, it uses ciphertext bytes as a deterministic tie-breaker
+- if the incoming concurrent record wins, the stored `version` is not just the incoming clock
+  - it becomes the element-wise max of both clocks
+  - example: existing `{A: 1, B: 2}`, incoming `{A: 2, B: 1}` -> stored merged clock `{A: 2, B: 2}`
 
 This produces deterministic convergence across nodes.
 

@@ -267,6 +267,15 @@ Namespace merge rules are:
   - if timestamps tie, lexicographically larger ciphertext
 - concurrent replacement merges vector clocks before storing
 
+Definitions:
+
+- `equal vector clock` means both records have the same counter for every node dimension
+  - example: `{A: 2, B: 1}` vs `{A: 2, B: 1}`
+- `concurrent` means neither record fully includes the other
+  - example: `{A: 1, B: 2}` vs `{A: 2, B: 1}`
+  - one side is newer on some dimensions, and the other side is newer on other dimensions
+  - only this case falls back to `updated_at_ms` for tie-breaking
+
 ## 10. Observability
 
 ### 10.1 `/status`
