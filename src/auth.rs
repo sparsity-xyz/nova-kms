@@ -370,10 +370,11 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
     fn base_test_config() -> Config {
-        let mut cfg = Config::default();
-        cfg.in_enclave = false;
-        cfg.pop_timeout_seconds = 120;
-        cfg
+        Config {
+            in_enclave: false,
+            pop_timeout_seconds: 120,
+            ..Config::default()
+        }
     }
 
     async fn signed_kms_headers(

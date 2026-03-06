@@ -70,8 +70,10 @@ The application utilizes `figment` to parse configuration out of environment var
 | `NOVA_APP_REGISTRY_PROXY` | Proxy address for NovaAppRegistry | `0x...` |
 | `KMS_REGISTRY_ADDRESS` | Address for deployed KMSRegistry contract | `0x...` |
 | `KMS_APP_ID` | Assigned KMS App ID for derivation namespace | `0` |
-| `NODE_URL` | Public URL of this KMS node | `http://localhost:8000` |
+| `NODE_URL` | RPC URL for registry/auth-chain calls | `http://127.0.0.1:18545` |
+| `NODE_INSTANCE_URL` | Public URL of this KMS node | `http://localhost:8000` |
 | `HELIOS_RPC_URL` | Override for local Helios JSON-RPC endpoint | `http://127.0.0.1:18545` |
+| `SYNC_TIMESTAMP_BACKDATE_MS` | Optional outbound `/sync` timestamp backdate to tolerate peer clock skew in mixed clusters | `5000` |
 | `IN_ENCLAVE` | Switch to verify strict TLS behaviors if necessary | `true` |
 
 These can also be provided within a `Kms.toml` root file!
@@ -81,7 +83,8 @@ These can also be provided within a `Kms.toml` root file!
 ```bash
 # Set required env vars
 export KMS_APP_ID=49
-export NODE_URL=http://localhost:8000
+export NODE_URL=http://127.0.0.1:18545
+export NODE_INSTANCE_URL=http://localhost:8000
 
 # Start server
 cargo run

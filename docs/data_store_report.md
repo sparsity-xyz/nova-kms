@@ -28,7 +28,7 @@ To prevent memory exhaustion attacks, strict limits are enforced within each nam
 |-------|-------|-------------|
 | `MAX_VALUE_SIZE` | 1 MB | Maximum size of a single encrypted record. |
 | `MAX_APP_STORAGE` | 10 MB | Total encrypted payload quota per app namespace. |
-| `MAX_CLOCK_SKEW_MS`| 5 sec | Tolerance window for future-dated writes. |
+| `MAX_CLOCK_SKEW_MS`| 10 sec | Tolerance window for future-dated writes. |
 
 - **Eviction policy**: When a namespace exceeds `MAX_APP_STORAGE`, it evicts records in least-recently-updated order based on `updated_at_ms` while preserving tombstone semantics.
 

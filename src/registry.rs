@@ -105,7 +105,7 @@ pub struct RegistryClient {
     http: reqwest::Client,
 }
 
-const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCAL_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn with_timeout<T, I, E>(op: &str, fut: I) -> Result<T, KmsError>
 where

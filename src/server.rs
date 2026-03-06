@@ -639,6 +639,12 @@ async fn sync_handler(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, KmsError> {
+    let caller_wallet = headers
+        .get("x-kms-wallet")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    tracing::info!("Received /sync request from {}", caller_wallet);
+
     let mut response_headers = HeaderMap::new();
     let (response_body, response_receiver_pubkey) = {
         let s = state.read().await;
@@ -681,6 +687,11 @@ async fn sync_handler(
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        tracing::debug!(
+            "Incoming sync from {}: type={}",
+            identity.tee_wallet,
+            sync_type
+        );
 
         match (s.sync_key, sync_type) {
             (Some(sync_key), st) if st != "master_secret_request" => {
@@ -696,6 +707,7 @@ async fn sync_handler(
             }
             _ => {}
         }
+        tracing::debug!("KMS PoP verified for {}", identity.tee_wallet);
 
         let result = match sync_type {
             "delta" => {
@@ -711,13 +723,28 @@ async fn sync_handler(
                         }
                     }
                 }
+                tracing::info!(
+                    "Applied delta sync from {}: merged {} record(s)",
+                    identity.tee_wallet,
+                    merged
+                );
                 json!({"status":"ok","merged":merged})
             }
             "snapshot_request" => {
                 let snapshot = s.store.full_snapshot(now_ms()).await;
+                let record_count = snapshot.values().map(std::vec::Vec::len).sum::<usize>();
+                tracing::info!(
+                    "Serving snapshot to {}: {} record(s) across {} app(s)",
+                    identity.tee_wallet,
+                    record_count,
+                    snapshot.len()
+                );
                 json!({
                     "status":"ok",
-                    "data": crate::sync::serialize_deltas(&snapshot),
+                    "data": crate::sync::serialize_deltas_with_backdate(
+                        &snapshot,
+                        s.config.sync_timestamp_backdate_ms,
+                    ),
                 })
             }
             "master_secret_request" => {
@@ -734,6 +761,7 @@ async fn sync_handler(
                 })?;
                 let secret = s.master_secret.get_secret().await?;
                 let sealed = seal_master_secret(&secret.bytes, &peer_pubkey)?;
+                tracing::info!("Serving sealed master secret to {}", identity.tee_wallet);
                 json!({"status":"ok","sealed":sealed})
             }
             _ => {
@@ -767,10 +795,12 @@ mod tests {
     use tower::ServiceExt;
 
     async fn build_router(nonce_rate_limit_per_minute: u64) -> Router {
-        let mut cfg = Config::default();
-        cfg.in_enclave = false;
-        cfg.node_url = "http://127.0.0.1:1".to_string();
-        cfg.nonce_rate_limit_per_minute = nonce_rate_limit_per_minute;
+        let cfg = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            nonce_rate_limit_per_minute,
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(cfg).await));
         app_router(state)
     }

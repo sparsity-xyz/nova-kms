@@ -139,6 +139,11 @@ impl PeerCache {
         };
 
         let active_instances = registry.get_active_instances(kms_app_id).await?;
+        tracing::debug!(
+            "Peer discovery for app {} returned {} active wallets from registry",
+            kms_app_id,
+            active_instances.len()
+        );
 
         let mut new_peers = Vec::new();
         for wallet in active_instances {
@@ -203,6 +208,7 @@ impl PeerCache {
             *p = new_peers;
         }
         *self.last_refresh.write().await = now_secs();
+        tracing::info!("Peer cache refreshed: {} active KMS instances", peer_count);
         Ok(peer_count)
     }
 
@@ -351,15 +357,46 @@ pub fn verify_hmac_hex(sync_key: &[u8; 32], payload: &[u8], signature_hex: &str)
     }
 }
 
-pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
+fn sync_record_to_value(record: &DataRecord, timestamp_backdate_ms: u64) -> Value {
+    let adjusted_updated_at_ms = record.updated_at_ms.saturating_sub(timestamp_backdate_ms);
+    let applied_backdate_ms = record.updated_at_ms - adjusted_updated_at_ms;
+    let adjusted_ttl_ms = if record.ttl_ms == 0 {
+        0
+    } else {
+        record.ttl_ms.saturating_add(applied_backdate_ms)
+    };
+
+    json!({
+        "key": record.key,
+        "value": if record.tombstone { Value::Null } else { Value::String(hex::encode(&record.encrypted_value)) },
+        "version": record.version.clocks,
+        "updated_at_ms": adjusted_updated_at_ms,
+        "tombstone": record.tombstone,
+        "ttl_ms": adjusted_ttl_ms,
+    })
+}
+
+pub fn serialize_deltas_with_backdate(
+    deltas: &HashMap<u64, Vec<DataRecord>>,
+    timestamp_backdate_ms: u64,
+) -> Value {
     let mut map = Map::new();
     for (app_id, records) in deltas {
         map.insert(
             app_id.to_string(),
-            Value::Array(records.iter().map(|r| r.to_sync_value()).collect()),
+            Value::Array(
+                records
+                    .iter()
+                    .map(|r| sync_record_to_value(r, timestamp_backdate_ms))
+                    .collect(),
+            ),
         );
     }
     Value::Object(map)
+}
+
+pub fn serialize_deltas(deltas: &HashMap<u64, Vec<DataRecord>>) -> Value {
+    serialize_deltas_with_backdate(deltas, 0)
 }
 
 const INIT_RETRY_ATTEMPTS: usize = 5;
@@ -431,12 +468,27 @@ async fn local_master_secret_hash(state: &SharedState) -> Option<[u8; 32]> {
 }
 
 async fn set_service_availability(state: &SharedState, available: bool, reason: &str) {
-    let mut s = state.write().await;
-    s.service_available = available;
-    if available {
-        s.service_unavailable_reason.clear();
-    } else {
-        s.service_unavailable_reason = reason.to_string();
+    let (changed, new_reason) = {
+        let mut s = state.write().await;
+        let previous_available = s.service_available;
+        let previous_reason = s.service_unavailable_reason.clone();
+        s.service_available = available;
+        if available {
+            s.service_unavailable_reason.clear();
+        } else {
+            s.service_unavailable_reason = reason.to_string();
+        }
+        let changed = previous_available != s.service_available
+            || previous_reason != s.service_unavailable_reason;
+        (changed, s.service_unavailable_reason.clone())
+    };
+
+    if changed {
+        if available {
+            tracing::info!("Service availability changed: available");
+        } else {
+            tracing::warn!("Service availability changed: unavailable ({})", new_reason);
+        }
     }
 }
 
@@ -476,11 +528,11 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         }
     }
 
-    if let Err(err) = retry_init_op("Peer cache refresh", || async {
+    let peer_refresh_result = retry_init_op("Peer cache refresh", || async {
         peer_cache.refresh_from_chain(state).await
     })
-    .await
-    {
+    .await;
+    if let Err(err) = &peer_refresh_result {
         tracing::warn!("Peer cache refresh failed in node_tick: {}", err);
     }
 
@@ -490,11 +542,24 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     };
     let peers = peer_cache.get_peers(None).await;
 
+    if peer_refresh_result.is_err() && peers.is_empty() {
+        let mut s = state.write().await;
+        s.is_operator = false;
+        s.service_available = false;
+        s.service_unavailable_reason = "peer cache refresh failed".to_string();
+        return Ok(());
+    }
+
     let self_wallet = node_wallet.to_lowercase();
     let self_in_membership = peers
         .iter()
         .any(|p| p.tee_wallet_address.eq_ignore_ascii_case(&self_wallet));
     if !self_in_membership {
+        tracing::warn!(
+            "Node wallet {} not present in current KMS peer membership ({} peers cached)",
+            self_wallet,
+            peers.len()
+        );
         let mut s = state.write().await;
         s.is_operator = false;
         s.service_available = false;
@@ -560,6 +625,7 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
 
     let chain_hash_is_zero = chain_hash == [0u8; 32];
     if chain_hash_is_zero {
+        tracing::info!("On-chain masterSecretHash is unset; attempting local initialization");
         let has_local_secret = {
             let s = state.read().await;
             s.master_secret.is_initialized().await
@@ -622,6 +688,7 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     }
 
     if local_master_secret_hash(state).await != Some(chain_hash) {
+        tracing::info!("Local master secret hash mismatch; attempting sync from peers");
         let synced = match attempt_master_secret_sync(state).await {
             Ok(v) => v,
             Err(err) => {
@@ -737,7 +804,7 @@ fn is_envelope(v: &Value) -> bool {
 pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
     refresh_peers_if_needed(state).await?;
 
-    let (sync_key, node_wallet, deltas_payload, peer_cache) = {
+    let (sync_key, node_wallet, deltas_payload, peer_cache, app_count, record_count, backdate_ms) = {
         let mut s = state.write().await;
         if !s.service_available {
             return Ok(0);
@@ -754,18 +821,37 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         }
 
         let node_wallet = s.config.node_wallet.clone();
+        let app_count = deltas.len();
+        let record_count = deltas.values().map(std::vec::Vec::len).sum::<usize>();
         (
             sync_key,
             node_wallet,
-            serialize_deltas(&deltas),
+            serialize_deltas_with_backdate(&deltas, s.config.sync_timestamp_backdate_ms),
             Arc::clone(&s.peer_cache),
+            app_count,
+            record_count,
+            s.config.sync_timestamp_backdate_ms,
         )
     };
     let peers = peer_cache.get_peers(Some(&node_wallet)).await;
 
     if peers.is_empty() {
+        tracing::debug!(
+            "Delta push skipped: {} records across {} apps but no peers available",
+            record_count,
+            app_count
+        );
         return Ok(0);
     }
+    let peer_count = peers.len();
+
+    tracing::info!(
+        "Delta push: {} records across {} apps to {} peers (backdate={}ms)",
+        record_count,
+        app_count,
+        peer_count,
+        backdate_ms
+    );
 
     let body = json!({
         "type": "delta",
@@ -789,19 +875,42 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             .await
         {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::debug!(
+                    "Delta push to {} failed to fetch nonce: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
+            }
         };
         if !nonce_resp.status().is_success() {
+            tracing::debug!(
+                "Delta push to {} failed: nonce endpoint returned {}",
+                peer_wallet,
+                nonce_resp.status()
+            );
             continue;
         }
         let nonce_data: NonceResponse = match nonce_resp.json().await {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::debug!(
+                    "Delta push to {} returned invalid nonce JSON: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
+            }
         };
         if base64::engine::general_purpose::STANDARD
             .decode(nonce_data.nonce.as_bytes())
             .is_err()
         {
+            tracing::debug!(
+                "Delta push to {} failed: nonce was not valid base64",
+                peer_wallet
+            );
             continue;
         }
 
@@ -811,22 +920,43 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             let s = state.read().await;
             match sign_message_for_node(&s.config, &s.odyn, &message).await {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        "Delta push to {} failed to sign PoP message: {}",
+                        peer_wallet,
+                        err
+                    );
+                    continue;
+                }
             }
         };
 
         let envelope = match encrypt_json_envelope(state, &body, &peer.tee_pubkey).await {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "Delta push to {} failed to encrypt payload: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
+            }
         };
         let canonical = match canonical_json(&envelope) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "Delta push to {} failed to canonicalize envelope: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
+            }
         };
         let sync_sig = hmac_hex(&sync_key, canonical.as_bytes());
 
         let response = match reqwest::Client::new()
-            .post(endpoint)
+            .post(&endpoint)
             .header("Content-Type", "application/json")
             .header("x-kms-signature", signature.clone())
             .header("x-kms-wallet", signer_wallet)
@@ -838,33 +968,80 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             .await
         {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "Delta push to {} at {} failed during HTTP request: {}",
+                    peer_wallet,
+                    endpoint,
+                    err
+                );
+                continue;
+            }
         };
         if !response.status().is_success() {
+            tracing::warn!(
+                "Delta push to {} at {} returned HTTP {}",
+                peer_wallet,
+                endpoint,
+                response.status()
+            );
             continue;
         }
 
         let Some(resp_sig) = response.headers().get("x-kms-peer-signature") else {
+            tracing::warn!(
+                "Delta push to {} failed: missing X-KMS-Peer-Signature",
+                peer_wallet
+            );
             continue;
         };
         let Ok(resp_sig) = resp_sig.to_str() else {
+            tracing::warn!(
+                "Delta push to {} failed: invalid X-KMS-Peer-Signature header",
+                peer_wallet
+            );
             continue;
         };
         let expected = format!("NovaKMS:Response:{}:{}", signature, peer_wallet);
         if !verify_wallet_signature(&peer_wallet, &expected, resp_sig) {
+            tracing::warn!(
+                "Delta push to {} failed: invalid peer response signature",
+                peer_wallet
+            );
             continue;
         }
 
         let resp_json: Value = match response.json().await {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(err) => {
+                tracing::warn!(
+                    "Delta push to {} failed to decode response JSON: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
+            }
         };
-        if is_envelope(&resp_json) && decrypt_json_envelope(state, &resp_json).await.is_err() {
+        if is_envelope(&resp_json)
+            && let Err(err) = decrypt_json_envelope(state, &resp_json).await
+        {
+            tracing::warn!(
+                "Delta push to {} failed to decrypt response envelope: {}",
+                peer_wallet,
+                err
+            );
             continue;
         }
         success += 1;
     }
 
+    tracing::info!(
+        "Delta push complete: {}/{} peers synced ({} records across {} apps)",
+        success,
+        peer_count,
+        record_count,
+        app_count
+    );
     Ok(success)
 }
 
@@ -877,6 +1054,17 @@ async fn post_sync_request_to_peer(
     let peer_wallet = canonical_wallet(&peer.tee_wallet_address)?;
     let base = peer.node_url.trim_end_matches('/').to_string();
     let endpoint = format!("{}/sync", base);
+    let request_type = inner_payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    tracing::debug!(
+        "Sending {} sync request to peer {} at {}",
+        request_type,
+        peer_wallet,
+        endpoint
+    );
 
     let nonce_resp = reqwest::Client::new()
         .get(format!("{}/nonce", base))
@@ -957,6 +1145,11 @@ async fn post_sync_request_to_peer(
         .json()
         .await
         .map_err(|e| KmsError::ValidationError(format!("Invalid sync response body: {}", e)))?;
+    tracing::debug!(
+        "{} sync request to peer {} completed successfully",
+        request_type,
+        peer_wallet
+    );
     if is_envelope(&body) {
         decrypt_json_envelope(state, &body).await
     } else {
@@ -972,12 +1165,20 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
     };
     let peers = peer_cache.get_peers(Some(&node_wallet)).await;
     if peers.is_empty() {
+        tracing::warn!("Master secret sync requested but no peers are available");
         return Ok(false);
     }
+
+    tracing::info!("Attempting master secret sync from {} peer(s)", peers.len());
 
     let local_wallet = node_wallet;
 
     for peer in peers {
+        tracing::info!(
+            "Requesting master secret from peer {} at {}",
+            peer.tee_wallet_address,
+            peer.node_url
+        );
         let local_secret = p384::SecretKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
         let local_pub_der = match local_secret.public_key().to_public_key_der() {
             Ok(v) => v,
@@ -996,7 +1197,14 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
         let response =
             match post_sync_request_to_peer(state, &peer, &req_body, maybe_sync_key).await {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(
+                        "Master secret request to peer {} failed: {}",
+                        peer.tee_wallet_address,
+                        err
+                    );
+                    continue;
+                }
             };
         let sealed_val = response
             .get("sealed")
@@ -1022,6 +1230,10 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             let master = s.master_secret.get_secret().await?;
             s.sync_key = Some(crate::crypto::derive_sync_key(&master));
         }
+        tracing::info!(
+            "Master secret synced successfully from peer {}",
+            peer.tee_wallet_address
+        );
 
         // Pull snapshot right after getting the secret.
         let snapshot_req = json!({
@@ -1034,7 +1246,16 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
         };
         let snapshot_resp = post_sync_request_to_peer(state, &peer, &snapshot_req, sync_key)
             .await
+            .map_err(|err| {
+                tracing::warn!(
+                    "Snapshot request to peer {} failed after master secret sync: {}",
+                    peer.tee_wallet_address,
+                    err
+                );
+                err
+            })
             .ok();
+        let mut merged_records = 0usize;
         if let Some(data_obj) = snapshot_resp
             .as_ref()
             .and_then(|resp| resp.get("data"))
@@ -1046,9 +1267,16 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
                     continue;
                 }
                 let s = state.read().await;
-                let _ = s.store.merge_record(app_id, record).await;
+                if s.store.merge_record(app_id, record).await {
+                    merged_records += 1;
+                }
             }
         }
+        tracing::info!(
+            "Snapshot sync from peer {} merged {} record(s)",
+            peer.tee_wallet_address,
+            merged_records
+        );
 
         return Ok(true);
     }
@@ -1137,10 +1365,14 @@ pub async fn validate_incoming_record(
     if max_clock_skew_ms > 0 {
         let now = now_ms();
         if record.updated_at_ms > now.saturating_add(max_clock_skew_ms) {
+            let delta_ms = record.updated_at_ms.saturating_sub(now);
             tracing::warn!(
-                "Rejecting incoming sync record '{}': future timestamp {} exceeds allowed skew",
+                "Rejecting incoming sync record '{}': future timestamp {}ms exceeds limit (now={}ms + max_skew={}ms, delta={}ms)",
                 record.key,
-                record.updated_at_ms
+                record.updated_at_ms,
+                now,
+                max_clock_skew_ms,
+                delta_ms
             );
             return false;
         }
@@ -1193,6 +1425,26 @@ mod tests {
         assert_eq!(out["49"][0]["key"], "k");
     }
 
+    #[test]
+    fn test_serialize_deltas_with_backdate_preserves_expiry() {
+        let mut vc = VectorClock::new();
+        vc.increment("node-a");
+        let rec = DataRecord {
+            key: "k".to_string(),
+            encrypted_value: vec![1, 2, 3],
+            version: vc,
+            updated_at_ms: 10_000,
+            tombstone: false,
+            ttl_ms: 30_000,
+        };
+        let mut deltas = HashMap::new();
+        deltas.insert(49u64, vec![rec]);
+
+        let out = serialize_deltas_with_backdate(&deltas, 8_000);
+        assert_eq!(out["49"][0]["updated_at_ms"], 2_000);
+        assert_eq!(out["49"][0]["ttl_ms"], 38_000);
+    }
+
     #[tokio::test]
     async fn test_blacklist_peer_removes_cached_entry() {
         let cache = PeerCache::new();
@@ -1220,11 +1472,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_node_tick_marks_unavailable_when_self_not_in_membership() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
-        config.node_wallet = "0xa000000000000000000000000000000000000000".to_string();
+    async fn test_node_tick_marks_unavailable_when_peer_refresh_fails() {
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            node_wallet: "0xa000000000000000000000000000000000000000".to_string(),
+            ..Config::default()
+        };
 
         let state = Arc::new(RwLock::new(AppState::new(config).await));
         node_tick(&state).await.unwrap();
@@ -1232,14 +1486,16 @@ mod tests {
         let s = state.read().await;
         assert!(!s.is_operator);
         assert!(!s.service_available);
-        assert_eq!(s.service_unavailable_reason, "self not in KMS node list");
+        assert_eq!(s.service_unavailable_reason, "peer cache refresh failed");
     }
 
     #[tokio::test]
     async fn test_sync_tick_skips_when_service_unavailable() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(config).await));
 
         {
@@ -1272,10 +1528,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_incoming_record_rejects_oversized_value() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
-        config.max_kv_value_size_bytes = 16;
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            max_kv_value_size_bytes: 16,
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(config).await));
 
         let mut vc = VectorClock::new();
@@ -1294,10 +1552,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_incoming_record_rejects_future_timestamp() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
-        config.max_clock_skew_ms = 100;
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            max_clock_skew_ms: 100,
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(config).await));
 
         let mut vc = VectorClock::new();
@@ -1316,9 +1576,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_incoming_record_rejects_short_ciphertext_in_enclave_mode() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(config).await));
         {
             let mut s = state.write().await;
@@ -1341,9 +1603,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_incoming_record_rejects_invalid_ciphertext_in_enclave_mode() {
-        let mut config = Config::default();
-        config.in_enclave = false;
-        config.node_url = "http://127.0.0.1:1".to_string();
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            ..Config::default()
+        };
         let state = Arc::new(RwLock::new(AppState::new(config).await));
         {
             let mut s = state.write().await;

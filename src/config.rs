@@ -16,6 +16,7 @@ pub struct Config {
 
     // Network & Sync
     pub kms_app_id: u64,
+    #[serde(alias = "HELIOS_RPC_URL")]
     pub node_url: String, // RPC for chain calls
     pub node_instance_url: String,
     pub node_wallet: String,
@@ -27,6 +28,8 @@ pub struct Config {
     pub peer_cache_ttl_seconds: u64,
     pub registry_cache_ttl_seconds: u64,
     pub peer_blacklist_duration_seconds: u64,
+    #[serde(alias = "SYNC_TIMESTAMP_BACKDATE_MS")]
+    pub sync_timestamp_backdate_ms: u64,
 
     // Storage Engine Limits
     pub max_app_storage_bytes: usize,
@@ -66,6 +69,7 @@ impl Default for Config {
             peer_cache_ttl_seconds: 180,
             registry_cache_ttl_seconds: 180,
             peer_blacklist_duration_seconds: 600,
+            sync_timestamp_backdate_ms: 5_000,
             max_app_storage_bytes: 10 * 1024 * 1024, // 10MB
             max_kv_value_size_bytes: 1024 * 1024,    // 1MB
             tombstone_retention_ms: 24 * 60 * 60 * 1000,
@@ -74,7 +78,7 @@ impl Default for Config {
             max_nonces: 4096,
             max_request_body_bytes: 2 * 1024 * 1024,
             max_sync_payload_bytes: 50 * 1024 * 1024,
-            max_clock_skew_ms: 5_000,
+            max_clock_skew_ms: 10_000,
             allow_plaintext_dev: false,
             master_secret_hex: None,
             rate_limit_per_minute: 120,
@@ -94,5 +98,27 @@ impl Config {
 
     pub fn allow_plaintext_fallback(&self) -> bool {
         !self.in_enclave && self.allow_plaintext_dev
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn test_helios_rpc_url_alias_deserializes_into_node_url() {
+        let mut raw = serde_json::to_value(Config::default()).expect("default config serializes");
+        let obj = raw
+            .as_object_mut()
+            .expect("default config should serialize to object");
+        obj.remove("node_url");
+        obj.insert(
+            "HELIOS_RPC_URL".to_string(),
+            serde_json::Value::String("https://sepolia.base.org".to_string()),
+        );
+
+        let parsed: Config = serde_json::from_value(raw).expect("config alias should deserialize");
+
+        assert_eq!(parsed.node_url, "https://sepolia.base.org");
     }
 }

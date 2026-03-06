@@ -48,6 +48,7 @@ Important environment variables (all are read by `Config::load()`):
 - `KMS_NODE_TICK_SECONDS`, `DATA_SYNC_INTERVAL_SECONDS`
 - `PEER_CACHE_TTL_SECONDS`, `REGISTRY_CACHE_TTL_SECONDS`
 - `PEER_BLACKLIST_DURATION_SECONDS`
+- `SYNC_TIMESTAMP_BACKDATE_MS` (optional outbound sync timestamp backdate for mixed clusters with clock skew)
 - `ALLOW_PLAINTEXT_DEV` (dev-only fallback, defaults to `false`)
 
 Legacy env aliases remain accepted for compatibility:
