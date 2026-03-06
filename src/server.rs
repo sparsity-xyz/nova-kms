@@ -555,6 +555,13 @@ async fn put_data(
             tombstone: false,
             ttl_ms,
         };
+        tracing::debug!(
+            "Stored local record for sync: app_id={} key='{}' updated_at_ms={} ttl_ms={}",
+            auth.app_id,
+            key,
+            now,
+            ttl_ms
+        );
         let ns = s.store.get_namespace(auth.app_id).await;
         ns.write().await.put(&key, rec);
 

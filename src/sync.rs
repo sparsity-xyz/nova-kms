@@ -823,14 +823,28 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
         let node_wallet = s.config.node_wallet.clone();
         let app_count = deltas.len();
         let record_count = deltas.values().map(std::vec::Vec::len).sum::<usize>();
+        let backdate_ms = s.config.sync_timestamp_backdate_ms;
+        for (app_id, records) in &deltas {
+            for record in records {
+                let adjusted_updated_at_ms = record.updated_at_ms.saturating_sub(backdate_ms);
+                tracing::debug!(
+                    "Preparing delta record: app_id={} key='{}' raw_updated_at_ms={} adjusted_updated_at_ms={} backdate_ms={}",
+                    app_id,
+                    record.key,
+                    record.updated_at_ms,
+                    adjusted_updated_at_ms,
+                    backdate_ms
+                );
+            }
+        }
         (
             sync_key,
             node_wallet,
-            serialize_deltas_with_backdate(&deltas, s.config.sync_timestamp_backdate_ms),
+            serialize_deltas_with_backdate(&deltas, backdate_ms),
             Arc::clone(&s.peer_cache),
             app_count,
             record_count,
-            s.config.sync_timestamp_backdate_ms,
+            backdate_ms,
         )
     };
     let peers = peer_cache.get_peers(Some(&node_wallet)).await;
