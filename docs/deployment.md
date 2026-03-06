@@ -1,298 +1,244 @@
-# Nova KMS — Deployment Guide
+# Nova KMS Deployment Guide
 
-## Overview
+This guide covers the current deployment flow for the Rust node and the `KMSRegistry` contract.
 
-This guide covers deploying Nova KMS to production on the Nova Platform (AWS Nitro Enclave).
+## 1. What Must Exist Before A Node Can Serve Traffic
 
-## Deployment Architecture
+You need:
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  AWS Nitro Enclave                                       │
-│  ┌─────────────────────────────────────────────┐         │
-│  │  nova-kms (Docker)                          │         │
-│  │  ┌──────────┐  ┌────────────┐  ┌─────────┐ │         │
-│  │  │ Axum      │  │ Helios RPC │  │ Odyn API│ │         │
-│  │  │ :8000     │  │ :18545     │  │ :18000  │ │         │
-│  │  └──────────┘  └────────────┘  └─────────┘ │         │
-│  └─────────────────────────────────────────────┘         │
-│                                                          │
-│  ┌──────────────────┐                                    │
-│  │ ZKP Verification │                                    │
-│  │ Service          │                                    │
-│  └──────────────────┘                                    │
-└──────────────────────────────────────────────────────────┘
-         │
-    Base Sepolia
-    ┌────────────────┐  ┌────────────────────┐
-    │ KMSRegistry    │  │ NovaAppRegistry    │
-    │ (deployed)     │  │ (platform-managed) │
-    └────────────────┘  └────────────────────┘
-```
+1. a deployed `KMSRegistry`
+2. a Nova app registered for KMS
+3. the KMS app wired so its `dappContract` points to the `KMSRegistry`
+4. `setKmsAppId()` called on `KMSRegistry`
+5. at least one ACTIVE, `zkVerified` KMS instance registered in `NovaAppRegistry`
 
-## Prerequisites
+Without that wiring, `node_tick()` will never mark the service available.
 
-1. **Nova Platform Account** with admin access
-2. **NovaAppRegistry** proxy address (provided by platform)
-3. **KMS App** created in NovaAppRegistry (note the assigned `appId`)
-4. **KMSRegistry** contract deployed and configured
-5. **Docker** for building the enclave image
-6. **Foundry** (if deploying contracts)
+## 2. Deploy `KMSRegistry`
 
-## Step 1: Deploy KMSRegistry Contract
-
-### 1.1 Configure Environment
+From [contracts/](../contracts):
 
 ```bash
-cd nova-kms/contracts
-
-export NOVA_APP_REGISTRY_PROXY=0x...   # NovaAppRegistry proxy address
-export PRIVATE_KEY=0x...                # Deployer private key (admin)
+cd contracts
+make install
+make build
+make test
 ```
 
-### 1.2 Deploy
+Deploy:
 
 ```bash
+export RPC_URL=https://sepolia.base.org
+export NOVA_APP_REGISTRY_PROXY=0x...
+export PRIVATE_KEY=0x...
+
 make deploy
 ```
 
-Save the deployed `KMSRegistry` contract address (non-upgradeable deployment in current code).
+The deploy script creates `KMSRegistry(initialOwner, novaAppRegistry)`.
 
-### 1.3 Configure KMS App ID
+## 3. Bind The KMS App ID
 
-Once the KMS application is created in the Nova Platform and you have an `appId`:
+Once Nova assigns the KMS app an `appId`, set it exactly once:
 
 ```bash
-export CONTRACT_ADDRESS=<KMS_REGISTRY_ADDRESS>
-export KMS_APP_ID=<ASSIGNED_APP_ID>
+export RPC_URL=https://sepolia.base.org
+export CONTRACT_ADDRESS=0x...
+export PRIVATE_KEY=0x...
+export KMS_APP_ID=49
+
 make set-app-id
 ```
 
-### 1.4 Verify
+Current contract behavior:
 
-```bash
-# Check the deployment
-cast call <KMS_REGISTRY_ADDRESS> "kmsAppId()" --rpc-url https://sepolia.base.org
-cast call <KMS_REGISTRY_ADDRESS> "OWNER()" --rpc-url https://sepolia.base.org
-```
+- `kmsAppId` can only be set once
+- `setMasterSecretHash()` can be called only while `masterSecretHash == 0`
+- the caller must be:
+  - an ACTIVE instance of `kmsAppId`
+  - on a version whose status is ENROLLED
 
-## Step 2: Configure the Enclave Application
+Operational implication:
 
-### 2.1 Update Configuration
+- a node on a DEPRECATED version can still join the peer set
+- it cannot be the node that seeds `masterSecretHash`
 
-In the Rust deployment, configuration is sourced from environment variables. Example `.env` or enclave manifest `env` section:
+## 4. Register The App Correctly In Nova
 
-```ini
-CHAIN_ID=84532
-NOVA_APP_REGISTRY_ADDRESS="0x..."     # NovaAppRegistry proxy
-KMS_REGISTRY_ADDRESS="0x..."          # KMSRegistry (from Step 1)
-KMS_APP_ID=...                        # appId assigned by platform
-```
+The Nova-side KMS app must point its `dappContract` to the deployed `KMSRegistry`.
 
-`NODE_WALLET` can still be provided as a fallback, but at runtime the service binds to the wallet reported by Odyn (`/v1/eth/address`) to keep PoP recipient binding consistent with the enclave signer.
+That enables:
 
-### 2.2 Update `enclaver.yaml`
+- `addOperator(...)`
+- `removeOperator(...)`
 
-```yaml
-defaults:
-  cpu_count: 2
-  memory_mb: 4096     # Adjust based on expected data size
+Those callbacks maintain the contract operator list, but the runtime node still discovers peers from `NovaAppRegistry`, not from `KMSRegistry.getOperators()`.
 
-helios_rpc:
-  enabled: true
-  chains:
-    - name: "L2-base-sepolia"
-      network_id: "84532"
-      kind: opstack
-      network: base-sepolia
-      execution_rpc: "https://sepolia.base.org"
-      local_rpc_port: 18545
-```
+## 5. Build The Node Image
 
-For `nova-kms`, omit `storage.s3` entirely (the service is intentionally non-persistent).
-
-Runtime reads registry/auth-chain RPC from `http://127.0.0.1:18545` by default.
-Set `HELIOS_RPC_URL` only if you intentionally need a different local endpoint.
-
-## Step 3: Build the Docker Image
+From the repository root:
 
 ```bash
 make build-docker
 ```
 
-Or manually from the root directory:
+Or:
+
 ```bash
 docker build -t nova-kms:latest .
 ```
 
-## Step 4: Deploy via Nova Platform
+## 6. Runtime Configuration
 
-### 4.1 Register as Nova App
+Canonical environment variables to set in deployment:
 
-If not already done, create the KMS application in the Nova Platform:
+```ini
+IN_ENCLAVE=true
+LOG_LEVEL=INFO
+BIND_ADDR=0.0.0.0:8000
+
+NODE_URL=http://127.0.0.1:18545
+NODE_INSTANCE_URL=https://kms-1.example.com
+NODE_WALLET=0x...
+
+NOVA_APP_REGISTRY_ADDRESS=0x...
+KMS_REGISTRY_ADDRESS=0x...
+KMS_APP_ID=49
+
+KMS_NODE_TICK_SECONDS=60
+DATA_SYNC_INTERVAL_SECONDS=10
+PEER_CACHE_TTL_SECONDS=180
+REGISTRY_CACHE_TTL_SECONDS=180
+```
+
+Optional:
+
+- `MASTER_SECRET_HEX`
+  - use only when you intend to seed a known cluster secret
+
+Notes:
+
+- in enclave mode, the node refreshes `NODE_WALLET` from Odyn at startup and during `node_tick`
+- if `NODE_INSTANCE_URL` is left empty, the node backfills it from the registry entry for its own wallet once peer refresh succeeds
+- peer URLs must be `https` in enclave mode
+
+## 7. Enclave Runtime Assumptions
+
+The current code assumes:
+
+- chain RPC is reachable at `NODE_URL`
+- Odyn is reachable at `http://127.0.0.1:18000`
+- the instance has a registered `teePubkey` and wallet in `NovaAppRegistry`
+
+If peer refresh succeeds, the node also probes each peer `/status` with a 3-second timeout and exposes that metadata through `/nodes`.
+
+## 8. Startup Sequence
+
+The real startup path is:
+
+1. load config
+2. create shared state
+3. start background tasks
+4. `node_tick()` runs immediately
+5. peer refresh reads `NovaAppRegistry`
+6. the node verifies:
+   - it is present in current KMS membership
+   - its local `teePubkey` matches its own registry entry
+7. the node reads `KMSRegistry.masterSecretHash`
+8. if the on-chain hash is zero:
+   - use `MASTER_SECRET_HEX` if already configured, otherwise generate 32 random bytes
+   - compute `keccak256(master_secret)`
+   - call `setMasterSecretHash`
+   - stay unavailable until the chain reflects the hash
+9. if the on-chain hash is non-zero and local state does not match:
+   - request the sealed master secret from a verified peer
+   - immediately request a full snapshot from that same peer
+10. derive the sync HMAC key
+11. set `service_available=true`
+
+`sync_tick()` does not help with readiness. It only pushes deltas after the node is already available.
+
+## 9. Probes And Operational Checks
+
+### 9.1 HTTP Checks
 
 ```bash
-# Use nova-cli or platform dashboard
-# 1. Create app → get appId
-# 2. Register version with code measurement
-# 3. Enable ZK verification
+curl https://<kms-node>/health
+curl https://<kms-node>/status
+curl https://<kms-node>/nodes
 ```
 
-### 4.2 Deploy to Nitro Enclave
+Use them this way:
 
-The Nova Platform handles:
-1. Pushing the Docker image to the enclave
-2. Running enclaver with the `enclaver.yaml` configuration
-3. Setting up the vsock proxy for network access
-4. Exposing the enclave ingress port(s)
+- `/health`
+  - liveness only
+- `/status`
+  - readiness, master-secret state, store metrics
+- `/nodes`
+  - current peer-cache view and probe metadata
 
-### 4.3 Automatic Startup Sequence
-
-On boot, the KMS node:
-1. Waits for Helios light client to sync
-2. Gets its TEE wallet address from Odyn
-3. ZKP service verifies the enclave and registers the instance in NovaAppRegistry
-4. NovaAppRegistry calls `KMSRegistry.addOperator()` → node is discoverable
-5. KMS node discovers peers by enumerating `ACTIVE` KMS instances from `NovaAppRegistry` (scoped by `KMS_APP_ID`, with version status not `REVOKED`)
-6. Reads `masterSecretHash` from `KMSRegistry`
-7. If `masterSecretHash == 0x0` (bootstrap):
-  - generates a fresh master secret from Odyn hardware RNG (if needed)
-  - computes `keccak256(master_secret)` and submits **one** `setMasterSecretHash` transaction (eligible callers are enforced by `KMSRegistry` via NovaAppRegistry checks)
-  - stays `503 Unavailable` until the on-chain hash becomes non-zero and matches
-8. If `masterSecretHash != 0x0` (running):
-  - ensures the local master secret hash matches the on-chain hash
-  - if missing/mismatched, syncs the master secret from a verified peer via sealed ECDH over `/sync`
-9. Starts periodic `node_tick` scheduling and begins serving API requests once the node is marked available
-
-> **Note:** KMS nodes are *mostly* read-only on-chain. The only routine write in the current implementation is the one-time `setMasterSecretHash` during cluster bootstrap when the hash is unset.
-
-## Step 5: Verify Deployment
-
-### 5.1 Check Health
+### 9.2 Contract Checks
 
 ```bash
-curl https://<kms-node-url>/health
-# {"status": "healthy"}
+cast call <KMS_REGISTRY_ADDRESS> "kmsAppId()" --rpc-url <RPC_URL>
+cast call <KMS_REGISTRY_ADDRESS> "masterSecretHash()" --rpc-url <RPC_URL>
+cast call <KMS_REGISTRY_ADDRESS> "isOperator(address)" <TEE_WALLET> --rpc-url <RPC_URL>
+cast call <KMS_REGISTRY_ADDRESS> "novaAppRegistry()" --rpc-url <RPC_URL>
+cast call <KMS_REGISTRY_ADDRESS> "OWNER()" --rpc-url <RPC_URL>
 ```
 
-### 5.2 Check Status
+## 10. Multi-Node Behavior
+
+### 10.1 Discovery
+
+Each node discovers peers through:
+
+1. `getActiveInstances(KMS_APP_ID)`
+2. `getInstanceByWallet(wallet)`
+3. `getVersion(app_id, version_id)`
+
+Peers are accepted when:
+
+- instance ACTIVE
+- `zkVerified=true`
+- version ENROLLED or DEPRECATED
+- URL passes local policy
+
+### 10.2 Replication
+
+Once available, each node:
+
+- pushes deltas every `DATA_SYNC_INTERVAL_SECONDS`
+- accepts inbound deltas on `/sync`
+- can serve full snapshots on demand
+
+There is no persistent local database. A restarted node rebuilds store state from peers after it has the correct master secret.
+
+## 11. Common Unavailable States
+
+The node will keep `/kms/*` unavailable when it reaches conditions such as:
+
+- peer cache refresh failed and no peers are cached
+- self wallet not present in current KMS membership
+- local `teePubkey` mismatch with registry
+- chain `masterSecretHash` unreadable
+- failed master-secret convergence
+
+Read the exact current reason from:
+
+- `/status.node.service_available`
+- `/status.node.master_secret`
+
+## 12. Rotation And Emergency Actions
+
+Owner-only contract action:
 
 ```bash
-curl https://<kms-node-url>/status
-# {
-#   "node": {"tee_wallet": "0x...", "is_operator": true, ...},
-#   "cluster": {"total_instances": 3, ...},
-#   "data_store": {"namespaces": 0, "total_keys": 0, "total_bytes": 0}
-# }
+export RPC_URL=https://sepolia.base.org
+export CONTRACT_ADDRESS=0x...
+export PRIVATE_KEY=0x...
+
+make reset-secret-hash
 ```
 
-### 5.3 Verify On-Chain Registration
-
-```bash
-# Optional: Inspect KMSRegistry on-chain state.
-# Note: the KMS service's runtime peer discovery uses NovaAppRegistry (via PeerCache),
-# not the operator list in KMSRegistry. These calls are useful for auditing.
-
-# Check if the node's wallet is present in the KMSRegistry operator set
-cast call <KMS_REGISTRY_ADDRESS> \
-  "isOperator(address)" <TEE_WALLET_ADDRESS> \
-  --rpc-url https://sepolia.base.org
-
-# List all operator wallets tracked by KMSRegistry
-cast call <KMS_REGISTRY_ADDRESS> \
-  "getOperators()" \
-  --rpc-url https://sepolia.base.org
-
-# Read the current master secret hash coordination value
-cast call <KMS_REGISTRY_ADDRESS> \
-  "masterSecretHash()" \
-  --rpc-url https://sepolia.base.org
-```
-
-## Multi-Node Deployment
-
-### Scaling Strategy
-
-Deploy multiple KMS nodes for high availability:
-
-```
-KMS Node 1  ←→  KMS Node 2  ←→  KMS Node 3
-     ↕               ↕               ↕
-  KMSRegistry (shared on-chain membership)
-```
-
-### Node Discovery
-
-Nodes discover each other via `NovaAppRegistry` (scoped by `KMS_APP_ID` → `ACTIVE` instances with non-`REVOKED` version). No external service discovery is required.
-
-### Master Secret Propagation
-
-- **First node**: generates master secret from hardware RNG
-- **Subsequent nodes**: request secret from an existing healthy peer via `/sync`
-- All nodes share the same master secret → identical key derivation results
-
-### Consistency Model
-
-- **Eventual consistency** via vector-clock-based sync
-- **LWW** (Last-Writer-Wins) for concurrent conflicts
-- **Delta sync** every `DATA_SYNC_INTERVAL_SECONDS` (default: 10s)
-- **Snapshot sync** for nodes that are far behind
-
-## Monitoring
-
-### Key Metrics to Watch
-
-| Metric | Source | Alert Threshold |
-|--------|--------|-----------------|
-| `/health` response | HTTP probe | Non-200 for >30s |
-| `cluster.total_instances` | `/status` | Below expected count |
-| `data_store.total_bytes` | `/status` | Approaching `MAX_APP_STORAGE` |
-| Sync success rate | Application logs | <50% peer sync success |
-| On-chain `isOperator` | KMSRegistry | Unexpected removal |
-
-### Logging
-
-Application logs are written to stdout (captured by the enclave runtime):
-
-```
-2024-01-15 10:30:00 [INFO] nova-kms: === Nova KMS started successfully ===
-2024-01-15 10:30:00 [INFO] nova-kms: TEE wallet: 0x...
-2024-01-15 10:30:00 [INFO] nova-kms: This node is a registered KMS operator
-2024-01-15 10:31:00 [INFO] nova-kms.sync: Delta push: 2/2 peers synced
-```
-
-## Emergency Operations
-
-### Remove an Operator
-
-Operators are managed by NovaAppRegistry. To remove an operator, stop or deregister its instance on NovaAppRegistry, which triggers `removeOperator` on KMSRegistry automatically.
-
-### Transfer Admin
-
-```bash
-# KMSRegistry uses Ownable2StepUpgradeable (UUPS). Ownership transfer is two-step.
-
-# 1) Current owner nominates the new owner
-cast send <KMS_REGISTRY_ADDRESS> \
-  "transferOwnership(address)" <NEW_OWNER> \
-  --private-key <CURRENT_OWNER_KEY> \
-  --rpc-url https://sepolia.base.org
-
-# 2) New owner accepts
-cast send <KMS_REGISTRY_ADDRESS> \
-  "acceptOwnership()" \
-  --private-key <NEW_OWNER_KEY> \
-  --rpc-url https://sepolia.base.org
-```
-
-## Security Checklist
-
-- [ ] KMSRegistry deployed with correct `novaAppRegistry` and `kmsAppId`
-- [ ] Admin key stored securely (hardware wallet recommended)
-- [ ] `NODE_URL` or `HELIOS_RPC_URL` points to the intended chain RPC endpoint
-- [ ] `NODE_INSTANCE_URL` set to the correct public HTTPS endpoint
-- [ ] All nodes running the same code measurement (version)
-- [ ] ZK verification enabled for the KMS app in NovaAppRegistry
-- [ ] No trusted proxies in front of the enclave app (PoP auth is verified in-app)
-- [ ] Firewall allows egress to Base Sepolia RPC
-- [ ] At least 2 nodes deployed for redundancy
+This resets `masterSecretHash` to zero. After that, the cluster must converge again from a fresh bootstrap cycle.

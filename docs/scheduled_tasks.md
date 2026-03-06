@@ -1,57 +1,78 @@
 # KMS Scheduled Tasks
 
-The Nova KMS uses **two periodic scheduler jobs**:
+The process starts two background loops from `src/main.rs`.
 
-- `node_tick` (cluster state / readiness / master secret alignment)
-- `sync_tick` (delta push for KV convergence)
+## 1. `node_tick`
 
-In Rust, both loops are started from `src/main.rs` (`start_background_tasks`) using Tokio tasks.
+- function: `sync::node_tick(&SharedState)`
+- first run: immediately at startup
+- steady-state interval: `KMS_NODE_TICK_SECONDS`
 
-## Task 1: `node_tick`
+### Responsibilities
 
-`node_tick` is the core heartbeat:
+1. If running in enclave mode, refresh the local wallet from Odyn and canonicalize it.
+2. Refresh `PeerCache` from `NovaAppRegistry`.
+3. Fail closed if peer refresh failed and no cached peers remain.
+4. Confirm that this node wallet is still part of current KMS membership.
+5. If available, compare the local Odyn `teePubkey` with the registry entry for this node.
+6. Read `KMSRegistry.masterSecretHash`.
+7. If the hash is zero:
+   - initialize a local master secret if needed
+   - submit `setMasterSecretHash`
+   - keep the node unavailable until the chain reflects the hash
+8. If the hash is non-zero and local state does not match:
+   - sync the master secret from a verified peer
+   - immediately request a full snapshot from that peer
+9. Derive the sync HMAC key from the reconciled master secret.
+10. Set `service_available` and `service_unavailable_reason`.
 
-- **Function**: `sync::node_tick(&SharedState)`
-- **Configuration**: `KMS_NODE_TICK_SECONDS`
+### Availability Effects
 
-### What `node_tick` does
+`node_tick` is the only place that flips the main readiness gate for `/kms/*`.
 
-1. Refresh peer cache from `NovaAppRegistry` and update local membership view.
-   - `PeerCache` is the KMS peer authorization source for `/sync`.
-   - In enclave mode, refresh also probes peer `/status` (3s timeout) and caches connectivity metadata.
-2. If this node is not currently an eligible KMS instance, keep service unavailable (`503`).
-3. Read `masterSecretHash` from `KMSRegistry`:
-   - If hash is zero and this node is eligible, attempt bootstrap hash claim.
-   - If hash is non-zero, ensure local master secret matches chain.
-4. If needed, sync master secret from verified peers.
-5. Derive and install sync HMAC key when master secret is ready.
-6. Set service availability (`200` when ready, otherwise `503` with reason).
+Common unavailable reasons written by the current code include:
 
-`node_tick` itself does not perform periodic delta pushes anymore.
+- `peer cache refresh failed`
+- `self not in KMS node list`
+- `cannot read local teePubkey`
+- `local teePubkey mismatch with registry`
+- `cannot read master secret hash`
+- `failed to set master secret hash`
+- `master secret sync failed`
+- `synced master secret hash mismatch`
 
-Note:
-- The service-availability gate applies to app-facing `/kms/*` endpoints.
-- Incoming `/sync` has a dedicated readiness gate: it is available only after the local master secret is initialized (PoP/HMAC checks still enforced).
-- Outbound sync/bootstrap requests are still allowed before full service availability.
+## 2. `sync_tick`
 
-## Task 2: `sync_tick`
+- function: `sync::sync_tick(&SharedState)`
+- first run: after one sleep interval
+- steady-state interval: `DATA_SYNC_INTERVAL_SECONDS`
 
-`sync_tick` is the lightweight data convergence task:
+### Responsibilities
 
-- **Function**: `sync::sync_tick(&SharedState)`
-- **Configuration**: `DATA_SYNC_INTERVAL_SECONDS`
+1. return early if no sync key exists
+2. return early if `service_available` is false
+3. call `push_deltas()`
 
-### What `sync_tick` does
+`sync_tick` only handles outbound delta replication. It does not perform peer discovery, readiness decisions, snapshot pull, or master-secret exchange.
 
-1. Returns early when sync key is not initialized.
-2. Returns early when service availability is currently `False`.
-3. Calls `push_deltas()` to propagate recent changes to peers.
+## 3. Related On-Demand Work
 
-## Configuration Variables
+Not all sync work waits for the scheduler:
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `KMS_NODE_TICK_SECONDS` | `60` | core heartbeat interval |
-| `DATA_SYNC_INTERVAL_SECONDS` | `10` | interval for pushing data deltas to peers |
-| `PEER_CACHE_TTL_SECONDS` | `180` | (internal) max age of peer cache before forced refresh |
-| `REGISTRY_CACHE_TTL_SECONDS` | `180` | TTL for app authorization read-through cache (`CachedNovaRegistry`) |
+- `attempt_master_secret_sync()` can run inside `node_tick`
+- `refresh_peers_if_needed()` can refresh `PeerCache` just before outbound sync if the cache is stale
+
+## 4. Configuration
+
+| Variable | Default | Used by |
+| --- | --- | --- |
+| `KMS_NODE_TICK_SECONDS` | `60` | scheduled `node_tick` |
+| `DATA_SYNC_INTERVAL_SECONDS` | `10` | scheduled `sync_tick` |
+| `PEER_CACHE_TTL_SECONDS` | `180` | on-demand refresh staleness check |
+| `REGISTRY_CACHE_TTL_SECONDS` | `180` | app auth cache |
+
+Other timing knobs that affect these flows:
+
+- `POP_TIMEOUT_SECONDS`
+- `MAX_CLOCK_SKEW_MS`
+- `NONCE_RATE_LIMIT_PER_MINUTE`

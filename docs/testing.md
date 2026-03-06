@@ -1,96 +1,156 @@
-# Nova KMS — Testing Guide (Rust)
+# Nova KMS Testing Guide
 
-## Overview
+This guide covers the test entry points that exist in the repository today.
 
-`nova-kms` now uses Rust as the primary node implementation. Testing is split into:
+## 1. Main Commands
 
-- Rust unit tests (`cargo test`) for auth/crypto/store/sync/server primitives.
-- Python parity test (`tests/compare_behavior.py`) to verify HKDF + AES-GCM compatibility against the Python reference algorithm.
-- Solidity tests (`contracts/`, Foundry) for `KMSRegistry`.
-
-## Quick Start
+From the repository root:
 
 ```bash
-cd nova-kms
-
-# 1) Rust unit tests
+# Rust unit tests
 cargo test
 
-# 2) Cross-language crypto behavior parity
+# reference crypto check
 python3 tests/compare_behavior.py
 
-# 3) Contract tests
+# contract tests
 cd contracts && forge test -vvv
 ```
 
-## Rust Test Coverage
+## 2. Rust Unit Tests
 
-Current Rust tests cover:
+`cargo test` covers the main Rust modules under `src/`.
 
-- `auth.rs`
-  - nonce issue/consume replay protection
-  - wallet canonicalization
-  - nonce base64 encoding validation
-  - KMS peer PoP checks (stale timestamp, replay nonce, wallet-header mismatch)
-  - EIP-191 signature round-trip verification
-- `crypto.rs`
-  - HKDF derivation (path/context separation)
-  - AES-GCM encrypt/decrypt
-  - HMAC generation/verification
-  - sealed master-secret exchange (P-384 ECDH + AES-GCM)
-  - master-secret lifecycle state
-- `store.rs`
-  - delete semantics for missing keys
-  - tombstone retention behavior
-  - deterministic conflict resolution on concurrent updates
-- `sync.rs`
-  - canonical JSON for HMAC signing
-  - HMAC round-trip
-  - sync delta serialization shape
-  - `node_tick` self-membership availability gate
-  - `sync_tick` availability gate behavior
-  - peer blacklist cache eviction
-  - peer `/status` probe metadata capture
-  - incoming sync record validation (oversize payload, future timestamp, invalid ciphertext)
-- `server.rs`
-  - `/health`, `/nodes`, `/nonce` behavior
-  - `/nonce` token-bucket rate limiting
-  - `/kms/*` service availability gate
-  - `/sync` readiness gate (master secret required)
-- `rate_limiter.rs`
-  - token bucket allow/deny and refill behavior
-- `registry.rs`
-  - `setMasterSecretHash` calldata encoding
-  - Odyn signed-tx payload extraction variants
-  - `CachedNovaRegistry` wallet cache hit path
-- `models.rs`
-  - vector clock comparison
-  - sync record serialization/deserialization
+### 2.1 `auth.rs`
 
-## Cross-Language Parity Test
+Current tests cover:
 
-`tests/compare_behavior.py` validates:
+- nonce issue and consumption
+- wallet canonicalization
+- stale timestamp rejection
+- nonce replay rejection
+- wallet header mismatch rejection
+- signature recovery helpers
 
-- `derive_data_key(master_secret, app_id)` compatibility
-- `derive_sync_key(master_secret)` compatibility
-- AES-GCM ciphertext produced by Rust can be decrypted by Python reference implementation
+### 2.2 `crypto.rs`
+
+Current tests cover:
+
+- master-secret lifecycle state
+- HKDF derivation behavior
+- AES-GCM encrypt/decrypt
+- HMAC generation and verification
+- sealed master-secret exchange
+
+### 2.3 `models.rs`
+
+Current tests cover:
+
+- vector clock increment
+- vector clock comparison
+- sync record serialization and parsing
+
+### 2.4 `store.rs`
+
+Current tests cover:
+
+- delete on missing keys
+- tombstone cleanup behavior
+- concurrent update tie-breaks
+
+### 2.5 `registry.rs`
+
+Current tests cover:
+
+- `setMasterSecretHash` calldata encoding
+- raw transaction extraction from Odyn responses
+- `CachedNovaRegistry` wallet-cache hit behavior
+
+### 2.6 `sync.rs`
+
+Current tests cover:
+
+- canonical JSON generation
+- HMAC round-trip
+- delta serialization shape
+- peer blacklist primitive
+- readiness behavior when peer refresh fails
+- `sync_tick` availability gate
+- peer `/status` probe metadata capture
+- inbound sync record validation
+
+### 2.7 `server.rs`
+
+Current tests cover:
+
+- `/health`
+- `/nonce`
+- `/nodes`
+- nonce rate limiting
+- `/kms/*` service-availability gate
+- `/sync` requirement that the master secret already exists
+
+## 3. Reference Crypto Check
+
+`tests/compare_behavior.py` is a reference-value test for the current crypto surface.
+
+It:
+
+1. derives keys with a reference HKDF implementation
+2. builds `src/bin/compare_rust.rs`
+3. compares:
+   - `derive_data_key(master_secret, app_id)`
+   - `derive_sync_key(master_secret)`
+4. decrypts Rust-produced AES-GCM ciphertext with the reference implementation
 
 Run:
 
 ```bash
-cd nova-kms
 python3 tests/compare_behavior.py
 ```
 
-Expected: script prints all checks as `True` and ends with success.
+Expected outcome:
 
-## Notes
+- all comparisons print `True`
+- the script ends with success
 
-- The parity script intentionally does not depend on legacy `enclave/` source files; it embeds the Python reference HKDF/AES logic directly.
-- For full end-to-end cluster sync validation, run at least two nodes and execute sync flows (`/sync` delta + snapshot + master-secret request) under the same registry/network configuration.
-- For coverage details, run:
+## 4. Contract Tests
+
+The Foundry suite in `contracts/` validates `KMSRegistry` behavior, including:
+
+- operator callback handling
+- `setKmsAppId`
+- `setMasterSecretHash`
+- `resetMasterSecretHash`
+- owner and registry guards
+
+Run:
 
 ```bash
-cd nova-kms
-cargo llvm-cov --workspace --all-features --summary-only
+cd contracts
+forge test -vvv
 ```
+
+## 5. What Is Not Covered Automatically
+
+The repository does not contain a current end-to-end cluster test that spins up multiple live Rust nodes and exercises:
+
+- encrypted app writes
+- delta propagation across peers
+- full bootstrap from `master_secret_request` plus snapshot
+
+For those flows, use a real environment and validate with:
+
+- `/status`
+- `/nodes`
+- application logs
+
+## 6. Recommended Validation Before Shipping
+
+1. run `cargo test`
+2. run `python3 tests/compare_behavior.py`
+3. run `cd contracts && forge test -vvv`
+4. in a real deployment, verify:
+   - `/status.node.service_available`
+   - peer visibility in `/nodes`
+   - successful delta push logs

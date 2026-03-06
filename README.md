@@ -1,181 +1,198 @@
 # Nova KMS
 
-Distributed Key Management Service for the Nova Platform. Runs inside AWS Nitro Enclaves and provides **key derivation** and an **in-memory KV store** to other Nova applications.
+Nova KMS is the Rust KMS node for the Nova platform. It runs as an Axum service, uses Odyn for enclave signing/encryption primitives, authorizes callers from `NovaAppRegistry`, and coordinates cluster master-secret state through `KMSRegistry`.
 
-It is designed with a **Zero-Trust** architecture where no single node is trusted by default. Trust is established via on-chain registries, cryptographic proofs, and **strict initialization protocols**.
+The node provides two application-facing capabilities:
 
-## Features
+- Key derivation from a cluster-wide master secret
+- An encrypted, in-memory KV store partitioned by caller `app_id`
 
-| Feature | Description |
-|---------|-------------|
-| **Key Derivation (KDF)** | HKDF-SHA256 from a shared cluster master secret, partitioned by on-chain App ID. |
-| **In-Memory KV Store** | Per-app namespace, vector-clock versioning, TTL, LRU eviction. Values are encrypted-at-rest (AES-GCM). |
-| **Distributed Sync** | Delta + snapshot sync across KMS nodes (Eventual Consistency, Last-Writer-Wins). |
-| **Dual Keypairs** | Separated keys for Identity (secp256k1) and Encryption (P-384/secp384r1). |
-| **Master Secret Bootstrap** | Bootstrap from `MASTER_SECRET_HEX` or sealed ECDH sync from a healthy peer. |
+## What The Current Node Does
 
-## Rust/Python Compatibility
+- Derives per-app keys with HKDF-SHA256
+- Encrypts stored values with AES-256-GCM before they enter the KV store
+- Replicates KV records across KMS peers with delta push and snapshot sync
+- Uses Proof of Possession (PoP) signatures for app and peer authentication
+- Uses `teePubkey`-based end-to-end envelopes for request and response bodies
+- Uses `KMSRegistry.masterSecretHash` to converge on one cluster master secret
 
-The Rust node now matches the legacy Python node on protocol surface and sync behavior:
+## Runtime Dependencies
 
-- Same PoP message formats:
-  - `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
-  - `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
-- Same nonce contract: `GET /nonce` returns 16-byte random nonce encoded in base64.
-- Same route surface:
-  - `GET /`, `GET /health`, `GET /status`, `GET /nodes`, `GET /nonce`
-  - `POST /kms/derive`
-  - `GET /kms/data`, `GET /kms/data/{key:path}`, `PUT /kms/data`, `DELETE /kms/data`
-  - `POST /sync`
-- Same `/sync` semantics: PoP + optional HMAC (`X-Sync-Signature`) + E2E envelope + mutual response signature.
-- Same sync payload structure for records (`value` hex, vector clock map, tombstone, ttl, updated timestamp).
+- Odyn API
+  - `IN_ENCLAVE=true`: `http://127.0.0.1:18000`
+  - `IN_ENCLAVE=false`: `http://odyn.sparsity.cloud:18000`
+- Chain RPC for `NovaAppRegistry` and `KMSRegistry`
+- `NovaAppRegistry` as the source of truth for:
+  - app authorization
+  - KMS peer membership
+  - `teePubkey` and `instanceUrl` metadata
+- `KMSRegistry` for:
+  - operator callbacks
+  - `kmsAppId`
+  - `masterSecretHash`
 
-This allows mixed Python/Rust KMS clusters to exchange deltas/snapshots and sealed master-secret sync.
+## Availability Model
 
-## Runtime Configuration
+- `GET /health` is process liveness only.
+- `GET /status` is the readiness source.
+- `node.service_available=true` only after:
+  - this node appears in current KMS membership
+  - the local `teePubkey` matches `NovaAppRegistry`
+  - the local master secret matches `KMSRegistry.masterSecretHash`
+- `/kms/*` routes require `service_available=true`.
+- `/sync` requires the local master secret to be initialized.
 
-Important environment variables (all are read by `Config::load()`):
+## API Surface
 
-- `IN_ENCLAVE` (`true|false`)
-- `BIND_ADDR` (default `0.0.0.0:8000`)
-- `NODE_URL` (RPC URL)
-- `NODE_INSTANCE_URL` (this node public URL)
-- `NODE_WALLET` (TEE wallet address)
-- `NODE_PRIVATE_KEY` (dev-only signing key for PoP/mutual signatures)
-- `MASTER_SECRET_HEX` (optional bootstrap secret)
+| Route | Method | Purpose | Auth |
+| --- | --- | --- | --- |
+| `/` | `GET` | JSON overview of the service | none |
+| `/health` | `GET` | liveness probe | none |
+| `/status` | `GET` | node, cluster, and store status | none |
+| `/nonce` | `GET` | issue single-use base64 nonce | none |
+| `/nodes` | `GET` | dump current `PeerCache` view | none |
+| `/kms/derive` | `POST` | derive an app-scoped key | app PoP or dev fallback |
+| `/kms/data` | `GET` | list keys, or fetch one key with `?key=` | app PoP or dev fallback |
+| `/kms/data/*key` | `GET` | fetch one key, path form | app PoP or dev fallback |
+| `/kms/data` | `PUT` | write one key | app PoP or dev fallback |
+| `/kms/data` | `DELETE` | delete one key | app PoP or dev fallback |
+| `/sync` | `POST` | peer delta, snapshot, or master-secret sync | peer PoP |
+
+Notes:
+
+- Sensitive request and response bodies are always carried in an encrypted envelope.
+- Plaintext request bodies are rejected in the current server implementation.
+- The router does not register OpenAPI, Swagger UI, or ReDoc endpoints.
+
+## Authentication And Encryption
+
+### App -> KMS
+
+- PoP message:
+  - `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<timestamp>`
+- Required headers when using PoP:
+  - `x-app-signature`
+  - `x-app-nonce`
+  - `x-app-timestamp`
+  - `x-app-wallet` (optional hint, must match recovered signer if present)
+- In local development only (`IN_ENCLAVE=false`), app routes can fall back to:
+  - `x-tee-wallet`
+
+### KMS -> KMS
+
+- PoP message:
+  - `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<timestamp>`
+- Required headers:
+  - `x-kms-signature`
+  - `x-kms-nonce`
+  - `x-kms-timestamp`
+  - `x-kms-wallet` (optional hint, must match recovered signer if present)
+- Once a sync key exists, `/sync` also expects:
+  - `x-sync-signature`
+  - exception: `type=master_secret_request`
+
+### Encrypted Envelope
+
+All sensitive payloads use this JSON shape:
+
+```json
+{
+  "sender_tee_pubkey": "<hex DER/SPKI>",
+  "nonce": "<hex>",
+  "encrypted_data": "<hex>"
+}
+```
+
+The receiver checks that `sender_tee_pubkey` matches the authenticated caller's on-chain `teePubkey` before decrypting.
+
+## Configuration
+
+Configuration is loaded from:
+
+1. built-in defaults
+2. `NovaKms.toml`
+3. environment variables
+
+Canonical runtime variables that matter for normal operation:
+
+- `IN_ENCLAVE`
+- `LOG_LEVEL`
+- `BIND_ADDR`
+- `NOVA_APP_REGISTRY_ADDRESS`
+- `KMS_REGISTRY_ADDRESS`
 - `KMS_APP_ID`
-- `NOVA_APP_REGISTRY_ADDRESS`, `KMS_REGISTRY_ADDRESS`
-- `KMS_NODE_TICK_SECONDS`, `DATA_SYNC_INTERVAL_SECONDS`
-- `PEER_CACHE_TTL_SECONDS`, `REGISTRY_CACHE_TTL_SECONDS`
+- `NODE_URL`
+- `NODE_INSTANCE_URL`
+- `NODE_WALLET`
+- `NODE_PRIVATE_KEY`
+- `KMS_NODE_TICK_SECONDS`
+- `DATA_SYNC_INTERVAL_SECONDS`
+- `PEER_CACHE_TTL_SECONDS`
+- `REGISTRY_CACHE_TTL_SECONDS`
+- `MAX_APP_STORAGE_BYTES`
+- `MAX_KV_VALUE_SIZE_BYTES`
+- `TOMBSTONE_RETENTION_MS`
+- `MAX_TOMBSTONES_PER_APP`
+- `POP_TIMEOUT_SECONDS`
+- `MAX_NONCES`
+- `MAX_CLOCK_SKEW_MS`
+- `MASTER_SECRET_HEX`
+- `NONCE_RATE_LIMIT_PER_MINUTE`
+
+Some fields exist in `Config` but are not enforced on the current request path:
+
+- `RATE_LIMIT_PER_MINUTE`
+- `ALLOW_PLAINTEXT_DEV`
+- `MAX_REQUEST_BODY_BYTES`
+- `MAX_SYNC_PAYLOAD_BYTES`
 - `PEER_BLACKLIST_DURATION_SECONDS`
-- `SYNC_TIMESTAMP_BACKDATE_MS` (optional outbound sync timestamp backdate for mixed clusters with clock skew)
-- `ALLOW_PLAINTEXT_DEV` (dev-only fallback, defaults to `false`)
 
-Legacy env aliases remain accepted for compatibility:
-- `SYNC_INTERVAL_SECONDS` -> `DATA_SYNC_INTERVAL_SECONDS`
-- `PEER_REFRESH_INTERVAL_SECONDS` -> `KMS_NODE_TICK_SECONDS`
+## Startup And Master Secret Convergence
 
-## Security Architecture
+On startup the process:
 
-The system implements a **Defense in Depth** strategy with four layers of security:
+1. creates shared state and background tasks
+2. runs `node_tick` immediately
+3. refreshes `PeerCache` from `NovaAppRegistry`
+4. confirms that this node is an active KMS instance and that its local `teePubkey` matches the registry
+5. reads `KMSRegistry.masterSecretHash`
+6. if the on-chain hash is zero:
+   - uses `MASTER_SECRET_HEX` if supplied, otherwise generates 32 random bytes
+   - computes `keccak256(master_secret)`
+   - submits `setMasterSecretHash`
+   - remains unavailable until the chain reflects the hash
+7. if the on-chain hash is non-zero and local state does not match:
+   - requests the master secret from a verified peer
+   - immediately requests a full snapshot from that peer
+8. derives the sync HMAC key and marks the service available
 
-### 1. On-Chain Identity & Authorization (The "Who")
-*   **Nodes (KMS↔KMS)**: A peer must be a registered `ACTIVE` instance in `NovaAppRegistry` under `KMS_APP_ID`, with app `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
-*   **Apps (App→KMS)**: A caller must be a registered `ACTIVE` instance in `NovaAppRegistry` whose app is `ACTIVE`, version not `REVOKED` (currently `ENROLLED` or `DEPRECATED`), and `zkVerified=true`.
-*   **KMSRegistry**: Not used for runtime peer discovery.
-*   **Verification**: All access gates on `NovaAppRegistry` lookups (instance/app/version status + `zkVerified`).
+Important detail:
 
-### 2. Mutual Authentication (The "Handshake")
-*   **Mechanism**: Lightweight Proof-of-Possession (PoP) signatures (EIP-191).
-*   **Flow**:
-    1.  Caller requests a `nonce`.
-    2.  Caller signs a recipient-bound message:
-        - **App→KMS**: `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
-        - **KMS↔KMS**: `NovaKMS:Auth:<NonceBase64>:<Recipient_Wallet>:<Timestamp>`
-    - **Wallet canonicalization**: wallet strings MUST be `0x` + 40 lowercase hex characters.
-    3.  Recipient verifies signature and checks registry status.
-    4.  Recipient returns a signed response: `NovaKMS:Response:<Caller_Sig>:<My_Wallet>`.
+- `sync_tick` does not run immediately at boot. It starts after the first `DATA_SYNC_INTERVAL_SECONDS` sleep.
 
-### 3. End-to-End Encryption (The "Tunnel")
-*   **Mechanism**: NIST P-384 ECDH + AES-256-GCM.
-*   **Key**: Uses the separate `teePubkey` (P-384) registered on-chain.
-*   **Benefit**: Ensures confidentiality even if TLS is terminated at a load balancer.
+## Repository Map
 
-### 4. Data Integrity (The "Guard")
-*   **Mechanism**: HMAC-SHA256 signatures for `/sync`.
-*   **Purpose**: Defense-in-depth for inter-node sync; rejects peers that don’t share the cluster sync key.
-*   **Details**: When a sync key is configured, nodes require `X-Sync-Signature` on `/sync`.
+- `src/main.rs`: process bootstrap and background tasks
+- `src/server.rs`: HTTP routes and response shapes
+- `src/auth.rs`: nonce handling, PoP verification, wallet recovery
+- `src/sync.rs`: peer discovery, master-secret convergence, delta push
+- `src/store.rs`: in-memory namespaced store and merge logic
+- `src/crypto.rs`: HKDF, AES-GCM, HMAC, sealed master-secret exchange
+- `src/registry.rs`: on-chain clients and caches
+- `docs/`: code-aligned documentation
+- `contracts/`: `KMSRegistry` contract and Foundry scripts
 
-## Registry and Cache Model
-
-Runtime authorization uses two explicit paths:
-
-1. **App requests (`/kms/*`)** use `CachedNovaRegistry` (read-through cache for `NovaAppRegistry`).
-2. **KMS peer sync (`/sync`)** uses `PeerCache` refreshed by `node_tick`.
-
-Details: see [`docs/cache-and-registry-model.md`](docs/cache-and-registry-model.md).
-
-## Architecture Diagram
-
-```mermaid
-graph LR
-  subgraph Apps["Nova Apps"]
-    A1["App Instance (TEE wallet)"]
-  end
-
-  subgraph KMS["Nova KMS Cluster (Nitro Enclave)"]
-    N1["KMS Node"]
-    N2["KMS Node"]
-  end
-
-  subgraph Chain["Blockchain"]
-    R["NovaAppRegistry\n(app → version → instance)"]
-    K["KMSRegistry\n(operator set & master secret hash)"]
-  end
-
-  A1 -->|"PoP + E2E (P-384)"| N1
-  A1 -.->|"Discover / Verify"| R
-  N1 <-->|"PoP + HMAC + Sealed ECDH"| N2
-  N1 -->|"Read-only eth_call"| R
-  N1 -->|"Read-only eth_call"| K
-  K -->|"masterSecretHash coordination"| N1
-```
-
-## Master Secret Bootstrap
-
-Nodes support two bootstrap modes:
-
-1.  **Direct bootstrap**: set `MASTER_SECRET_HEX` on startup.
-2.  **Peer bootstrap**: if local secret is missing, request sealed master secret from a verified peer via `/sync` (`master_secret_request` + ECDH envelope), then pull snapshot data.
-
-## Project Structure
-
-## Project Structure
-
-```
-nova-kms/
-├── contracts/           # Solidity (KMSRegistry + tests)
-├── demo-client/         # Reference Client (Python, manual PoP/E2E flow)
-├── demo-client-enclaver/ # Reference Client (Python, using enclaver /v1/kms/*)
-├── src/                 # Rust KMS application
-│   ├── main.rs          # Tokio entry point & graceful shutdown
-│   ├── server.rs        # Axum router & REST API definitions
-│   ├── auth.rs          # PoP auth & Registry integration middleware
-│   ├── crypto.rs        # HKDF / AES-GCM / HMAC utilizing `ring`
-│   ├── sync.rs          # Peer discovery, vector clock active sync
-│   ├── store.rs         # Namespaced thread-safe LRU Key-Value Store
-│   ├── odyn.rs          # Enclaver TEE Client API binding
-│   └── ...
-├── tests/               # Behavior Parity comparisons checks
-├── docs/                # Detailed Documentation
-├── Dockerfile           # Multi-stage container image for AWS Nitro
-├── enclaver.yaml        # Enclaver deployment properties
-└── Makefile             # Developer commands (Cargo wrappers)
-```
-
-## Quick Start
-
-See `docs/development.md` for local development instructions. Note that `nova-kms` is designed to run within a Nitro Enclave environment.
-
-## Tests
+## Development Commands
 
 ```bash
-cd nova-kms
-
-# Rust unit tests
 cargo test
-
-# Cross-language crypto parity (Python reference vs Rust)
 python3 tests/compare_behavior.py
+make build-docker
 ```
 
-## Client Integration
+For local setup and deployment details, see:
 
-Clients can follow either pattern:
-
-1.  `demo-client/`: manual KMS interaction (node discovery + PoP + E2E envelope handling).
-2.  `demo-client-enclaver/`: simplified flow via enclaver `Odyn /v1/kms/*` APIs.
-
-## License
-
-Apache-2.0
+- `docs/development.md`
+- `docs/deployment.md`
+- `docs/app-to-kms-connection.md`
+- `docs/architecture.md`

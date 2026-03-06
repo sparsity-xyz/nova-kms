@@ -1,57 +1,212 @@
-# Nova KMS DataStore Implementation Report
+# Nova KMS Data Store
 
-This report provides a detailed technical review of the `DataStore` architecture in Nova KMS, focusing on security, consistency, and scalability within a distributed Trusted Execution Environment (TEE).
+This document describes the actual in-memory data-store implementation in `src/store.rs`, `src/models.rs`, and the surrounding route and sync logic.
 
-## 1. Security & Encryption
-The DataStore implements a "defense-in-depth" approach where data is never stored in plaintext within the enclave's memory.
+## 1. Data Shape
 
-- **Algorithm**: `AES-256-GCM` (Galois/Counter Mode) via `cryptography.hazmat`. GCM provides both confidentiality and authenticity.
-- **Key Management**: 
-    - Keys are derived per-app using `HKDF-SHA256` from the global master secret.
-    - Context-binding ensures that `app_A` cannot decrypt data belonging to `app_B`.
-- **Ciphertext Integrity**:
-    - Format: `nonce (12b) || ciphertext || tag (16b)`.
-    - **Probe Decryption**: During synchronization, incoming records are probe-decrypted in production mode to verify they were authored by a legitimate KMS node before being admitted to the store.
+The store is organized as:
 
-## 2. Read/Write Logic
-The implementation follows a thread-safe, partitioned namespace design.
+- `DataStore`
+  - `HashMap<u64, Namespace>`
+- `Namespace`
+  - keyed by `app_id`
+  - stores `DataRecord` values in an `LruCache<String, DataRecord>`
 
-- **Isolation**: Each `app_id` has its own `_Namespace` object, preventing cross-tenant interference.
-- **Granular Locking**: Locking is performed at the namespace level (`_Namespace._lock`), allowing concurrent read/write operations for different apps.
-- **Read Path**: Performs expiry checks and tombstone filtering before attempting decryption.
-- **Write Path**: Increments vector clocks and potentially triggers LRU eviction before committing the encrypted record.
+Each `DataRecord` contains:
 
-## 3. Storage Limits & Resource Management
-To prevent memory exhaustion attacks, strict limits are enforced within each namespace.
+- `key`
+- `encrypted_value`
+- `version` as a vector clock
+- `updated_at_ms`
+- `tombstone`
+- `ttl_ms`
 
-| Limit | Value | Description |
-|-------|-------|-------------|
-| `MAX_VALUE_SIZE` | 1 MB | Maximum size of a single encrypted record. |
-| `MAX_APP_STORAGE` | 10 MB | Total encrypted payload quota per app namespace. |
-| `MAX_CLOCK_SKEW_MS`| 15 sec | Tolerance window for future-dated writes. |
+## 2. Namespace Isolation
 
-- **Eviction policy**: When a namespace exceeds `MAX_APP_STORAGE`, it evicts records in least-recently-updated order based on `updated_at_ms` while preserving tombstone semantics.
+Each authorized app instance operates only inside its own `app_id` namespace.
 
-## 4. Distributed Synchronization
-Synchronization between KMS nodes is a multi-layered process ensuring state convergence across the cluster.
+That isolation is enforced by the route layer:
 
-- **Peer Discovery**: Nodes dynamically discover each other via the `NovaAppRegistry` on-chain (filtering for `ACTIVE` instances under `KMS_APP_ID` and excluding `REVOKED` versions).
-- **Communication Security**:
-    - **PoP Handshake**: Mutual Proof-of-Possession based on `tee_wallet` signatures.
-    - **HMAC Signing**: All sync payloads are signed with a transient sync key derived from the shared master secret.
-- **Sync Modes**:
-    1. **Delta Push**: Periodic push (default 10s) of recent changes since the last sync.
-    2. **Full Snapshot**: Performed during startup or after prolonged network isolation to ensure full state parity.
+- the app identity is resolved from auth
+- the handler always uses `auth.app_id`
+- callers never choose an arbitrary namespace directly
 
-## 5. Conflict Resolution (Vector Clocks + LWW)
-The system uses a hybrid consistency model to handle network partitions and concurrent writes.
+## 3. Encryption At Rest In The Store
 
-- **Causality Tracking**: Every record carries a `VectorClock`. 
-    - If `Incoming > Local` (causally): Accept the update.
-    - If `Incoming < Local`: Discard the update.
-- **Concurrent Conflict**: If updates are concurrent (no clear causal ancestor), the system falls back to **Last-Writer-Wins (LWW)** using the `updated_at_ms` millisecond timestamp.
-- **Safety**: Conflicts are resolved deterministically across all nodes, ensuring "eventual consistency."
+The store does not keep application values in plaintext.
 
-## 6. Recommendations & Observations
-- **Observation**: The current implementation is non-persistent (In-Memory Only). While this maximizes speed and security (no disk IO), it requires a full snapshot sync upon every node restart.
-- **Metric**: The `stats()` endpoint provides visibility into namespace count, total keys, and memory utilization, which is critical for monitoring cluster health.
+Write path:
+
+1. app sends plaintext value as base64 inside the encrypted request envelope
+2. handler decodes the base64 plaintext
+3. handler derives `derive_data_key(master_secret, app_id)`
+4. handler encrypts with AES-256-GCM
+5. store keeps only the ciphertext bytes
+
+Read path:
+
+1. handler fetches the ciphertext record
+2. handler derives the same per-app data key
+3. handler decrypts to plaintext
+4. handler returns base64 plaintext inside the encrypted response envelope
+
+Operational nuance:
+
+- route handlers still hold plaintext temporarily while processing requests
+- the persisted in-memory store content is ciphertext only
+
+## 4. Record Lifetime
+
+### 4.1 TTL
+
+`ttl_ms == 0` means the record does not expire.
+
+For `ttl_ms > 0`, a record is considered expired when:
+
+```text
+current_time_ms > updated_at_ms + ttl_ms
+```
+
+Expired records are removed during namespace access.
+
+### 4.2 Tombstones
+
+Delete does not remove a key immediately.
+
+Instead it stores a tombstone record:
+
+- `tombstone=true`
+- `encrypted_value=[]`
+- vector clock incremented from the previous record version
+- `updated_at_ms` set to delete time
+
+Tombstones are removed later when either:
+
+- they outlive `TOMBSTONE_RETENTION_MS`
+- tombstone count exceeds `MAX_TOMBSTONES_PER_APP`
+
+## 5. Size Limits
+
+### 5.1 Per-Value Input Limit
+
+`PUT /kms/data` rejects plaintext values larger than `MAX_KV_VALUE_SIZE_BYTES`.
+
+### 5.2 Namespace Budget
+
+Each namespace is bounded by `MAX_APP_STORAGE_BYTES`.
+
+When the budget is exceeded, the namespace evicts non-tombstone records until it falls back under the limit.
+
+### 5.3 Incoming Sync Validation
+
+Inbound sync records are rejected when:
+
+- ciphertext length exceeds `MAX_KV_VALUE_SIZE_BYTES + 128`
+- timestamp is too far in the future relative to `MAX_CLOCK_SKEW_MS`
+- in enclave mode, ciphertext cannot be decrypted with the local per-app data key
+
+## 6. Concurrency And Locking
+
+Locking is split by namespace:
+
+- `DataStore` guards namespace lookup with one `RwLock`
+- each `Namespace` has its own `RwLock`
+
+That means different `app_id` namespaces can proceed independently after lookup.
+
+## 7. Local Write Semantics
+
+### 7.1 Put
+
+On a local write:
+
+- the handler creates a fresh vector clock
+- increments it once with `config.node_wallet`
+- stamps `updated_at_ms=now_ms()`
+- stores the encrypted record
+
+### 7.2 Delete
+
+On delete:
+
+- the existing record version is cloned
+- the vector clock is incremented with `config.node_wallet`
+- a tombstone replaces the live record
+
+## 8. Merge Semantics
+
+Merge logic lives in `Namespace::merge_record_with_outcome()`.
+
+Rules:
+
+- if the incoming version happened after the current version:
+  - replace
+- if the incoming version happened before the current version:
+  - ignore
+- if versions are equal:
+  - ignore
+- if versions are concurrent:
+  - compare `updated_at_ms`
+  - larger timestamp wins
+  - if timestamps tie, lexicographically larger ciphertext wins
+  - when a concurrent record wins, the stored vector clock becomes the merge of both clocks
+
+This produces deterministic convergence across nodes.
+
+## 9. Snapshot And Delta Shapes
+
+Replication serializes records like this:
+
+```json
+{
+  "key": "path/to/key",
+  "value": "<hex ciphertext or null for tombstone>",
+  "version": {
+    "0xnodewallet": 1
+  },
+  "updated_at_ms": 1730000000000,
+  "tombstone": false,
+  "ttl_ms": 60000
+}
+```
+
+Outbound deltas are grouped by `app_id`:
+
+```json
+{
+  "49": [
+    {
+      "key": "a",
+      "value": "001122...",
+      "version": {
+        "0xnodewallet": 1
+      },
+      "updated_at_ms": 1730000000000,
+      "tombstone": false,
+      "ttl_ms": 0
+    }
+  ]
+}
+```
+
+## 10. Store Statistics
+
+`/status` reports store-level metrics under `data_store`:
+
+- `namespaces`
+- `total_keys`
+- `total_bytes`
+
+`total_keys` counts currently live keys after cleanup.
+
+## 11. Durability Model
+
+The current store is memory-only.
+
+Consequences:
+
+- process restart clears local KV state
+- a restarted node needs peer-assisted recovery
+- `attempt_master_secret_sync()` immediately requests a snapshot after syncing the master secret
+
+There is no disk persistence layer in the current code.

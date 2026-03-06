@@ -1,82 +1,159 @@
-# Registry and Cache Model
+# Registry And Cache Model
 
-This document defines how Nova KMS separates **App authorization** and **KMS peer authorization**.
+Nova KMS reads from `NovaAppRegistry` in two distinct ways. The split matters because app authorization and peer authorization have different freshness and latency goals.
 
-## 1. Source of Truth
+## 1. Source Of Truth
 
-Both flows ultimately derive from `NovaAppRegistry` on-chain data, but use different local caches:
+`NovaAppRegistry` is the only runtime source of truth for:
 
-| Flow | Primary cache | On-chain source | Runtime endpoint family |
-| :--- | :--- | :--- | :--- |
-| App -> KMS authorization | `CachedNovaRegistry` | `NovaAppRegistry` (instance/app/version) | `/kms/*` |
-| KMS <-> KMS peer authorization | `PeerCache` | `NovaAppRegistry` (`KMS_APP_ID` membership + metadata) | `/sync` |
+- app status
+- version status
+- instance status
+- `zkVerified`
+- `teeWalletAddress`
+- `teePubkey`
+- `instanceUrl`
 
-`KMSRegistry` is used for cluster coordination (`masterSecretHash`), not for runtime peer membership.
+`KMSRegistry` is only used for:
 
-## 2. Startup Wiring
+- operator callbacks
+- `kmsAppId`
+- `masterSecretHash`
 
-In the Rust runtime (`src/state.rs`):
+Runtime peer membership does not come from `KMSRegistry`.
 
-1. Build one canonical `RegistryClient` (reads both `NovaAppRegistry` and `KMSRegistry`).
-2. Build `PeerCache` for KMS peer discovery/verification (`src/sync.rs`).
-3. Build `CachedNovaRegistry` and inject it into app auth path (`authenticate_app` in `src/auth.rs`).
+## 2. App Authorization Path
 
-This keeps registration wiring explicit:
+App routes use `CachedNovaRegistry` from `src/registry.rs`.
 
-- `PeerCache` = KMS peer membership/auth path.
-- `CachedNovaRegistry` = app auth path.
+Call path:
 
-## 3. App Authorization Path (`/kms/*`)
+1. recover the app wallet from PoP, or accept `x-tee-wallet` when `IN_ENCLAVE=false`
+2. `getInstanceByWallet(wallet)`
+3. `getApp(app_id)`
+4. `getVersion(app_id, version_id)`
 
-For app requests:
+Acceptance rules:
 
-1. Authenticate PoP (`X-App-*` headers).
-2. `AppAuthorizer.verify()` reads via `CachedNovaRegistry`:
-   - `get_instance_by_wallet`
-   - `get_app`
-   - `get_version`
-3. Cache miss triggers an on-chain read and stores result with TTL.
+- instance ACTIVE
+- instance `zkVerified`
+- app ACTIVE
+- version status is not REVOKED
 
-Default TTL:
+Cache behavior:
 
-- `REGISTRY_CACHE_TTL_SECONDS = 180`
-- Not-found instance entries use shorter TTL (`10s` by default).
+- normal TTL: `REGISTRY_CACHE_TTL_SECONDS`
+- not-found instance entries use a shorter TTL:
+  - `min(REGISTRY_CACHE_TTL_SECONDS, 10s)`
 
-## 4. KMS Peer Path (`/sync`)
+This cache is read-through. A miss performs an on-chain read.
 
-For inter-node sync:
+## 3. Peer Authorization Path
 
-1. `node_tick` refreshes `PeerCache` from `NovaAppRegistry` at `KMS_NODE_TICK_SECONDS`.
-2. `PeerCache` stores peer fields used for sync authorization:
-   - wallet, app_id, status, zk_verified, tee_pubkey, instance_url, version_id
-3. Incoming `/sync` checks PoP + nonce/timestamp, then authorizes peer via `PeerCache.verify_kms_peer()`.
-4. E2E `sender_tee_pubkey` verification in `/sync` also uses cached peer teePubkey.
+Peer sync uses `PeerCache` from `src/sync.rs`.
 
-Current behavior is intentionally **cache-first for `/sync`**:
+Refresh logic:
 
-- If peer is not present in `PeerCache`, `/sync` is rejected.
-- `/sync` does not directly read `NovaAppRegistry` in request path.
+1. `getActiveInstances(KMS_APP_ID)`
+2. for each wallet, `getInstanceByWallet(wallet)`
+3. `getVersion(app_id, version_id)`
+4. keep only peers where:
+   - instance is ACTIVE
+   - `zkVerified=true`
+   - version status is ENROLLED or DEPRECATED
+   - URL passes local validation
 
-## 5. Peer Connectivity Metadata
+Cached peer fields:
 
-During `PeerCache.refresh()` in enclave mode:
+- `tee_wallet_address`
+- `node_url`
+- `tee_pubkey`
+- `app_id`
+- `operator`
+- `status`
+- `zk_verified`
+- `version_id`
+- `instance_id`
+- `registered_at`
 
-- each peer's `/status` endpoint is probed (timeout: `3s`)
-- metadata is cached:
-  - `status_reachable`
-  - `status_http_code`
-  - `status_probe_ms`
-  - `status_checked_at_ms`
+## 4. URL Validation
 
-This metadata is exposed by `/nodes` for diagnostics.
+Before a peer enters `PeerCache`, its `instanceUrl` must satisfy:
 
-## 6. Refresh and Staleness
+- valid URL
+- host present
+- no embedded credentials
+- scheme:
+  - `https` only when `IN_ENCLAVE=true`
+  - `http` or `https` when `IN_ENCLAVE=false`
 
-- `node_tick` interval: `KMS_NODE_TICK_SECONDS` (default `60s`)
-- `PeerCache` staleness TTL: `PEER_CACHE_TTL_SECONDS` (default `180s`)
-- App auth cache TTL: `REGISTRY_CACHE_TTL_SECONDS` (default `180s`)
+This is the same URL that outbound sync and nonce requests use later.
 
-Operational implication:
+## 5. Probe Metadata
 
-- App auth can still read-through on cache miss.
-- KMS peer sync depends on `PeerCache` freshness for acceptance.
+When `IN_ENCLAVE=true`, a peer refresh also probes `GET <peer>/status` with a 3-second timeout.
+
+Cached probe fields:
+
+- `status_reachable`
+- `status_http_code`
+- `status_probe_ms`
+- `status_checked_at_ms`
+
+`/nodes` exposes this metadata directly from `PeerCache`.
+
+When `IN_ENCLAVE=false`, those fields remain unset.
+
+## 6. Refresh Timing
+
+There are two refresh triggers:
+
+### 6.1 Scheduled Refresh
+
+`node_tick` runs every `KMS_NODE_TICK_SECONDS` and refreshes `PeerCache` unconditionally.
+
+### 6.2 On-Demand Refresh
+
+`refresh_peers_if_needed()` runs before outbound sync operations. It refreshes only when the cache is older than `PEER_CACHE_TTL_SECONDS`.
+
+## 7. Runtime Consequences
+
+### 7.1 App Routes
+
+App-route authorization can recover from cache misses immediately because `CachedNovaRegistry` is read-through.
+
+### 7.2 Peer Routes
+
+`/sync` is cache-first:
+
+- if a peer is absent from `PeerCache`, the request is rejected
+- the request handler does not hit `NovaAppRegistry` directly
+
+This makes `PeerCache` freshness part of sync availability.
+
+### 7.3 Self Membership Gate
+
+`node_tick` also uses `PeerCache` to decide whether this node is a current KMS member.
+
+If this node wallet is not found in the cached peer set:
+
+- `is_operator=false`
+- `service_available=false`
+- reason becomes `self not in KMS node list`
+
+### 7.4 Node URL Backfill
+
+If `NODE_INSTANCE_URL` is empty and the node finds its own entry in `PeerCache`, it copies the registry `instanceUrl` into `config.node_instance_url`.
+
+## 8. Revocation And Propagation Windows
+
+Two different windows exist:
+
+- app-route auth can be stale until `REGISTRY_CACHE_TTL_SECONDS`
+- peer auth can be stale until the next successful `PeerCache` refresh
+
+Operationally, if you revoke a KMS instance or rotate its `teePubkey`, readiness and peer acceptance follow the cache and tick windows, not the exact block where the change was mined.
+
+## 9. Declared But Inactive Peer Controls
+
+`PeerCache` has a `blacklist_peer()` primitive, and `Config` includes `PEER_BLACKLIST_DURATION_SECONDS`, but the current runtime does not invoke automatic peer blacklisting.

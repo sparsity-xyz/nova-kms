@@ -1,372 +1,222 @@
-# KMS Core Workflows & Security Architecture
+# Nova KMS Core Workflows
 
-This document consolidates the complete lifecycle and security architecture for Nova KMS, covering deployment, node enrollment, anti-split-brain initialization, and lightweight mutual authentication.
+This document focuses on the live workflows implemented by the Rust node and the current `KMSRegistry` contract.
 
----
+## 1. Contract And Platform Wiring
 
-## 1. KMS Registry Deployment & Platform Registration
+Before a node can ever become ready:
 
-The `KMSRegistry` contract is the trust anchor for the KMS cluster. It must be deployed and correctly linked to the Nova Platform before nodes can join.
+1. deploy `KMSRegistry`
+2. point the Nova KMS app `dappContract` to that contract
+3. call `setKmsAppId(app_id)` on `KMSRegistry`
+4. deploy KMS instances so they appear in `NovaAppRegistry`
 
-### Workflow
-1.  **Contract Deployment**:
-    - Deploy `KMSRegistry` (non-upgradeable in current code).
-    - Provide constructor args: owner and `NovaAppRegistry` address.
-2.  **Platform App Creation**:
-    - Create a new application on the **Nova Platform** (e.g., via `POST /apps`).
-    - **Crucial**: Provide the deployed `KMSRegistry` address as `dappContract` during this step.
-    - This creates the off-chain record for the service.
-3.  **On-Chain Registration**:
-    - In the Nova Platform UI/API, perform the **Register App On-Chain** step.
-    - The platform submits a transaction to `NovaAppRegistry` using the `dappContract` address provided in Step 2.
-    - Once confirmed, the platform provides the on-chain **Application ID** (`KMS_APP_ID`).
-4.  **KMS ID Configuration**:
-    - Set the assigned `KMS_APP_ID` on the `KMSRegistry` contract (e.g., via `make set-app-id` / `setKmsAppId`). 
-    - This allows the registry to verify that callbacks (like `addOperator`) are coming from the legitimate platform registry for the correct app.
+At runtime:
 
-### Mermaid Diagram
+- peer membership comes from `NovaAppRegistry`
+- cluster secret coordination comes from `KMSRegistry.masterSecretHash`
+
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
-    participant KMSReg as KMS Registry
-    participant Platform as Nova Platform
-    participant AppReg as Nova App Registry
+    participant KMSReg as KMSRegistry
+    participant Nova as NovaAppRegistry
+    participant Node as KMS Node
 
-    Operator->>KMSReg: Deploy KMSRegistry
-    Note over Operator: Save KMSRegistry address
-    
-    Operator->>Platform: 1. Create App (Set dappContract = KMSRegistry)
-    Platform-->>Operator: App Created (assigned internal ID)
-    
-    Operator->>Platform: 2. Register App On-Chain
-    Platform->>AppReg: registerApp(KMSRegistry Address, ...)
-    AppReg-->>Platform: Result: KMS_APP_ID assigned
-    Platform-->>Operator: On-chain KMS_APP_ID
-    
-    Operator->>KMSReg: 3. Set KMS_APP_ID (setKmsAppId)
-    KMSReg-->>Operator: Configuration Complete
+    Operator->>KMSReg: deploy
+    Operator->>KMSReg: setKmsAppId(app_id)
+    Operator->>Nova: register KMS app with dappContract=KMSReg
+    Nova->>KMSReg: addOperator(teeWallet, appId, versionId, instanceId)
+    Node->>Nova: read peer membership and instance metadata
+    Node->>KMSReg: read masterSecretHash
 ```
 
----
+## 2. Node Join And Membership
 
-## 2. KMS Node Join & Enrollment
+When a node instance is enrolled by Nova:
 
-Once the registry is live, new nodes can be deployed and automatically enrolled into the cluster.
+1. Nova verifies the instance and registers it in `NovaAppRegistry`
+2. Nova calls `KMSRegistry.addOperator(...)`
+3. `node_tick()` later refreshes `PeerCache`
+4. the node confirms:
+   - its wallet is present in current KMS membership
+   - its local `teePubkey` matches the registry entry for that wallet
 
-### Workflow
-1. A KMS node is deployed on Nova Platform as an instance of the KMS app.
-2. Nova Platform performs the standard enrollment:
-    - Verifies the node's ZK proof (hardware attestation).
-    - Checks the code measurement against the enrolled version.
-3. If valid, Nova Platform registers the instance in `NovaAppRegistry`.
-4. **Callback**: `NovaAppRegistry` automatically calls `addOperator` on the `KMSRegistry` address stored as `dappContract`.
-5. `KMSRegistry` records the new node's TEE wallet as an authorized operator.
+If either check fails, the node remains unavailable.
 
-### Mermaid Diagram
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Platform as Nova Platform
-    participant AppReg as Nova App Registry
-    participant KMSReg as KMS Registry
-    participant Node as New KMS Node
+## 3. Startup And Master Secret Convergence
 
-    Platform->>Node: Deploy instance
-    Node->>Platform: Submit Attestation/ZK Proof
-    Platform->>AppReg: Verify & Register Instance
-    AppReg->>KMSReg: addOperator(teeWallet, appId, versionId, instanceId)
-    KMSReg-->>AppReg: Operator Added
-```
+`node_tick()` drives master-secret convergence.
 
----
+### 3.1 Decision Tree
 
-## 3. Anti-Split-Brain Initialization
-
-The primary goal of the initialization process is to ensure that all KMS nodes within a cluster share the same **Master Secret**. 
-
-### The Problem
-When a node starts, it must decide whether to:
-1.  **Sync**: Fetch the existing secret from an active peer.
-2.  **Generate**: Create a new secret (only as the cluster "seed").
-
-A "Split-Brain" scenario occurs if two or more nodes generate different master secrets (e.g., due to simultaneous startup or network partition), leading to localized data silos and total system inconsistency.
-
-### Optimistic Initialization Logic
-To prevent this, KMS nodes implement an **Optimistic Initialization** strategy ("First-to-Claim Wins") using the `KMSRegistry` as a mutex:
-1.  **Check Chain**: Read `masterSecretHash` from `KMSRegistry`.
-2.  **If Hash == 0**:
-    *   **Optimistic Claim**: The node generates a new random master secret and attempts to set the hash on-chain.
-    *   **Mutex Defense**: The contract ensures only the *first* transaction succeeds. Simultaneous attempts by other nodes will fail/revert.
-    *   **Race Lost**: If the transaction fails, the node loops back to step 1.
-3.  **If Hash != 0**:
-    *   **Verify**: Does the local secret match the hash?
-    *   **Match**: Node becomes **Ready**.
-    *   **Mismatch / Missing**: Node attempts to **Sync** from a verified peer (via Sealed ECDH).
-    *   **Sync Failure**: If sync fails or the hash still mismatches, the node stays **Offline** and retries.
-
-### Diagram: Initialization Loop
 ```mermaid
 flowchart TD
-    Start([Node Startup]) --> CheckChain{Check masterSecretHash}
-
-    CheckChain -- Hash == 0 --> Generate[Generate Secret]
-    Generate --> SetHash[Attempt setMasterSecretHash]
-    SetHash -- Success --> Ready([Node Ready])
-    SetHash -- Failure/Revert --> Wait[Wait & Retry]
-    Wait --> CheckChain
-
-    CheckChain -- Hash != 0 --> Verify{Local Secret Matches?}
-    Verify -- Yes --> Ready
-    Verify -- No --> Discovery[Discover Peers via NovaAppRegistry]
-    Discovery --> Sync[Attempt Sync via Sealed ECDH]
-    
-    Sync -- Success --> Verify
-    Sync -- Failure --> Wait
+    Start([node_tick]) --> Refresh[Refresh PeerCache]
+    Refresh --> SelfCheck{Self in membership?}
+    SelfCheck -- no --> Unavailable1[service_available = false]
+    SelfCheck -- yes --> PubkeyCheck{Local teePubkey matches registry?}
+    PubkeyCheck -- no --> Unavailable2[service_available = false]
+    PubkeyCheck -- yes --> ChainHash[Read masterSecretHash]
+    ChainHash --> Zero{Hash == 0?}
+    Zero -- yes --> Init[Initialize local secret if needed]
+    Init --> SetHash[Call setMasterSecretHash]
+    SetHash --> WaitChain[Remain unavailable until hash appears on-chain]
+    Zero -- no --> Match{Local hash matches chain?}
+    Match -- yes --> Ready[Derive sync key and become available]
+    Match -- no --> SyncSecret[Sync secret from peer]
+    SyncSecret --> Snapshot[Request snapshot from same peer]
+    Snapshot --> Verify[Re-check local hash]
+    Verify --> Ready
 ```
 
-### Sealed Master Secret Exchange (P-384 ECDH)
+### 3.2 Bootstrap Rules
 
-When syncing the master secret from a peer, the secret is **sealed** using ECDH + AES-256-GCM
-to ensure confidentiality even if the network is untrusted.
+If `masterSecretHash == 0`:
 
-**Enclave Key Architecture:**
+- the node uses `MASTER_SECRET_HEX` if configured
+- otherwise it generates 32 random bytes
+- it computes `keccak256(master_secret)`
+- it calls `setMasterSecretHash`
 
-Every enclave has two independent keypairs:
+Current contract guard:
 
-| Keypair | Curve | Purpose |
-|---------|-------|---------|
-| **ETH wallet** | secp256k1 | PoP message signing (EIP-191) via `tee_wallet_address` |
-| **teePubkey** | P-384 (secp384r1) | ECDH encryption, stored on-chain in DER/SPKI format |
+- only an ACTIVE KMS instance on an ENROLLED version can set the hash
 
-These keypairs are **completely independent**. The wallet is NOT derived from teePubkey.
+### 3.3 Sync From Peer
 
-**Sealed Exchange Protocol:**
+If the chain already has a non-zero hash and local state is missing or mismatched:
 
-1. **Request**: Node A sends `master_secret_request` with its ephemeral P-384 public key:
-   ```json
-   {
-     "type": "master_secret_request",
-     "sender_wallet": "0xA...",
-         "ecdh_pubkey": "<P-384 public key hex (DER/SPKI or uncompressed SEC1 point)>"
-   }
-   ```
+1. fetch verified peers from `PeerCache`
+2. create an ephemeral P-384 keypair
+3. send `type=master_secret_request`
+4. unseal the returned secret locally
+5. install it as `init_state = "synced"`
+6. immediately request `type=snapshot_request`
+7. merge the snapshot into the local store
 
-2. **Seal**: Node B (holder of master secret) performs:
-   - Generate ephemeral P-384 keypair
-   - ECDH: `shared_secret = ECDH(ephemeral_private, requester_pubkey)`
-   - HKDF: `aes_key = HKDF-SHA256(shared_secret, salt="nova-kms:sealed-master-secret", info="aes-gcm-key")`
-   - Encrypt: `encrypted_data = AES-256-GCM(aes_key, master_secret)`
+## 4. App Request Workflow
 
-3. **Response**: Sealed envelope returned:
-   ```json
-   {
-     "status": "ok",
-     "sealed": {
-       "ephemeral_pubkey": "<P-384 DER hex>",
-       "encrypted_data": "<hex>",
-       "nonce": "<hex>"
-     }
-   }
-   ```
+### 4.1 Authentication
 
-4. **Unseal**: Node A performs reverse ECDH using its ephemeral private key and the
-   returned `ephemeral_pubkey` to derive the same AES key and decrypt.
+The app request path is:
 
-**Security Note**: The ephemeral keypairs ensure forward secrecy. Even if the on-chain
-teePubkey is compromised later, past sealed exchanges remain confidential.
+1. app fetches `/nonce`
+2. app signs:
+   - `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<timestamp>`
+3. app sends PoP headers plus an encrypted envelope
+4. KMS recovers the wallet
+5. KMS reads instance, app, and version data from `CachedNovaRegistry`
+6. KMS verifies `sender_tee_pubkey` against the app instance's on-chain `teePubkey`
 
----
+### 4.2 Business Operations
 
-## 4. Inter-Node Mutual Authentication (Lightweight PoP)
+Once authorized, the node can:
 
-KMS nodes perform **Mutual Authentication** at the application layer using a **Lightweight Proof of Possession (PoP)** handshake.
+- derive an app key
+- list keys in the caller namespace
+- read one key
+- write one key
+- delete one key
 
-### Why PoP?
-Since every KMS node's identity is already verified via ZKP and recorded on-chain, we can use signatures for performance instead of full 4KB attestation documents.
+All responses are encrypted back to the caller `teePubkey`.
 
-### Handshake Flow
-1.  **Challenge**: Node A (Client) calls `GET /nonce` on Node B (Server) to get $Nonce_B$.
-2.  **Signature A ($Sig\_A$)**: Node A signs a message binding the challenge, the recipient, and a timestamp:
-    `NovaKMS:Auth:<NonceBase64>:<Wallet_B>:<Timestamp_A>`
-    This signature is sent in the `X-KMS-Signature` header.
-    - **Wallet canonicalization**: `<Wallet_B>` MUST be a canonical Ethereum address string: `0x` + 40 lowercase hex characters.
-3.  **Request**: Node A sends `POST /sync` with PoP headers.
-4.  **Verification B**: 
-    - Node B recovers $Wallet_A$ from $Sig\_A$.
-    - Node B validates that `X-KMS-Nonce` is valid base64, single-use, and unexpired.
-    - Node B authorizes $Wallet_A$ as a KMS peer using **PeerCache** (cache refreshed from `NovaAppRegistry` during `node_tick`):
-        - Instance is ACTIVE and zkVerified
-        - `app_id == KMS_APP_ID`
-        - Version status is not REVOKED (ENROLLED or DEPRECATED)
-        - `teePubkey` is present
-      - `/sync` request path is cache-first (no synchronous `NovaAppRegistry` read in handler).
-5.  **Mutual Proof**: Node B returns its own signature on the Client's signature ($Sig\_A$) to prove receipt and processing:
-    `NovaKMS:Response:<Sig_A>:<Wallet_B>`
-    returned in header `X-KMS-Peer-Signature`.
-6.  **Verification A**: Node A verifies Node B's response signature against $Wallet_B$ (bound at step 2).
+If the caller used PoP, the node also signs:
 
-### HTTP Headers (Implementation)
-- `GET /nonce` returns JSON: `{ "nonce": "<base64>" }`.
-- Node A → Node B `POST /sync`:
-    - `X-KMS-Signature`: $Sig_A$
-    - `X-KMS-Nonce`: the base64 nonce string returned by `/nonce`
-    - `X-KMS-Timestamp`: unix epoch seconds (integer)
-    - `X-KMS-Wallet`: optional hint (server recovers wallet from signature)
-    - `X-Sync-Signature`: hex HMAC-SHA256 of the canonical JSON body (required once the cluster sync key is initialized). In the current implementation, the HMAC is computed over the **E2E-encrypted envelope JSON**.
-- Node B → Node A response:
-    - `X-KMS-Peer-Signature`: $Sig_B$ where $Sig_B$ signs `NovaKMS:Response:<Sig_A>:<Wallet_B>`
+- `NovaKMS:Response:<client_signature>:<kms_wallet>`
 
-> Notes:
-> - Header names are case-insensitive; examples use `X-*` for readability.
-> - `X-Sync-Signature` defends against cross-operator amplification and accidental/buggy peers once nodes share a master secret.
+### 4.3 Readiness Gate
 
-### Diagram: Inter-Node Mutual PoP
-```mermaid
-sequenceDiagram
-    autonumber
-    participant A as KMS Node A (Client)
-    participant B as KMS Node B (Server)
+All `/kms/*` handlers first check `service_available`.
 
-    A->>B: GET /nonce
-    B-->>A: Nonce_B
-    
-    Note over A: Create Message:<br/>"NovaKMS:Auth:NonceBase64:Wallet_B:TS"
-    Note over A: Sign with TEE Private Key (Sig_A)
-    
-    A->>B: POST /sync (Headers: Sig_A, Wallet_A, TS)
-    
-    B->>B: Recover Wallet_A from Sig_A
-    B->>B: Verify Wallet_A via PeerCache<br/>(ACTIVE + zkVerified + app_id==KMS_APP_ID + non-REVOKED version)
-    
-    Note over B: Create Response Message:<br/>"NovaKMS:Response:Sig_A:Wallet_B"
-    Note over B: Sign with TEE Private Key (Sig_B)
-    
-    B-->>A: 200 OK (Data + Header: Sig_B)
-    
-    A->>A: Recover Wallet_B from Sig_B
-    A->>A: Wallet_B was the bound recipient at step 2
-    Note over A: Sync Successful
-```
+That means app traffic does not flow until cluster master-secret convergence is complete.
 
----
+## 5. Peer Sync Workflow
 
-## 5. Nova App Access to KMS (Mutual PoP)
+### 5.1 Peer Authentication
 
-KMS supports **Lightweight PoP** for high-performance app API calls.
+For each `/sync` request:
 
-### Mutual PoP Handshake Flow
-1.  **Discovery**: App discovers KMS nodes via **NovaAppRegistry** (same enumeration used by the KMS peer cache: `KMS_APP_ID` → ACTIVE instances with non-REVOKED versions).
-2.  **Challenge**: App calls `GET /nonce` on a selected KMS node.
-3.  **Signature A ($Sig\_A$)**: App signs a message binding the challenge and the node:
-    `NovaKMS:AppAuth:<NonceBase64>:<KMS_Wallet>:<Timestamp>`
-    This is sent in the `X-App-Signature` header.
-    - **Wallet canonicalization**: `<KMS_Wallet>` MUST be a canonical Ethereum address string: `0x` + 40 lowercase hex characters.
-4.  **Authenticated Request**: App calls KMS API (e.g., `POST /kms/derive`) with PoP headers.
-5.  **Verification & Permission Management**: 
-    - KMS recovers App wallet signer from $Sig\_A$.
-    - KMS validates that `X-App-Nonce` is valid base64, single-use, and unexpired.
-    - KMS queries **NovaAppRegistry** using the `app_wallet` to find the corresponding **`app_id`**.
-    - KMS verifies the app status is `ACTIVE`.
-    - KMS uses the **`app_id`** to enforce permission boundaries (e.g., ensuring an app only accesses its own derived keys or KV namespace).
-6.  **Mutual Proof**: KMS returns its signature on $Sig\_A$ to prove it processed the request:
-    `NovaKMS:Response:<Sig_A>:<KMS_Wallet>`
-    returned in response header `X-KMS-Response-Signature`.
-7.  **Verification A**: App verifies the response signature recovers the expected $KMS\_Wallet$ (the recipient wallet it selected during discovery / bound into the PoP message).
+1. peer fetches `/nonce`
+2. peer signs:
+   - `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<timestamp>`
+3. peer encrypts the request body to the recipient `teePubkey`
+4. if a sync key exists and request type is not `master_secret_request`, peer adds `x-sync-signature`
+5. receiver verifies:
+   - nonce
+   - timestamp
+   - recovered wallet
+   - presence in `PeerCache`
+   - envelope `sender_tee_pubkey`
+   - HMAC when required
 
-### HTTP Headers (Implementation)
-- App → KMS request headers:
-    - `X-App-Signature`: $Sig_A$
-    - `X-App-Nonce`: the base64 nonce string returned by `/nonce`
-    - `X-App-Timestamp`: unix epoch seconds (integer)
-    - `X-App-Wallet`: optional hint (server recovers wallet from signature)
-- KMS → App response headers:
-    - `X-KMS-Response-Signature`: $Sig_{KMS}$ where $Sig_{KMS}$ signs `NovaKMS:Response:<Sig_A>:<KMS_Wallet>`
+### 5.2 Delta Push
 
-### Diagram: App-to-KMS Mutual PoP
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as Nova App (Client)
-    participant KMS as KMS Node (Server)
-    participant AppReg as Nova App Registry
+`sync_tick()` performs outbound delta push:
 
-    App->>AppReg: Enumerate KMS instances (KMS_APP_ID → ACTIVE instances with non-REVOKED versions)
-    AppReg-->>App: {instanceUrl, teeWalletAddress, teePubkey, ...}
-    
-    App->>KMS: GET /nonce
-    KMS-->>App: Nonce
-    
-    Note over App: Create Message:<br/>"NovaKMS:AppAuth:NonceBase64:KMS_Wallet:TS"
-    Note over App: Sign with TEE Private Key (Sig_A)
-    
-    App->>KMS: POST /kms/derive (App PoP Headers)
-    
-    KMS->>KMS: Recover App Wallet from Sig_A
-    KMS->>AppReg: getInstanceByWallet(AppWallet)
-    AppReg-->>KMS: Instance Details (AppID, VersionID, Status)
-    
-    Note over KMS: Verify Status == ACTIVE
-    Note over KMS: Use AppID for Partitioned Access
-    
-    Note over KMS: Create Response Message:<br/>"NovaKMS:Response:Sig_A:KMS_Wallet"
-    Note over KMS: Sign with TEE Private Key (Sig_KMS)
+1. collect records updated since the previous push
+2. group them by `app_id`
+3. post `type=delta` to each peer
+4. verify `X-KMS-Peer-Signature`
+5. decrypt the response envelope
+6. log merge stats returned by the peer
 
-    KMS-->>App: 200 OK (Data + Header: Sig_KMS)
-    
-    App->>App: Recover Wallet from Sig_KMS
-    App->>App: Verify recovered == expected KMS_Wallet (selected + bound in PoP message)
-```
+The peer response body for delta contains counts such as:
 
----
+- `total`
+- `merged`
+- `skipped`
+- `rejected`
+- `skip_reasons`
 
-## 6. API Reference: Key Derivation (`/kms/derive`)
+### 5.3 Snapshot Request
 
-The `/kms/derive` endpoint allows an authorized app to derive deterministic keys for specific paths.
-
-### Request Body (`POST /kms/derive`)
-
-`/kms/derive` uses E2E envelopes. The HTTP body is encrypted and contains the inner payload:
+A peer can request a full snapshot with:
 
 ```json
 {
-  "sender_tee_pubkey": "<app teePubkey hex>",
-  "nonce": "<hex>",
-  "encrypted_data": "<hex of JSON payload>"
+  "type": "snapshot_request",
+  "sender_wallet": "0x..."
 }
 ```
 
-Inner JSON payload:
+The response includes the full serialized store grouped by `app_id`.
+
+### 5.4 Master Secret Request
+
+A node that lacks the correct secret sends:
 
 ```json
 {
-  "path": "m/0/1",
-  "context": "signing",
-  "length": 32
+  "type": "master_secret_request",
+  "sender_wallet": "0x...",
+  "ecdh_pubkey": "<hex DER/SPKI>"
 }
 ```
 
-### Response Body
-
-Response is also an E2E envelope. After decryption, payload shape is:
+The receiver returns:
 
 ```json
 {
-  "app_id": 123,
-  "path": "m/0/1",
-  "key": "base64...",
-  "length": 32
+  "status": "ok",
+  "sealed": {
+    "ephemeral_pubkey": "<hex>",
+    "encrypted_data": "<hex>",
+    "nonce": "<hex>"
+  }
 }
 ```
 
----
+The requester unseals this locally and then pulls a snapshot.
 
-## 7. Security Properties
+## 6. Steady-State Cluster Behavior
 
-| Property | Mechanism |
-| :--- | :--- |
-| **Authenticity** | Signatures are recovered into wallet addresses and authorized against `NovaAppRegistry`-derived state. App path (`/kms/*`) checks instance ACTIVE+zkVerified, App ACTIVE, Version not REVOKED; KMS peer path (`/sync`) checks cached peer ACTIVE+zkVerified, `app_id==KMS_APP_ID`, Version not REVOKED. `KMSRegistry` provides `masterSecretHash` coordination. |
-| **Freshness** | One-time nonces and tight timestamps prevent replay attacks. |
-| **Identity Binding** | Signatures include the recipient's wallet address, preventing "Reflection" or "Re-routing" attacks (a signature for Node B cannot be used to authenticate to Node C). |
-| **Bidirectional Trust** | Mutual signatures ensure both client and server are verified against on-chain status before sensitive data is processed. |
-| **Cluster Integrity** | The strict initialization loop ensures no node creates a parallel state if an active cluster already exists. |
+Once a node is ready:
+
+- `/kms/*` serves app traffic
+- `/sync` accepts peer traffic
+- `sync_tick()` keeps pushing recent updates
+- `node_tick()` keeps revalidating membership and secret alignment
+
+If later validation fails, the node moves back to unavailable state and stops serving `/kms/*`.

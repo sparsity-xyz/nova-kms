@@ -1,134 +1,202 @@
-# Nova KMS — Developer Guide
+# Nova KMS Development Guide
 
-## Overview
+This guide covers local development against the current Rust codebase.
 
-This guide covers local development setup for the Nova KMS distributed Key Management Service, now implemented in **Rust**.
+## 1. Tooling
 
-## Prerequisites
+Required:
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Rust | 1.76+ | KMS application |
-| Cargo | latest | Rust package manager |
-| Foundry | latest | Solidity contracts |
-| Docker | 24+ | Container builds |
+- Rust and Cargo
+- Python 3 for `tests/compare_behavior.py`
+- Foundry for `contracts/`
+- Docker for image builds
 
-## Project Structure
+Runtime dependencies for a real local node:
 
-```text
-nova-kms/
-├── contracts/                    # Solidity smart contracts
-├── src/                          # Rust KMS application
-│   ├── main.rs                   # Tokio entry & shutdown
-│   ├── config.rs                 # Figment TOML config loader
-│   ├── odyn.rs                   # Odyn TEE SDK wrapper
-│   ├── registry.rs               # NovaAppRegistry & KMSRegistry wrapper (alloy)
-│   ├── auth.rs                   # App authorization via PoP
-│   ├── crypto.rs                 # HKDF key derivation + AES-GCM encryption
-│   ├── store.rs                  # Thread-safe LWW KV store
-│   ├── sync.rs                   # Active-active sync manager 
-│   ├── server.rs                 # Axum API routing
-│   └── models.rs                 # Shared types
-├── tests/                        # Cross-language compatibility checks
-├── docs/
-│   ├── architecture.md           # Design document
-│   ├── development.md            # This file
-│   ├── testing.md                # Testing guide
-│   └── deployment.md             # Deployment guide
-├── Dockerfile                    # Production Docker image (Multi-stage Rust)
-├── Makefile                      # Make shortcuts for Cargo
-├── enclaver.yaml                 # Enclaver configuration
-└── README.md
-```
+- an RPC endpoint that can serve `NovaAppRegistry` and `KMSRegistry`
+- an Odyn API endpoint
+  - local dev code path uses `http://odyn.sparsity.cloud:18000`
+  - enclave code path uses `http://127.0.0.1:18000`
 
-## Local Development Setup
+## 2. Repository Layout
 
-### 1. Build and Run the Application
+Relevant paths:
+
+- `src/main.rs`: process startup and background tasks
+- `src/server.rs`: routes and response shapes
+- `src/auth.rs`: nonce store, PoP verification, wallet recovery
+- `src/sync.rs`: peer cache, readiness, delta push, snapshot and secret sync
+- `src/store.rs`: namespaced in-memory KV store
+- `src/crypto.rs`: HKDF, AES-GCM, HMAC, sealed master-secret exchange
+- `src/registry.rs`: contract clients and caches
+- `src/bin/compare_rust.rs`: helper for the reference crypto check
+- `docs/`: code-aligned documentation
+- `contracts/`: `KMSRegistry` contract and Foundry scripts
+
+## 3. Common Commands
 
 ```bash
-cd nova-kms
+# format
+cargo fmt
 
-# Build the project
-cargo build
+# lint
+cargo clippy
 
-# Run formatting checks
-cargo fmt --all -- --check
-
-# Run lints
-cargo clippy --quiet
-
-# Run tests
+# unit tests
 cargo test
+
+# reference crypto check
+python3 tests/compare_behavior.py
+
+# image build
+make build-docker
 ```
 
-### 2. Configure Environment Variables
+The root `Makefile` currently exposes:
 
-The application utilizes `figment` to parse configuration out of environment variables. The variables broadly map back to the Python version's exact environment variable names:
+- `build-docker`
+- `test`
+- `lint`
+- `fmt`
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `NOVA_APP_REGISTRY_PROXY` | Proxy address for NovaAppRegistry | `0x...` |
-| `KMS_REGISTRY_ADDRESS` | Address for deployed KMSRegistry contract | `0x...` |
-| `KMS_APP_ID` | Assigned KMS App ID for derivation namespace | `0` |
-| `NODE_URL` | RPC URL for registry/auth-chain calls | `http://127.0.0.1:18545` |
-| `NODE_INSTANCE_URL` | Public URL of this KMS node | `http://localhost:8000` |
-| `HELIOS_RPC_URL` | Override for local Helios JSON-RPC endpoint | `http://127.0.0.1:18545` |
-| `IN_ENCLAVE` | Switch to verify strict TLS behaviors if necessary | `true` |
+## 4. Configuration Sources
 
-These can also be provided within a `Kms.toml` root file!
+The service loads configuration in this order:
 
-### 3. Running Locally
+1. defaults in `src/config.rs`
+2. `NovaKms.toml`
+3. environment variables
+
+Use lower snake case in `NovaKms.toml`, for example:
+
+```toml
+in_enclave = false
+bind_addr = "0.0.0.0:8000"
+log_level = "INFO"
+
+node_url = "http://127.0.0.1:18545"
+node_instance_url = "http://localhost:8000"
+node_wallet = "0x0a00000000000000000000000000000000000000"
+node_private_key = "0x..."
+
+nova_app_registry_address = "0x..."
+kms_registry_address = "0x..."
+kms_app_id = 49
+
+master_secret_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+Environment variables use upper snake case equivalents, for example `NODE_URL` and `KMS_APP_ID`.
+
+## 5. Active Runtime Settings
+
+These fields have active effect in the current code path:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `IN_ENCLAVE` | `true` | choose Odyn endpoint, peer URL policy, startup wallet behavior |
+| `LOG_LEVEL` | `INFO` | tracing filter |
+| `BIND_ADDR` | `0.0.0.0:8000` | Axum listen address |
+| `NOVA_APP_REGISTRY_ADDRESS` | configured default | NovaAppRegistry client |
+| `KMS_REGISTRY_ADDRESS` | configured default | KMSRegistry client |
+| `KMS_APP_ID` | `49` | KMS peer membership scope |
+| `NODE_URL` | `http://127.0.0.1:18545` | chain RPC |
+| `NODE_INSTANCE_URL` | empty | reported node URL; backfilled from registry if empty |
+| `NODE_WALLET` | fixed placeholder | dev wallet or enclave fallback before Odyn refresh |
+| `NODE_PRIVATE_KEY` | unset | required for local message signing when the node must sign in dev mode |
+| `KMS_NODE_TICK_SECONDS` | `60` | heartbeat and readiness loop |
+| `DATA_SYNC_INTERVAL_SECONDS` | `10` | outbound delta loop |
+| `PEER_CACHE_TTL_SECONDS` | `180` | stale threshold for on-demand peer refresh |
+| `REGISTRY_CACHE_TTL_SECONDS` | `180` | app auth cache TTL |
+| `MAX_APP_STORAGE_BYTES` | `10485760` | per-app namespace budget |
+| `MAX_KV_VALUE_SIZE_BYTES` | `1048576` | app `PUT /kms/data` plaintext size limit |
+| `TOMBSTONE_RETENTION_MS` | `86400000` | tombstone cleanup window |
+| `MAX_TOMBSTONES_PER_APP` | `10000` | namespace tombstone cap |
+| `POP_TIMEOUT_SECONDS` | `120` | nonce and PoP timestamp freshness |
+| `MAX_NONCES` | `4096` | nonce LRU capacity |
+| `MAX_CLOCK_SKEW_MS` | `15000` | future timestamp rejection for incoming sync |
+| `MASTER_SECRET_HEX` | unset | optional local master-secret seed |
+| `NONCE_RATE_LIMIT_PER_MINUTE` | `30` | `/nonce` token bucket |
+
+## 6. Declared But Currently Inactive Settings
+
+These fields exist in `Config`, but the current request path does not enforce them:
+
+- `RATE_LIMIT_PER_MINUTE`
+- `ALLOW_PLAINTEXT_DEV`
+- `MAX_REQUEST_BODY_BYTES`
+- `MAX_SYNC_PAYLOAD_BYTES`
+- `PEER_BLACKLIST_DURATION_SECONDS`
+
+Do not rely on them for security or traffic control unless the code path is wired first.
+
+## 7. Local Run Modes
+
+### 7.1 Minimal Single-Node Bring-Up
+
+For a single local node where you want deterministic startup:
 
 ```bash
-# Set required env vars
-export KMS_APP_ID=49
+export IN_ENCLAVE=false
 export NODE_URL=http://127.0.0.1:18545
+export NOVA_APP_REGISTRY_ADDRESS=0x...
+export KMS_REGISTRY_ADDRESS=0x...
+export KMS_APP_ID=49
+export NODE_WALLET=0x0a00000000000000000000000000000000000000
 export NODE_INSTANCE_URL=http://localhost:8000
+export MASTER_SECRET_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-# Start server
 cargo run
 ```
 
-### 4. Test API Endpoints
- 
- ```bash
- # Health check
- curl http://localhost:8000/health
- 
- # Status
- curl http://localhost:8000/status
- ```
- 
- > **Note:** In production (inside enclave), the service requires PoP headers (`x-app-signature`, `x-app-nonce`, `x-app-timestamp`). For local development, refer to `src/auth.rs` for verification details.
+### 7.2 Local PoP Or Peer Sync Exercises
 
----
-
-## Contract Development
-
-### Setup Foundry
+If the node must sign messages in dev mode, also set:
 
 ```bash
-cd contracts
-
-# Install dependencies
-make install
-
-# Build
-make build
-
-# Test
-make test
-
-# Format
-make fmt
+export NODE_PRIVATE_KEY=0x...
 ```
 
-### Deploy KMSRegistry (Testnet)
+You need this when:
+
+- the node returns app mutual signatures after PoP-authenticated requests
+- the node initiates peer sync in dev mode
+
+## 8. What You Can Probe With Plain HTTP
+
+These routes do not require encrypted request bodies:
+
+- `GET /health`
+- `GET /status`
+- `GET /nodes`
+- `GET /nonce`
+- `GET /`
+
+Routes under `/kms/*` and `/sync` still require encrypted envelopes even in local development.
+
+## 9. Local Authentication Notes
+
+For app routes only:
+
+- normal mode is app PoP with `x-app-*` headers
+- when `IN_ENCLAVE=false`, the node also accepts `x-tee-wallet`
+
+For peer routes:
+
+- `/sync` always requires peer PoP
+- once a sync key exists, it also requires `x-sync-signature` except for `type=master_secret_request`
+
+## 10. Useful Checks During Bring-Up
 
 ```bash
-export NOVA_APP_REGISTRY_PROXY=0x...  # NovaAppRegistry proxy address
-export KMS_APP_ID=...                  # KMS app ID from NovaAppRegistry
-export PRIVATE_KEY=0x...               # Deployer private key
-
-make deploy
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/status
+curl http://127.0.0.1:8000/nodes
+curl http://127.0.0.1:8000/nonce
 ```
+
+Interpretation:
+
+- `/health=200` means the process is alive
+- `/status.node.service_available=true` means `/kms/*` is ready
+- `/nodes` shows what the current `PeerCache` believes

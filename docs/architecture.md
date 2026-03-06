@@ -1,469 +1,296 @@
-# Distributed Blockchain KMS Service - Architecture Design
+# Nova KMS Architecture
 
-## Overview
+This document describes the Rust node that lives in `src/` today. It is written against the current router, state model, sync flow, and contract clients.
 
-Design a distributed Key Management Service (KMS) running in AWS Nitro Enclave, deployed as a Nova Platform application and serving other Nova Platform applications. The KMS provides a **Key Derivation Service** and an **in-memory KV store**, with access controlled by **on-chain app registration** in the Nova App Registry. Applications are identified by their **App ID** (a `uint256` assigned by `NovaAppRegistry`), while code upgrades are managed as new **Versions** on-chain.
+## 1. System Overview
 
-Peer discovery in the current implementation is sourced directly from **NovaAppRegistry** (via an in-enclave `PeerCache`):
+Nova KMS is an Axum service with three stateful responsibilities:
 
-- `KMS_APP_ID` → `getActiveInstances()` → Active KMS instances
-
-The repository also includes a dedicated **KMSRegistry** contract. In addition to receiving operator callbacks from `NovaAppRegistry`, it stores a cluster-wide `masterSecretHash`. During cluster bootstrap, a KMS node may submit a one-time on-chain transaction to set `masterSecretHash` when it is unset.
-
-Request authentication uses **lightweight Proof-of-Possession (PoP) signatures** bound to on-chain identities.
+1. authorize Nova app instances and KMS peers from on-chain data
+2. converge on one cluster master secret
+3. serve key-derivation and encrypted KV operations
 
 ```mermaid
-graph TB
-    subgraph "Nova Platform"
-        App1[Nova App Instance 1<br/>AppId: 101]
-        App2[Nova App Instance 2<br/>AppId: 202]
-        App3[Nova App Instance 3<br/>AppId: 202]
-    end
-    
-    subgraph "KMS Cluster"
-        KMS1[KMS Node 1<br/>Nitro Enclave]
-        KMS2[KMS Node 2<br/>Nitro Enclave]
-        KMS3[KMS Node 3<br/>Nitro Enclave]
-    end
-    
-    subgraph "Blockchain"
-        Registry[NovaAppRegistry<br/>App Registry]
-        KMSContract[KMSRegistry<br/>Operator Callbacks + masterSecretHash]
-    end
-    
-    App1 -- "PoP Signature / Instance Wallet" --> KMS1
-    App2 -- "PoP Signature / Instance Wallet" --> KMS2
-    App3 -- "PoP Signature / Instance Wallet" --> KMS1
-    
-    App1 -. "Peer discovery (getActiveInstances(KMS_APP_ID))" .-> Registry
-    App2 -. "Peer discovery" .-> Registry
-    App3 -. "Peer discovery" .-> Registry
-    
-    KMS1 -- "PoP Sync" --- KMS2
-    KMS2 -- "PoP Sync" --- KMS3
-    KMS1 -- "PoP Sync" --- KMS3
-    
-    Registry -- "addOperator / removeOperator" --> KMSContract
-    KMS1 -- "Peer discovery (getActiveInstances(KMS_APP_ID))" --> Registry
-    KMS1 -- "Read masterSecretHash / optional bootstrap write" --> KMSContract
-    KMS1 -- "Verify instance + app + version" --> Registry
+graph TD
+    App[Nova App Instance]
+    Peer[KMS Peer]
+    Node[Nova KMS Node]
+    Registry[NovaAppRegistry]
+    KMSRegistry[KMSRegistry]
+    Odyn[Odyn API]
+
+    App -->|PoP + encrypted envelope| Node
+    Peer -->|PoP + encrypted envelope + HMAC| Node
+    Node -->|instance/app/version reads| Registry
+    Node -->|masterSecretHash read/write| KMSRegistry
+    Node -->|sign, encrypt, decrypt, RNG| Odyn
 ```
 
----
+## 2. Core Components
 
-## 1. System Components
+### 2.1 HTTP Layer
 
-### 1.1 KMS Enclave Application
+`src/server.rs` exposes the complete route surface:
 
-A Rust/Axum application running inside AWS Nitro Enclave, packaged and deployed on the Nova Platform. It serves other Nova apps and enforces access control using on-chain app registration data.
+| Route | Method | Handler role |
+| --- | --- | --- |
+| `/` | `GET` | API overview JSON |
+| `/health` | `GET` | liveness |
+| `/status` | `GET` | readiness, identity, store stats |
+| `/nonce` | `GET` | single-use nonce issuance |
+| `/nodes` | `GET` | peer-cache dump |
+| `/kms/derive` | `POST` | app-scoped HKDF |
+| `/kms/data` | `GET` | list keys or fetch by query |
+| `/kms/data/*key` | `GET` | fetch by path |
+| `/kms/data` | `PUT` | write one record |
+| `/kms/data` | `DELETE` | create tombstone |
+| `/sync` | `POST` | delta, snapshot, or master-secret exchange |
 
-**Core Features:**
+No OpenAPI, Swagger UI, or ReDoc routes are registered by the current router.
 
-| Feature | Description |
-|---------|-------------|
-| In-memory KV Store | `dict[AppId, dict]` - partitioned by application identity, **non-persistent** |
-| **Key Derivation (KDF)** | Derive application-specific keys from cluster-wide master secret |
-| Request Verification | Verify App identity via NovaAppRegistry (App -> Version -> Instance) |
-| Authentication | PoP signatures bound to on-chain identities |
-| Health / Connectivity | KMS caches peers from NovaAppRegistry (see `PeerCache`); clients may probe liveness out-of-band |
-| Status Monitoring | `/status` endpoint showing KMS cluster health |
+### 2.2 Shared State
 
-**Enclave Key Architecture:**
+`src/state.rs` builds `AppState`:
 
-Every Nova Platform enclave (including KMS nodes) has **two independent keypairs** on different elliptic curves:
+- `Config`
+- `DataStore`
+- `OdynClient`
+- `RegistryClient`
+- `CachedNovaRegistry`
+- `NonceStore`
+- nonce token bucket
+- `PeerCache`
+- `MasterSecretManager`
+- service-availability flags
 
-| Keypair | Curve | On-chain Field | Purpose |
-|---------|-------|----------------|---------|
-| **ETH wallet** | secp256k1 | `teeWalletAddress` | PoP message signing (EIP-191) |
-| **teePubkey** | P-384 (secp384r1) | `teePubkey` (DER/SPKI) | ECDH encryption (master secret exchange) |
+### 2.3 Background Tasks
 
-These keypairs are **completely independent**:
-- The wallet address is **NOT** derived from `teePubkey`.
-- `teePubkey` is **NOT** derived from the wallet.
-- `teePubkey` is used exclusively for ECDH-based encryption between enclaves.
-- The ETH wallet is used exclusively for signing PoP/response messages.
+`src/main.rs` starts two Tokio loops:
 
-**Odyn API Usage:**
+- `node_tick`
+  - runs once immediately
+  - then repeats every `KMS_NODE_TICK_SECONDS`
+- `sync_tick`
+  - sleeps first
+  - then repeats every `DATA_SYNC_INTERVAL_SECONDS`
 
-```rust
-// Get KMS node identity on startup (secp256k1 wallet)
-let eth_address = odyn.eth_address().await?;       // KMS Ethereum address for signing
-let random_bytes = odyn.get_random_bytes().await?; // Hardware RNG
-let sig_res = odyn.sign_message(&msg).await?;      // EIP-191 signing for PoP
+## 3. Trust Roots
 
-// P-384 encryption (teePubkey)
-let pubkey = odyn.get_encryption_public_key().await?; // includes public_key_der (hex)
-let enc = odyn.encrypt("plaintext", &peer_pubkey_hex).await?;
-let plaintext = odyn.decrypt(&enc.nonce, &peer_pubkey_hex, &enc.encrypted_data).await?;
-```
+### 3.1 NovaAppRegistry
 
-### 1.2 On-chain Contracts
+`NovaAppRegistry` is the authoritative source for:
 
-#### 1.2.1 NovaAppRegistry (App Registry)
+- app status
+- version status
+- instance status
+- `zkVerified`
+- `teeWalletAddress`
+- `teePubkey`
+- `instanceUrl`
+- current KMS membership via `getActiveInstances(KMS_APP_ID)`
 
-The KMS relies on **NovaAppRegistry** as the source of truth for app identity, code measurement, and runtime instances. The registry is organized as **App -> Version -> Instance**:
+The runtime uses it in two ways:
 
-- **App**: `appId`, owner, optional `dappContract`, status
-- **Version**: `versionId`, `codeMeasurement`, status
-- **Instance**: `teeWalletAddress`, `teePubkey`, `instanceUrl`, `zkVerified`, status
+- `CachedNovaRegistry` for app-route authorization
+- `PeerCache` for peer authorization and peer metadata
 
-Minimal interface used by KMS (aligned with `NovaAppRegistry.sol`):
+### 3.2 KMSRegistry
 
-```solidity
-// SPDX-License-Identifier: Apache-2.0
-pragma solidity ^0.8.33;
+`KMSRegistry` is not used for runtime peer discovery. Its live role is:
 
-interface INovaAppRegistry {
-    enum AppStatus { ACTIVE, INACTIVE, REVOKED }
-    enum VersionStatus { ENROLLED, DEPRECATED, REVOKED }
-    enum InstanceStatus { ACTIVE, STOPPED, FAILED }
+- hold `kmsAppId`
+- keep an operator set via NovaAppRegistry callbacks
+- hold `masterSecretHash`
+- gate `setMasterSecretHash` so only an ACTIVE KMS instance on an ENROLLED version can set it while the hash is zero
 
-    struct App {
-        uint256 appId;
-        address owner;
-        bytes32 teeArch;
-        address dappContract;
-        address appWallet;
-        string metadataUri;
-        uint256 latestVersionId;
-        uint256 createdAt;
-        AppStatus status;
-    }
+## 4. Identity Model
 
-    struct AppVersion {
-        uint256 versionId;
-        string versionName;
-        bytes32 codeMeasurement;
-        string imageUri;
-        string auditUrl;
-        string auditHash;
-        string githubRunId;
-        VersionStatus status;
-        uint256 enrolledAt;
-        address enrolledBy;
-    }
+Every node instance has two independent identities:
 
-    struct RuntimeInstance {
-        uint256 instanceId;
-        uint256 appId;
-        uint256 versionId;
-        address operator;
-        string instanceUrl;
-        bytes teePubkey;
-        address teeWalletAddress;
-        bool zkVerified;
-        InstanceStatus status;
-        uint256 registeredAt;
-    }
+| Identity | Curve / format | Source | Used for |
+| --- | --- | --- | --- |
+| wallet | secp256k1 address | Odyn signing identity / `teeWalletAddress` | PoP and response signatures |
+| `teePubkey` | P-384 DER/SPKI | Odyn encryption key / `teePubkey` | request and response encryption |
 
-    function getApp(uint256 appId) external view returns (App memory);
-    function getVersion(uint256 appId, uint256 versionId) external view returns (AppVersion memory);
-    function getInstance(uint256 instanceId) external view returns (RuntimeInstance memory);
-    function getInstanceByWallet(address teeWalletAddress) external view returns (RuntimeInstance memory);
-    function getInstancesForVersion(uint256 appId, uint256 versionId) external view returns (uint256[] memory);
-}
-```
+The node treats both as independent facts and validates both:
 
-Operational note: NovaAppRegistry is **UUPS upgradeable**; always interact with the **proxy address**.
+- wallet from recovered PoP signature
+- `teePubkey` from the encrypted envelope against on-chain state
 
-> [!NOTE]
-> `appId` is a **uint256 assigned by NovaAppRegistry**, not a contract address. If an app uses an on-chain contract, it is referenced via the optional `dappContract` field.
+## 5. Authentication And Authorization
 
-#### 1.2.2 KMSRegistry (Operator List)
+### 5.1 App Requests
 
-A standalone smart contract implementing **`INovaAppInterface`** that maintains an operator set managed by `NovaAppRegistry` callbacks, and stores a cluster-wide `masterSecretHash`.
+`authenticate_app()` in `src/auth.rs` accepts:
 
-**INovaAppInterface Integration:**
+- PoP headers:
+  - `x-app-signature`
+  - `x-app-nonce`
+  - `x-app-timestamp`
+  - optional `x-app-wallet`
+- or, only when `IN_ENCLAVE=false`, the dev shortcut:
+  - `x-tee-wallet`
 
-```solidity
-interface INovaAppInterface {
-    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
-    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
-    function setNovaAppRegistry(address registry) external;
-    function novaAppRegistry() external view returns (address);
-}
-```
+Authorization then reads:
 
-**Operator Lifecycle:**
+1. instance by recovered wallet
+2. app by `app_id`
+3. version by `(app_id, version_id)`
 
-1. **`addOperator`** — Called by NovaAppRegistry when a TEE instance registers for the KMS app. Adds the wallet to the operator set. Validates `appId == kmsAppId`. Idempotent.
-2. **`removeOperator`** — Called by NovaAppRegistry when instance stops/fails. Removes from operator set using O(1) swap-and-pop. Idempotent.
+The request is accepted only when:
 
-**Master Secret Hash (bootstrap mutex):**
+- instance is ACTIVE
+- instance is `zkVerified`
+- app is ACTIVE
+- version is not REVOKED
 
-- `masterSecretHash` is `bytes32(keccak256(masterSecret))`.
-- `setMasterSecretHash(bytes32)` can be called once when the value is unset.
-    The contract validates that the caller is an ACTIVE instance of the KMS app and that its version is ENROLLED.
-- `resetMasterSecretHash()` is owner-only.
+### 5.2 Peer Requests
 
-```solidity
-pragma solidity ^0.8.33;
+`authenticate_kms_peer()` verifies PoP, then `PeerCache.verify_kms_peer()` checks:
 
-/// Simplified interface for the on-chain KMSRegistry contract.
-interface IKMSRegistry {
-    // Operator callbacks (invoked by NovaAppRegistry)
-    function addOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
-    function removeOperator(address teeWalletAddress, uint256 appId, uint256 versionId, uint256 instanceId) external;
+- peer is present in `PeerCache`
+- peer instance is ACTIVE
+- peer is `zkVerified`
+- peer `app_id == KMS_APP_ID`
+- peer has a non-empty `teePubkey`
 
-    // Operator views
-    function isOperator(address account) external view returns (bool);
-    function getOperators() external view returns (address[] memory);
+`/sync` is cache-first. It does not query `NovaAppRegistry` on the hot path.
 
-    // Cluster master-secret coordination
-    function masterSecretHash() external view returns (bytes32);
-    function setMasterSecretHash(bytes32 newHash) external;
-    function resetMasterSecretHash() external;
-}
-```
+## 6. Encrypted Request Model
 
-Interaction summary:
-- **NovaAppRegistry → KMSRegistry**: `addOperator`/`removeOperator` callbacks manage the operator set. The `dappContract` field of the KMS app on NovaAppRegistry must point to the KMSRegistry address.
-- **KMSRegistry** validates eligibility for `setMasterSecretHash()` by reading required fields from NovaAppRegistry.
-- **Peer discovery in the KMS service implementation** is sourced from NovaAppRegistry directly (see `/nodes` and `PeerCache`). The operator list in KMSRegistry is not used for runtime peer discovery.
-
----
-
-## 2. Core Flows
-
-### 2.1 KMS Node Registration Flow
-
-See [KMS Core Workflows & Security Architecture - Section 2: KMS Node Join & Enrollment](./kms-core-workflows.md#2-kms-node-join--enrollment).
-
-### 2.2 App Request Flow
-
-See [KMS Core Workflows & Security Architecture - Section 5: Nova App Access to KMS](./kms-core-workflows.md#5-nova-app-access-to-kms-mutual-pop).
-
-### 2.3 App Authorization Logic (Instance + App Registry)
-
-```rust
-pub async fn verify_app_request(identity: &ClientIdentity) -> Result<bool, KmsError> {
-    /* Verify that a request comes from a valid and authorized Nova application.
-
-    The current implementation authorizes based on NovaAppRegistry state:
-    - Instance is ACTIVE and zkVerified
-    - App status is ACTIVE
-    - Version status is not REVOKED (ENROLLED or DEPRECATED)
-
-    (No code-measurement comparison is performed in this layer.)
-    */
-    let auth = AppAuthorizer::new(&nova_app_registry);
-    let result = auth.verify(identity).await?;
-    Ok(result.authorized)
-}
-```
-
-### 2.4 Data Synchronization Flow
-
-See [KMS Core Workflows & Security Architecture - Section 4: Inter-Node Mutual Authentication](./kms-core-workflows.md#4-inter-node-mutual-authentication-lightweight-pop).
-
----
-
-## 3. API Design
-
-### 3.1 KMS Node API
-
-| Endpoint | Method | Description | Auth |
-|----------|--------|-------------|------|
-| `/health` | GET | Health check | None |
-| `/status` | GET | KMS node + cluster view | None |
-| `/nonce` | GET | Issue one-time PoP nonce | None |
-| `/kms/derive` | POST | **Derive application key** (KDF) | App PoP + NovaAppRegistry verification |
-| `/kms/data` | GET/PUT/DELETE | KV data operations | App PoP + NovaAppRegistry verification |
-| `/kms/data/{key}` | GET | Read KV value | App PoP + NovaAppRegistry verification |
-| `/sync` | POST | Receive sync event from other KMS nodes | KMS peer PoP + optional HMAC |
-| `/nodes` | GET | List KMS instances (from PeerCache / NovaAppRegistry) | None |
-
-### 3.2 Status Endpoint Response
-
-The `/status` endpoint returns a merged view of local health and cluster overview. The cluster view uses the in-enclave peer cache (NovaAppRegistry-sourced) for instance count.
+Sensitive request and response bodies use the same envelope:
 
 ```json
 {
-    "node": {
-        "tee_wallet": "0x1234...",
-        "node_url": "https://kms-7.nova",
-        "is_operator": true,
-        "master_secret_initialized": true
-    },
-    "cluster": {
-        "kms_app_id": "<KMS_APP_ID>",
-        "registry_address": "0xabc...",
-        "total_instances": 12
-    }
+  "sender_tee_pubkey": "<hex DER/SPKI>",
+  "nonce": "<hex>",
+  "encrypted_data": "<hex>"
 }
 ```
 
-### 3.3 Request Format (PoP Secured)
-Payload format is simple JSON.
+Processing rules:
 
-> [!IMPORTANT]
-> The KMS **does not trust client-provided App IDs**. It derives `appId`
-> from the PoP-identified TEE wallet via NovaAppRegistry. If a header is provided,
-> it must match.
->
-> **No trusted middleboxes**: the enclave application does not trust any proxy
-> or TLS terminator. In production, the caller must provide PoP signature
-> headers that the enclave verifies directly against on-chain registered
-> identities.
+1. authenticate the caller
+2. resolve the caller's expected `teePubkey`
+3. require `sender_tee_pubkey` to match that on-chain value
+4. decrypt with Odyn
+5. process the inner JSON
+6. encrypt the response to the caller's `teePubkey`
 
-**POST /kms/derive** (inner payload before E2E envelope encryption)
-```json
-{
-  "path": "app_disk_encryption",
-  "context": "v1",
-  "length": 32
-}
-```
+Plaintext business payloads are rejected.
 
+## 7. Readiness And Master Secret State
 
+`node_tick()` in `src/sync.rs` controls readiness.
 
-### 3.4 Key Derivation (KDF) Implementation
+The node is unavailable when any of these fail:
 
-KMS uses a Cluster Master Secret (held in TEE memory) to derive keys using HKDF.
+- peer refresh fails and there is no cached membership
+- this node is not present in KMS membership
+- local `teePubkey` differs from the registry entry for this wallet
+- `masterSecretHash` cannot be read
+- local master secret cannot be reconciled with the chain
 
-```rust
-fn derive_app_key(master_secret: &[u8], app_id: u64, path: &str) -> Result<Vec<u8>, KmsError> {
-    // Derive a stable, unique key for an app.
-    // ... Ring HKDF implementation
-}
-```
+The node becomes available only after:
 
----
+- membership is valid
+- local `teePubkey` matches the registry
+- local master secret matches `masterSecretHash`
+- a sync HMAC key is derived from that master secret
 
-## 4. Data Synchronization Protocol
+`/health` does not reflect any of the above. `/status.node.service_available` does.
 
-### 4.1 Membership and Sync Strategy
+## 8. Data Model
 
-- **Membership source**: nodes discover peers via NovaAppRegistry (`KMS_APP_ID` → ACTIVE instances with non-REVOKED versions), cached in `PeerCache`.
-- **Anti-entropy**: periodic push/pull of recent updates (delta sync) to peers.
-- **Catch-up**: if a node is far behind (vector clock gap exceeds threshold), request a **snapshot** from a healthy peer.
-- **Security**: sync messages are authenticated with PoP and authorize the sender via `PeerCache` (which is refreshed from `NovaAppRegistry` and keeps only ACTIVE + zkVerified KMS instances on non-REVOKED versions).
-- **Record validation**: inbound sync records are rejected if ciphertext size/format is invalid, probe-decrypt fails (in enclave mode), or timestamp exceeds `MAX_CLOCK_SKEW_MS`.
+`DataStore` is a map of `app_id -> Namespace`.
 
-### 4.2 Vector Clock Based Sync
+Each `DataRecord` contains:
 
-Uses Vector Clock for eventual consistency to avoid conflicts.
+- `key`
+- `encrypted_value`
+- `version` as a vector clock
+- `updated_at_ms`
+- `tombstone`
+- `ttl_ms`
 
-```rust
-pub struct VectorClock {
-    pub clock: HashMap<String, u64>,
-}
+Storage characteristics:
 
-impl VectorClock {
-    pub fn new() -> Self { ... }
-    pub fn increment(&mut self, node_id: &str) { ... }
-    pub fn merge(&mut self, other: &VectorClock) { ... }
-    pub fn is_concurrent(&self, other: &VectorClock) -> bool { ... }
-}
-```
+- namespace-scoped size limit: `MAX_APP_STORAGE_BYTES`
+- per-value input limit on `PUT`: `MAX_KV_VALUE_SIZE_BYTES`
+- values are stored encrypted with a key derived from the master secret and `app_id`
+- records are kept in-memory only
+- expired entries and old tombstones are cleaned during namespace access
 
-### 4.3 Conflict Resolution
+## 9. Sync Model
 
-For concurrent writes, uses **Last-Writer-Wins (LWW)** strategy based on timestamp.
+### 9.1 Outbound
 
-### 4.4 Internal Data Storage (Non-Persistent)
+`sync_tick()` calls `push_deltas()` when:
 
-The KMS **does not persist data to disk**. All state lives in enclave memory and is rebuilt from peers after restart.
+- `sync_key` exists
+- `service_available` is true
 
-**Storage Model (per App ID namespace):**
+`push_deltas()`:
 
-```rust
-pub struct DataRecord {
-    pub key: String,
-    pub encrypted_value: Vec<u8>,
-    pub version: VectorClock,
-    pub updated_at_ms: u64,
-    pub tombstone: bool,
-    pub ttl_ms: u64,
-}
-```
+1. reads records updated since `last_push_ms - 1`
+2. builds a per-`app_id` delta payload
+3. fetches a nonce from each peer
+4. signs `NovaKMS:Auth:<nonce>:<peer_wallet>:<ts>`
+5. encrypts the request body to the peer `teePubkey`
+6. HMAC-signs the on-the-wire envelope JSON
+7. posts to `/sync`
+8. verifies `X-KMS-Peer-Signature`
 
-**Notes:**
-- **Non-persistent**: no filesystem writes; no local database.
-- **Rehydration**: on startup, node performs sync and/or snapshot to rebuild state.
-- **Limits**: per-app size quota + LRU eviction; TTL expiration for stale records.
-- **Security**: values are stored encrypted-at-rest using a per-app data key (AES-GCM). In production (`IN_ENCLAVE=true`), plaintext fallback is disabled; in local development, plaintext fallback may be enabled for convenience.
+### 9.2 Inbound
 
----
+`/sync` accepts three request types:
 
-## 5. Security Considerations
+- `delta`
+- `snapshot_request`
+- `master_secret_request`
 
-### 5.1 Threat Model
+For `delta`, each record is validated and merged.
 
-| Threat | Mitigation |
-|--------|------------|
-| Unauthorized data access | PoP + NovaAppRegistry instance verification |
-| App Code Upgrade Leak | App/Version hierarchy allows owners to rotate approved measurements |
-| Man-in-the-middle | TLS + in-app PoP verification (no trusted proxies) |
-| Replay attack | PoP nonce + timestamp window (configurable) |
-| Node impersonation during sync | PoP + PeerCache authorization (PeerCache refreshed from NovaAppRegistry: KMS app, ACTIVE+zkVerified, non-REVOKED version) + (if encrypted) sender_tee_pubkey checked against registered teePubkey before decryption |
+For `snapshot_request`, the receiver returns the full store snapshot.
 
-### 5.2 Access Control Matrix (Instance Based)
+For `master_secret_request`, the receiver seals the master secret with ephemeral P-384 ECDH and AES-256-GCM.
 
-| Actor | Derive Key | GET/PUT Data | SYNC |
-|-------|-----|-----|------|
-| Authorized App Instance (zkVerified + ACTIVE) | ✅ | ✅ | ❌ |
-| Unregistered / Inactive Instance | ❌ | ❌ | ❌ |
-| Registered KMS node | ❌ | ❌ | ✅ |
+### 9.3 Conflict Resolution
 
-### 5.3 Sync Request Verification
+Namespace merge rules are:
 
-```rust
-pub fn verify_sync_request(identity: &ClientIdentity) -> bool {
-    /* Verify that a sync request comes from a valid KMS peer.
+- strictly newer vector clock wins
+- older vector clock loses
+- equal vector clock is ignored
+- concurrent updates use:
+  - larger `updated_at_ms`
+  - if timestamps tie, lexicographically larger ciphertext
+- concurrent replacement merges vector clocks before storing
 
-    The implementation verifies:
-    - PoP timestamp freshness + nonce single-use
-    - PoP message signature (NovaKMS:Auth:...)
-    - Sender is authorized as a KMS instance via PeerCache
-      (PeerCache is refreshed from NovaAppRegistry in node_tick)
-    - Optional HMAC (x-sync-signature) is required when a sync key is configured,
-        except for bootstrap master_secret_request.
-    */
-    peer_cache.verify_kms_peer(&identity.tee_wallet).is_ok()
-}
-```
+## 10. Observability
 
----
+### 10.1 `/status`
 
-## 6. Project Structure
+`/status` returns three top-level objects:
 
-```
-nova-kms/
-├── contracts/
-│   ├── src/
-│   │   ├── KMSRegistry.sol    # KMS node registry contract
-│   │   └── interfaces/
-│   │       └── INovaAppInterface.sol
-│   ├── script/
-│   │   └── DeployKMSRegistry.s.sol
-│   └── test/
-│       └── KMSRegistry.t.sol
-├── src/                       # Main Rust application
-│   ├── main.rs                # Tokio async entry point
-│   ├── server.rs              # Axum request handlers
-│   ├── auth.rs                # Authorization logic (PoP and Registry)
-│   ├── registry.rs            # NovaAppRegistry client wrapper (Alloy)
-│   ├── store.rs               # In-memory vector clock KVS
-│   ├── crypto.rs              # Crypto primitives (Ring)
-│   └── ...
-├── scripts/                   # Development scripts
-├── Dockerfile                 # Multi-stage production Docker image
-├── Makefile                   # Project automation
-└── README.md
-```
+- `node`
+  - wallet
+  - `tee_pubkey`
+  - `node_url`
+  - `is_operator`
+  - `service_available`
+  - `master_secret.state`
+  - `master_secret.synced_from`
+  - `master_secret_initialized`
+- `cluster`
+  - `kms_app_id`
+  - `registry_address`
+  - `total_instances`
+- `data_store`
+  - `namespaces`
+  - `total_keys`
+  - `total_bytes`
 
----
+### 10.2 `/nodes`
 
-## 7. Deployment
-
-See [KMS Core Workflows & Security Architecture - Section 1: KMS Registry Deployment & Platform Registration](./kms-core-workflows.md#1-kms-registry-deployment--platform-registration).
-
----
-
-## Implementation Status
-
-This document describes the architecture of the current implementation. For operational details and security workflows, see:
-- [KMS Core Workflows & Security Architecture](./kms-core-workflows.md)
-- [Development](./development.md)
-- [Testing](./testing.md)
+`/nodes` reflects `PeerCache`, not a fresh on-chain read. In enclave mode each entry also includes cached `/status` probe metadata.

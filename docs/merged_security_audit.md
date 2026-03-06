@@ -1,89 +1,189 @@
-# Nova KMS — Security Notes (Code-Aligned)
+# Nova KMS Security Notes
 
-This document is a **living, code-aligned security review note**, not an independent third‑party audit.
+This document is a code-aligned summary of the security controls and limits that exist in the repository today.
 
-It summarizes the **security-relevant behaviors that are implemented in this repo**, plus **explicitly-known boundaries/assumptions**.
+## 1. Scope
 
----
+Covered:
 
-## Scope
+- `src/auth.rs`
+- `src/server.rs`
+- `src/sync.rs`
+- `src/crypto.rs`
+- `src/registry.rs`
+- `contracts/src/KMSRegistry.sol`
 
-- KMS service: Rust/Axum app under `nova-kms/src/`
-- On-chain trust roots: `NovaAppRegistry` and `KMSRegistry` clients
-- App↔KMS and KMS↔KMS request authentication, authorization, encryption, and sync integrity
+Not covered:
 
----
+- external network policy
+- Nova platform control plane
+- Odyn implementation internals
 
-## Trust & Threat Model (What the code assumes)
+## 2. Implemented Controls
 
-- The host and network are treated as **untrusted**.
-- **Authorization** decisions are made via on-chain state (queried via `NovaAppRegistry`).
-- **Confidentiality** of request/response bodies is provided by teePubkey-based **E2E encryption envelopes** (P‑384 ECDH + AES‑256‑GCM via Odyn), not by assuming TLS is always end-to-end.
+### 2.1 On-Chain Authorization
 
----
+App routes authorize against `NovaAppRegistry`:
 
-## Implemented Controls (What exists today)
+- instance must be ACTIVE
+- instance must be `zkVerified`
+- app must be ACTIVE
+- version must not be REVOKED
 
-### 1) On-chain authorization (NovaAppRegistry)
+Peer sync authorizes against `PeerCache`, which is itself refreshed from `NovaAppRegistry`.
 
-- **App→KMS** requests are authenticated (PoP) and then authorized via `AppAuthorizer.verify()`:
-  - instance must be `ACTIVE`
-  - instance must be `zkVerified`
-  - app must be `ACTIVE`
-  - version must not be `REVOKED` (current app logic accepts `ENROLLED` and `DEPRECATED`)
-- **KMS↔KMS** sync authorizes peers via `PeerCache.verify_kms_peer()` (cache refreshed from `NovaAppRegistry` with `KMS_APP_ID` membership, `ACTIVE`, `zkVerified`, version status checks).
+### 2.2 Recipient-Bound PoP
 
-### 2) Mutual PoP authentication (EIP-191)
+Current message formats:
 
-- Nonce + timestamp freshness checks are enforced.
-- Recipient wallet binding is enforced in the signed message:
-  - App→KMS: `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<ts>`
-  - KMS↔KMS: `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<ts>`
-- Responses include a recipient signature over `NovaKMS:Response:<caller_sig>:<recipient_wallet>`.
+- app:
+  - `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<timestamp>`
+- peer:
+  - `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<timestamp>`
+- response:
+  - `NovaKMS:Response:<caller_signature>:<recipient_wallet>`
 
-### 3) E2E encryption envelopes + sender teePubkey binding
+Recipient binding prevents replaying a signature to a different KMS node.
 
-- Sensitive payloads are carried in an envelope:
-  - `sender_tee_pubkey`, `nonce`, `encrypted_data`
-- Before decrypting an encrypted envelope, the server verifies:
-  - `envelope.sender_tee_pubkey` matches the **on-chain** teePubkey for the authenticated wallet
+### 2.3 Single-Use Nonces And Timestamp Freshness
 
-This prevents a class of MitM “re-encryption” attacks where an attacker substitutes their own teePubkey.
+The nonce subsystem provides:
 
-### 4) Sync integrity via HMAC (when configured)
+- random 16-byte nonces
+- base64 encoding
+- LRU-backed storage
+- single-use consumption
+- freshness enforced through `POP_TIMEOUT_SECONDS`
 
-- When the node has a sync key configured, `/sync` requires `X-Sync-Signature`.
-- The HMAC is computed over the canonical JSON of the **on-the-wire request body**.
-  - For encrypted sync, this is the canonical JSON of the E2E envelope.
-- Bootstrap exception: `master_secret_request` is accepted without HMAC so a new node can obtain the initial sync key.
+### 2.4 Encrypted Envelopes With Sender Key Binding
 
-### 5) Sealed master secret exchange
+Sensitive request and response bodies use:
 
-- Master secret transfer supports a sealed ECDH exchange (ephemeral P‑384 + HKDF + AES‑GCM) via `src/crypto.rs`.
-- Plaintext master secret exchange is rejected in production (`IN_ENCLAVE=true`).
+- `sender_tee_pubkey`
+- `nonce`
+- `encrypted_data`
 
-### 6) SSRF and network hardening for peer URLs
+Before decrypting, the node verifies that `sender_tee_pubkey` matches the authenticated caller's on-chain `teePubkey`.
 
-- Peer URLs are validated for scheme/host/credential format before outbound requests.
-- In production, default allowed peer URL schemes are `https` (via `ALLOWED_PEER_URL_SCHEMES`).
-- DNS/IP allow/deny and egress controls are expected to be enforced by network policy/proxy.
+This blocks re-encryption with an attacker-controlled key.
 
-### 7) DoS protection
+### 2.5 Sync Integrity HMAC
 
-- `/nonce` is guarded by a token-bucket limiter.
-- Additional ingress/body-size controls are expected at the deployment edge (load balancer / proxy policy).
+When `sync_key` exists, `/sync` requires `x-sync-signature` for:
 
----
+- `delta`
+- `snapshot_request`
 
-## Known Boundaries / Non-goals (As implemented)
+The HMAC is computed over the canonical JSON of the on-the-wire request body.
 
-- **Eventual consistency** for KV sync: last-writer-wins semantics can drop concurrent writes.
-- **Registry cache TTL** means authorization changes (revocations) may take up to the cache window to fully propagate.
-- **Dev shortcuts** exist (e.g., header-based identity), but are blocked when running in production enclave mode.
+`master_secret_request` is exempt so a node without the cluster secret can still bootstrap.
 
----
+### 2.6 Secret Distribution
 
-## How to use this doc
+Master-secret transfer uses:
 
-- Treat it as the “security contract” for what the repo actually enforces.
-- If you change auth, envelope formats, or sync signing, update this doc together with `docs/architecture.md` and `docs/kms-core-workflows.md`.
+- ephemeral P-384 ECDH
+- HKDF-SHA256
+- AES-256-GCM
+
+The receiver never returns the master secret in plaintext.
+
+### 2.7 Readiness Gate
+
+App routes are unavailable until:
+
+- peer membership is valid
+- local `teePubkey` matches the registry
+- local master secret matches the on-chain hash
+
+This prevents serving derivation or KV traffic from a node that is detached from cluster state.
+
+### 2.8 Peer URL Validation
+
+Peers are admitted to `PeerCache` only if their `instanceUrl`:
+
+- parses as a URL
+- has a host
+- has no embedded credentials
+- uses:
+  - `https` in enclave mode
+  - `http` or `https` in dev mode
+
+## 3. Operationally Important Boundaries
+
+### 3.1 Liveness Is Not Readiness
+
+`GET /health` always reports process liveness.
+
+Use `GET /status` to evaluate:
+
+- `node.service_available`
+- `node.master_secret`
+
+### 3.2 Cache Windows Exist
+
+Authorization changes do not apply instantly at the request path:
+
+- app auth depends on `REGISTRY_CACHE_TTL_SECONDS`
+- peer auth depends on successful `PeerCache` refresh
+
+### 3.3 In-Memory Only Store
+
+The KV store has no persistence layer.
+
+After restart:
+
+- local data is gone
+- the node must rebuild from peers after master-secret convergence
+
+### 3.4 Only `/nonce` Is Rate-Limited
+
+The live code enforces a token bucket on `/nonce`.
+
+There is no general request-rate limiter applied to other routes in the current router.
+
+## 4. Declared But Not Enforced In The Current Request Path
+
+The following config fields exist but do not currently enforce security behavior:
+
+- `RATE_LIMIT_PER_MINUTE`
+- `ALLOW_PLAINTEXT_DEV`
+- `MAX_REQUEST_BODY_BYTES`
+- `MAX_SYNC_PAYLOAD_BYTES`
+- `PEER_BLACKLIST_DURATION_SECONDS`
+
+Practical reading:
+
+- plaintext business requests are still rejected, but not because `ALLOW_PLAINTEXT_DEV` is active
+- request-size protection is expected to come from the deployment edge unless the handlers are wired to those settings
+- automatic peer blacklisting is not active
+
+## 5. Dev-Only Shortcut
+
+When `IN_ENCLAVE=false`, app routes accept `x-tee-wallet` as an identity shortcut.
+
+That shortcut is not available in enclave mode.
+
+It also does not change the body requirement:
+
+- business payloads still need encrypted envelopes
+
+## 6. Contract-Side Constraints
+
+`KMSRegistry.setMasterSecretHash()` is allowed only when:
+
+- `masterSecretHash == 0`
+- `kmsAppId != 0`
+- the caller is an ACTIVE instance of `kmsAppId`
+- the caller's version status is ENROLLED
+
+This is stricter than runtime peer acceptance, which allows ENROLLED and DEPRECATED versions for peer membership.
+
+## 7. Residual Risks To Watch
+
+- a stale peer cache can temporarily admit or reject peers incorrectly
+- the store is memory-only, so cluster recovery depends on healthy peers
+- request-size limits are not enforced in-handler
+- there is no automatic peer quarantine path despite the presence of a blacklist primitive
+
+If any of these areas change in code, update this file together with `docs/architecture.md` and `docs/kms-core-workflows.md`.
