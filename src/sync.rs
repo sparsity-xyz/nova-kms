@@ -1022,15 +1022,18 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
                 continue;
             }
         };
-        if is_envelope(&resp_json)
-            && let Err(err) = decrypt_json_envelope(state, &resp_json).await
-        {
-            tracing::warn!(
-                "Delta push to {} failed to decrypt response envelope: {}",
-                peer_wallet,
-                err
-            );
-            continue;
+        if is_envelope(&resp_json) {
+            match decrypt_json_envelope(state, &resp_json).await {
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        "Delta push to {} failed to decrypt response envelope: {}",
+                        peer_wallet,
+                        err
+                    );
+                    continue;
+                }
+            }
         }
         success += 1;
     }
