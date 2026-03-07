@@ -42,14 +42,14 @@ async fn fetch_odyn_wallet_with_retry(odyn: &OdynClient) -> Result<String, KmsEr
 /// Global application state shared across all route handlers.
 pub struct AppState {
     pub config: Config,
-    pub store: DataStore,
+    pub store: Arc<DataStore>,
     pub odyn: OdynClient,
     pub registry: RegistryClient,
-    pub app_registry_cache: CachedNovaRegistry,
-    pub nonce_store: NonceStore,
-    pub nonce_rate_limiter: TokenBucket,
+    pub app_registry_cache: Arc<CachedNovaRegistry>,
+    pub nonce_store: Arc<NonceStore>,
+    pub nonce_rate_limiter: Arc<TokenBucket>,
     pub peer_cache: Arc<PeerCache>,
-    pub master_secret: MasterSecretManager,
+    pub master_secret: Arc<MasterSecretManager>,
     pub sync_key: Option<[u8; 32]>,
     pub is_operator: bool,
     pub service_available: bool,
@@ -72,8 +72,11 @@ impl AppState {
         let max_app_storage = config.max_app_storage_bytes;
         let tombstone_retention_ms = config.tombstone_retention_ms;
         let max_tombstones_per_app = config.max_tombstones_per_app;
-        let nonce_store = NonceStore::new(config.max_nonces, config.pop_timeout_seconds);
-        let nonce_rate_limiter = TokenBucket::new(config.nonce_rate_limit_per_minute);
+        let nonce_store = Arc::new(NonceStore::new(
+            config.max_nonces,
+            config.pop_timeout_seconds,
+        ));
+        let nonce_rate_limiter = Arc::new(TokenBucket::new(config.nonce_rate_limit_per_minute));
         let odyn = OdynClient::new(config.in_enclave);
 
         // Keep node wallet bound to the signing identity currently exposed by Odyn
@@ -103,10 +106,12 @@ impl AppState {
             &config.kms_registry_address,
         )
         .expect("failed to create registry client");
-        let app_registry_cache =
-            CachedNovaRegistry::new(registry.clone(), config.registry_cache_ttl_seconds);
+        let app_registry_cache = Arc::new(CachedNovaRegistry::new(
+            registry.clone(),
+            config.registry_cache_ttl_seconds,
+        ));
 
-        let master_secret = MasterSecretManager::new();
+        let master_secret = Arc::new(MasterSecretManager::new());
         let mut sync_key = None;
         let service_available = false;
         let unavailable_reason = "initializing".to_string();
@@ -124,11 +129,11 @@ impl AppState {
 
         Self {
             config,
-            store: DataStore::new(
+            store: Arc::new(DataStore::new(
                 max_app_storage,
                 tombstone_retention_ms,
                 max_tombstones_per_app,
-            ),
+            )),
             odyn,
             registry,
             app_registry_cache,

@@ -187,11 +187,20 @@ impl Namespace {
     }
 
     pub fn get_deltas_since(&mut self, since_ms: u64, current_time: u64) -> Vec<DataRecord> {
+        self.get_deltas_between(since_ms, u64::MAX, current_time)
+    }
+
+    pub fn get_deltas_between(
+        &mut self,
+        since_ms: u64,
+        until_ms: u64,
+        current_time: u64,
+    ) -> Vec<DataRecord> {
         self.cleanup(current_time);
         self.records
             .iter()
             .filter_map(|(_, record)| {
-                if record.updated_at_ms > since_ms {
+                if record.updated_at_ms > since_ms && record.updated_at_ms <= until_ms {
                     Some(record.clone())
                 } else {
                     None
@@ -328,6 +337,16 @@ impl DataStore {
         since_ms: u64,
         current_time: u64,
     ) -> HashMap<u64, Vec<DataRecord>> {
+        self.get_deltas_between(since_ms, u64::MAX, current_time)
+            .await
+    }
+
+    pub async fn get_deltas_between(
+        &self,
+        since_ms: u64,
+        until_ms: u64,
+        current_time: u64,
+    ) -> HashMap<u64, Vec<DataRecord>> {
         let map = self.namespaces.read().await;
         let namespaces: Vec<(u64, Arc<RwLock<Namespace>>)> =
             map.iter().map(|(k, v)| (*k, v.clone())).collect();
@@ -336,7 +355,7 @@ impl DataStore {
         let mut out = HashMap::new();
         for (app_id, ns) in namespaces {
             let mut w = ns.write().await;
-            let deltas = w.get_deltas_since(since_ms, current_time);
+            let deltas = w.get_deltas_between(since_ms, until_ms, current_time);
             if !deltas.is_empty() {
                 out.insert(app_id, deltas);
             }
