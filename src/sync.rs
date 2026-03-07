@@ -13,8 +13,8 @@ use tokio::time::{Duration, sleep};
 
 use crate::auth::{canonical_wallet, sign_message_for_node, verify_wallet_signature};
 use crate::crypto::{
-    SealedMasterSecretEnvelope, decrypt_data, derive_data_key, derive_sync_key, random_secret_32,
-    unseal_master_secret,
+    MasterSecretManager, SealedMasterSecretEnvelope, decrypt_data, derive_data_key,
+    derive_sync_key, random_secret_32, unseal_master_secret,
 };
 use crate::error::KmsError;
 use crate::models::DataRecord;
@@ -437,14 +437,35 @@ pub async fn refresh_peers_if_needed(state: &SharedState) -> Result<(), KmsError
 }
 
 async fn local_master_secret_hash(state: &SharedState) -> Option<[u8; 32]> {
-    let secret = {
+    let master_secret = {
         let s = state.read().await;
-        s.master_secret.get_secret().await.ok()?
+        Arc::clone(&s.master_secret)
     };
+    let secret = master_secret.get_secret().await.ok()?;
     let hash = keccak256(secret.bytes);
     let mut out = [0u8; 32];
     out.copy_from_slice(hash.as_slice());
     Some(out)
+}
+
+async fn current_sync_key(state: &SharedState) -> Result<Option<[u8; 32]>, KmsError> {
+    let (cached_sync_key, master_secret) = {
+        let s = state.read().await;
+        (s.sync_key, Arc::clone(&s.master_secret))
+    };
+    if let Some(sync_key) = cached_sync_key {
+        return Ok(Some(sync_key));
+    }
+    if !master_secret.is_initialized().await {
+        return Ok(None);
+    }
+
+    let sync_key = master_secret.get_sync_key().await?;
+    let mut s = state.write().await;
+    if s.sync_key.is_none() {
+        s.sync_key = Some(sync_key);
+    }
+    Ok(s.sync_key)
 }
 
 async fn set_service_availability(state: &SharedState, available: bool, reason: &str) {
@@ -606,10 +627,11 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     let chain_hash_is_zero = chain_hash == [0u8; 32];
     if chain_hash_is_zero {
         tracing::info!("On-chain masterSecretHash is unset; attempting local initialization");
-        let has_local_secret = {
+        let master_secret = {
             let s = state.read().await;
-            s.master_secret.is_initialized().await
+            Arc::clone(&s.master_secret)
         };
+        let has_local_secret = master_secret.is_initialized().await;
 
         if !has_local_secret {
             let generated_secret = match retry_init_op("Odyn random bytes", || async {
@@ -638,8 +660,7 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
                     return Ok(());
                 }
             };
-            let s = state.read().await;
-            s.master_secret.initialize_generated(generated_secret).await;
+            master_secret.initialize_generated(generated_secret).await;
         }
 
         let Some(local_hash) = local_master_secret_hash(state).await else {
@@ -686,16 +707,12 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         }
     }
 
-    let sync_key = {
-        let s = state.read().await;
-        let secret = match s.master_secret.get_secret().await {
-            Ok(v) => v,
-            Err(_) => {
-                set_service_availability(state, false, "master secret not initialized").await;
-                return Ok(());
-            }
-        };
-        derive_sync_key(&secret)
+    let sync_key = match current_sync_key(state).await? {
+        Some(sync_key) => sync_key,
+        None => {
+            set_service_availability(state, false, "master secret not initialized").await;
+            return Ok(());
+        }
     };
 
     {
@@ -707,11 +724,14 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
 }
 
 pub async fn sync_tick(state: &SharedState) -> Result<usize, KmsError> {
-    let should_sync = {
+    let service_available = {
         let s = state.read().await;
-        s.sync_key.is_some() && s.service_available
+        s.service_available
     };
-    if !should_sync {
+    if !service_available {
+        return Ok(0);
+    }
+    if current_sync_key(state).await?.is_none() {
         return Ok(0);
     }
     push_deltas(state).await
@@ -763,10 +783,11 @@ async fn decrypt_json_envelope(state: &SharedState, envelope: &Value) -> Result<
         .get("encrypted_data")
         .and_then(|v| v.as_str())
         .ok_or_else(|| KmsError::ValidationError("Missing encrypted_data".to_string()))?;
-    let plaintext = {
+    let odyn = {
         let s = state.read().await;
-        s.odyn.decrypt(nonce, sender_pubkey, encrypted_data).await?
+        s.odyn.clone()
     };
+    let plaintext = odyn.decrypt(nonce, sender_pubkey, encrypted_data).await?;
     serde_json::from_str(&plaintext).map_err(|e| {
         KmsError::ValidationError(format!("Decrypted payload is not valid JSON: {}", e))
     })
@@ -783,45 +804,45 @@ fn is_envelope(v: &Value) -> bool {
 
 pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
     refresh_peers_if_needed(state).await?;
+    let Some(sync_key) = current_sync_key(state).await? else {
+        return Ok(0);
+    };
 
-    let (sync_key, node_wallet, deltas_payload, peer_cache, app_count, record_count) = {
+    let (node_wallet, peer_cache, store, since, current) = {
         let mut s = state.write().await;
         if !s.service_available {
             return Ok(0);
         }
-        let Some(sync_key) = s.sync_key else {
-            return Ok(0);
-        };
         let current = now_ms();
         let since = s.last_push_ms.saturating_sub(1);
-        let deltas = s.store.get_deltas_since(since, current).await;
         s.last_push_ms = current;
-        if deltas.is_empty() {
-            return Ok(0);
-        }
-
-        let node_wallet = s.config.node_wallet.clone();
-        let app_count = deltas.len();
-        let record_count = deltas.values().map(std::vec::Vec::len).sum::<usize>();
-        for (app_id, records) in &deltas {
-            for record in records {
-                tracing::debug!(
-                    "Preparing delta record: app_id={} key='{}' updated_at_ms={}",
-                    app_id,
-                    record.key,
-                    record.updated_at_ms
-                );
-            }
-        }
         (
-            sync_key,
-            node_wallet,
-            serialize_deltas(&deltas),
+            s.config.node_wallet.clone(),
             Arc::clone(&s.peer_cache),
-            app_count,
-            record_count,
+            Arc::clone(&s.store),
+            since,
+            current,
         )
     };
+
+    let deltas = store.get_deltas_between(since, current, current).await;
+    if deltas.is_empty() {
+        return Ok(0);
+    }
+
+    let app_count = deltas.len();
+    let record_count = deltas.values().map(std::vec::Vec::len).sum::<usize>();
+    for (app_id, records) in &deltas {
+        for record in records {
+            tracing::debug!(
+                "Preparing delta record: app_id={} key='{}' updated_at_ms={}",
+                app_id,
+                record.key,
+                record.updated_at_ms
+            );
+        }
+    }
+    let deltas_payload = serialize_deltas(&deltas);
     let peers = peer_cache.get_peers(Some(&node_wallet)).await;
 
     if peers.is_empty() {
@@ -918,18 +939,20 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
 
         let ts = now_secs();
         let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
-        let (signature, signer_wallet) = {
+        let (config, odyn) = {
             let s = state.read().await;
-            match sign_message_for_node(&s.config, &s.odyn, &message).await {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!(
-                        "Delta push to {} failed to sign PoP message: {}",
-                        peer_wallet,
-                        err
-                    );
-                    continue;
-                }
+            (s.config.clone(), s.odyn.clone())
+        };
+        let (signature, signer_wallet) = match sign_message_for_node(&config, &odyn, &message).await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    "Delta push to {} failed to sign PoP message: {}",
+                    peer_wallet,
+                    err
+                );
+                continue;
             }
         };
 
@@ -1152,10 +1175,11 @@ async fn post_sync_request_to_peer(
 
     let ts = now_secs();
     let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
-    let (signature, signer_wallet) = {
+    let (config, odyn) = {
         let s = state.read().await;
-        sign_message_for_node(&s.config, &s.odyn, &message).await?
+        (s.config.clone(), s.odyn.clone())
     };
+    let (signature, signer_wallet) = sign_message_for_node(&config, &odyn, &message).await?;
 
     let envelope = encrypt_json_envelope(state, inner_payload, &peer.tee_pubkey).await?;
     let canonical = canonical_json(&envelope)?;
@@ -1250,10 +1274,7 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             "ecdh_pubkey": hex::encode(local_pub_der.as_ref()),
         });
 
-        let maybe_sync_key = {
-            let s = state.read().await;
-            s.sync_key
-        };
+        let maybe_sync_key = current_sync_key(state).await?;
         let response =
             match post_sync_request_to_peer(state, &peer, &req_body, maybe_sync_key).await {
                 Ok(v) => v,
@@ -1281,14 +1302,18 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             Ok(v) => v,
             Err(_) => continue,
         };
+        let sync_key = derive_sync_key(&crate::crypto::MasterSecret { bytes: secret });
 
+        let master_secret = {
+            let s = state.read().await;
+            Arc::clone(&s.master_secret)
+        };
+        master_secret
+            .initialize_synced(secret, Some(peer.node_url.clone()))
+            .await;
         {
             let mut s = state.write().await;
-            s.master_secret
-                .initialize_synced(secret, Some(peer.node_url.clone()))
-                .await;
-            let master = s.master_secret.get_secret().await?;
-            s.sync_key = Some(crate::crypto::derive_sync_key(&master));
+            s.sync_key = Some(sync_key);
         }
         tracing::info!(
             "Master secret synced successfully from peer {}",
@@ -1300,11 +1325,7 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
             "type": "snapshot_request",
             "sender_wallet": local_wallet,
         });
-        let sync_key = {
-            let s = state.read().await;
-            s.sync_key
-        };
-        let snapshot_resp = post_sync_request_to_peer(state, &peer, &snapshot_req, sync_key)
+        let snapshot_resp = post_sync_request_to_peer(state, &peer, &snapshot_req, Some(sync_key))
             .await
             .map_err(|err| {
                 tracing::warn!(
@@ -1315,6 +1336,10 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
                 err
             })
             .ok();
+        let store = {
+            let s = state.read().await;
+            Arc::clone(&s.store)
+        };
         let mut merged_records = 0usize;
         if let Some(data_obj) = snapshot_resp
             .as_ref()
@@ -1334,8 +1359,7 @@ pub async fn attempt_master_secret_sync(state: &SharedState) -> Result<bool, Kms
                     );
                     continue;
                 }
-                let s = state.read().await;
-                if s.store.merge_record(app_id, record).await {
+                if store.merge_record(app_id, record).await {
                     merged_records += 1;
                 }
             }
@@ -1370,20 +1394,14 @@ fn parse_sync_data_object(data: &Map<String, Value>) -> Vec<(u64, DataRecord)> {
     out
 }
 
-pub async fn validate_incoming_record(
-    state: &SharedState,
+pub async fn validate_incoming_record_with_context(
+    in_enclave: bool,
+    max_value_size_bytes: usize,
+    max_clock_skew_ms: u64,
+    master_secret: &MasterSecretManager,
     app_id: u64,
     record: &DataRecord,
 ) -> Result<(), String> {
-    let (in_enclave, max_value_size_bytes, max_clock_skew_ms) = {
-        let s = state.read().await;
-        (
-            s.config.in_enclave,
-            s.config.max_kv_value_size_bytes,
-            s.config.max_clock_skew_ms,
-        )
-    };
-
     if !record.tombstone {
         let max_with_overhead = max_value_size_bytes.saturating_add(128);
         if record.encrypted_value.len() > max_with_overhead {
@@ -1400,16 +1418,13 @@ pub async fn validate_incoming_record(
                     record.encrypted_value.len()
                 ));
             }
-            let data_key = {
-                let s = state.read().await;
-                let secret = match s.master_secret.get_secret().await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        return Err(format!("master secret unavailable: {}", err));
-                    }
-                };
-                derive_data_key(&secret, app_id)
+            let secret = match master_secret.get_secret().await {
+                Ok(v) => v,
+                Err(err) => {
+                    return Err(format!("master secret unavailable: {}", err));
+                }
             };
+            let data_key = derive_data_key(&secret, app_id);
 
             if decrypt_data(&record.encrypted_value, &data_key).is_err() {
                 return Err("ciphertext failed validation".to_string());
@@ -1429,6 +1444,32 @@ pub async fn validate_incoming_record(
     }
 
     Ok(())
+}
+
+pub async fn validate_incoming_record(
+    state: &SharedState,
+    app_id: u64,
+    record: &DataRecord,
+) -> Result<(), String> {
+    let (in_enclave, max_value_size_bytes, max_clock_skew_ms, master_secret) = {
+        let s = state.read().await;
+        (
+            s.config.in_enclave,
+            s.config.max_kv_value_size_bytes,
+            s.config.max_clock_skew_ms,
+            Arc::clone(&s.master_secret),
+        )
+    };
+
+    validate_incoming_record_with_context(
+        in_enclave,
+        max_value_size_bytes,
+        max_clock_skew_ms,
+        &master_secret,
+        app_id,
+        record,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1536,6 +1577,31 @@ mod tests {
 
         let pushed = sync_tick(&state).await.unwrap();
         assert_eq!(pushed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_current_sync_key_derives_and_caches_from_master_secret() {
+        let config = Config {
+            in_enclave: false,
+            node_url: "http://127.0.0.1:1".to_string(),
+            ..Config::default()
+        };
+        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let master_secret = {
+            let s = state.read().await;
+            Arc::clone(&s.master_secret)
+        };
+        let secret_bytes = [11u8; 32];
+        master_secret.initialize_generated(secret_bytes).await;
+
+        let sync_key = current_sync_key(&state).await.unwrap();
+        let expected = derive_sync_key(&crate::crypto::MasterSecret {
+            bytes: secret_bytes,
+        });
+
+        assert_eq!(sync_key, Some(expected));
+        let s = state.read().await;
+        assert_eq!(s.sync_key, Some(expected));
     }
 
     #[tokio::test]
