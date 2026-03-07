@@ -757,8 +757,12 @@ async fn encrypt_json_envelope(
         (s.odyn.clone(), plaintext)
     };
 
-    let sender_pubkey_hex = hex::encode(odyn.get_encryption_public_key_der().await?);
     let encrypted = odyn.encrypt(&plaintext, receiver_tee_pubkey_hex).await?;
+    let sender_pubkey_hex = if encrypted.enclave_public_key.is_empty() {
+        hex::encode(odyn.get_encryption_public_key_der().await?)
+    } else {
+        normalize_hex_no_prefix(&encrypted.enclave_public_key)
+    };
 
     Ok(json!({
         "sender_tee_pubkey": sender_pubkey_hex,
