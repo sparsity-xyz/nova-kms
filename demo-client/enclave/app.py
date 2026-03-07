@@ -41,7 +41,7 @@ def _canonical_eth_wallet(wallet: str) -> str:
     return w
 
 # In-memory log storage (keep last N runs)
-MAX_LOGS = 20
+MAX_LOGS = 40
 request_logs = deque(maxlen=MAX_LOGS)
 
 

@@ -26,10 +26,10 @@ NOVA_APP_REGISTRY_ADDRESS: str = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"  #
 # KMS App ID in the NovaAppRegistry
 KMS_APP_ID: int = 49
 
-REGISTRY_CACHE_TTL_SECONDS: int = 180
+REGISTRY_CACHE_TTL_SECONDS: int = 90
 
 # =============================================================================
 # Scheduler
 # =============================================================================
 
-TEST_CYCLE_INTERVAL_SECONDS: int = 90
+TEST_CYCLE_INTERVAL_SECONDS: int = 30
