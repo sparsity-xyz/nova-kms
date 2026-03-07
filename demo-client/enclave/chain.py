@@ -30,7 +30,7 @@ logger = logging.getLogger("nova-kms.chain")
 class Chain:
     """Low-level RPC helper.  Auto-selects Helios or mock endpoint."""
 
-    DEFAULT_MOCK_RPC = "http://odyn.sparsity.cloud:8545"
+    DEFAULT_MOCK_RPC = "http://odyn.sparsity.cloud:18545"
     # Registry/auth chain default (Base Sepolia) exposed by Helios in-enclave.
     DEFAULT_BASE_SEPOLIA_HELIOS_RPC = "http://127.0.0.1:18545"
 
