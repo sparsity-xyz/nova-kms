@@ -168,12 +168,13 @@ async fn lookup_and_authorize_instance(
         ));
     }
 
-    let app = registry.get_app(app_id).await?;
+    let (app, version) = tokio::try_join!(
+        registry.get_app(app_id),
+        registry.get_version(app_id, version_id)
+    )?;
     if app.status != 0 {
         return Err(KmsError::Unauthorized("App not active".to_string()));
     }
-
-    let version = registry.get_version(app_id, version_id).await?;
     // ENROLLED=0, DEPRECATED=1, REVOKED=2
     if version.status == 2 {
         return Err(KmsError::Unauthorized("Version revoked".to_string()));

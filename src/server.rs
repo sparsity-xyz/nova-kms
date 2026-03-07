@@ -134,8 +134,12 @@ async fn encrypt_payload(
     }
 
     let plaintext = canonical_json(payload)?;
-    let sender_pubkey = hex::encode(odyn.get_encryption_public_key_der().await?);
     let encrypted = odyn.encrypt(&plaintext, receiver_pubkey_hex).await?;
+    let sender_pubkey = if encrypted.enclave_public_key.is_empty() {
+        hex::encode(odyn.get_encryption_public_key_der().await?)
+    } else {
+        normalize_hex(&encrypted.enclave_public_key)
+    };
     Ok(json!({
         "sender_tee_pubkey": sender_pubkey,
         "nonce": normalize_hex(&encrypted.nonce),
