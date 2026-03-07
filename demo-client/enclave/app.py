@@ -164,6 +164,16 @@ def _format_scan_summary(entry: dict) -> str:
 
         derive_err = derive.get("error") if isinstance(derive, dict) else None
         data_err = data.get("error") if isinstance(data, dict) else None
+        if conn.get("connected") and not r.get("derive"):
+            derive_err = derive_err or "derive_not_recorded"
+        if (
+            conn.get("connected")
+            and isinstance(derive, dict)
+            and derive
+            and not derive.get("key")
+            and not derive_err
+        ):
+            derive_err = "derive_key_missing"
         row_err = derive_err or data_err or ""
 
         combined_rows.append([
@@ -589,6 +599,9 @@ class KMSClient:
                             continue
 
                         # 3) Derive fixed key and compare across nodes
+                        derive_info: dict = {"path": fixed_path}
+                        row["derive"] = derive_info
+                        resp: Optional[httpx.Response] = None
                         try:
                             resp = await self._signed_request(
                                 client,
@@ -598,17 +611,27 @@ class KMSClient:
                             )
                             resp.raise_for_status()
                             body = self._get_response_json(resp)
+                            if not isinstance(body, dict):
+                                raise ValueError(
+                                    f"/kms/derive returned non-object JSON: {type(body).__name__}"
+                                )
                             key_b64 = body.get("key")
+                            if not isinstance(key_b64, str) or not key_b64.strip():
+                                body_keys = ", ".join(sorted(str(k) for k in body.keys()))
+                                raise ValueError(
+                                    f"/kms/derive returned missing key field (keys=[{body_keys}])"
+                                )
                             if expected_key is None and key_b64:
                                 expected_key = key_b64
-                            row["derive"] = {
+                            derive_info.update({
                                 "path": fixed_path,
                                 "key": key_b64,
                                 "matches_cluster": (expected_key == key_b64) if expected_key else None,
                                 "http_status": resp.status_code,
-                            }
+                            })
                         except Exception as exc:
-                            row["derive"] = {"error": str(exc)}
+                            derive_info["http_status"] = getattr(resp, "status_code", None)
+                            derive_info["error"] = str(exc) or exc.__class__.__name__
 
                         reachable.append({"operator": op, "url": inst_url, "instance_id": getattr(inst, "instance_id", None)})
                         results.append(row)
@@ -687,12 +710,25 @@ class KMSClient:
                 and isinstance(r["derive"], dict)
                 and r["derive"].get("matches_cluster") is False
             ]
+            derive_failures = [
+                r for r in results
+                if r.get("connection", {}).get("connected")
+                and (
+                    not isinstance(r.get("derive"), dict)
+                    or bool(r["derive"].get("error"))
+                    or not r["derive"].get("key")
+                )
+            ]
             reads_missing = [
                 r for r in results
                 if r.get("connection", {}).get("connected")
                 and (not r.get("data") or r["data"].get("matches_written") is False)
             ]
-            overall = "Success" if (not mismatched_keys and not reads_missing) else "Partial"
+            overall = (
+                "Success"
+                if (not mismatched_keys and not derive_failures and not reads_missing)
+                else "Partial"
+            )
 
             self._log(
                 "ScanSummary",
