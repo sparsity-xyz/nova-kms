@@ -147,13 +147,7 @@ These are already surfaced in `demo-client-enclaver/enclaver.yaml`.
 
 ## Running in Enclave
 
-The production path is:
-
-```bash
-enclaver build
-```
-
-Then deploy with the standard Nova workflow.
+For production, deploy this demo as a Nova app through Nova Platform.
 
 In enclave mode, the same code will talk to the local enclaver/Odyn endpoint at `http://localhost:18000` instead of the public mockup service.
 

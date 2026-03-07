@@ -128,17 +128,9 @@ If you need to validate authorization behavior for your own app identity, this l
 
 ## Running in Enclave
 
-The production path is unchanged.
+For production, deploy this demo as a Nova app through Nova Platform.
 
-1. Build the image:
-
-```bash
-enclaver build
-```
-
-2. Deploy using the standard Nova workflow.
-
-3. Make sure the image was built with the correct values in `demo-client/enclave/config.py`, especially:
+Before deployment, make sure the image/configuration used by Nova Platform has the correct values in `demo-client/enclave/config.py`, especially:
 
 - `NOVA_APP_REGISTRY_ADDRESS`
 - `KMS_APP_ID`
