@@ -1,197 +1,112 @@
 # Nova KMS
 
-Nova KMS is the Rust KMS node for the Nova platform. It runs as an Axum service, uses Odyn for enclave signing/encryption primitives, authorizes callers from `NovaAppRegistry`, and coordinates cluster master-secret state through `KMSRegistry`.
+Nova Platform gives applications a trusted runtime and shared services such as Helios-backed chain access, app-registry discovery and metadata like dapp contract addresses and active instances, and Odyn for enclave signing, encryption, and decryption.
 
-The node provides two application-facing capabilities:
+Nova KMS is unusual because it is both a Nova Platform application and a service provider for other Nova Platform applications. It is a decentralized KMS that runs as a distributed set of TEE-backed nodes, uses the platform's own capabilities to operate securely, and in turn exposes KMS services to other Nova apps. The current node is implemented as a Rust HTTP service built with Axum, authorizes callers via `NovaAppRegistry`, and coordinates cluster master-secret state through `KMSRegistry`.
+
+Put simply, Nova KMS is not just a demo of Nova Platform capabilities. It is a real decentralized application running on Nova that uses the platform's own trust, identity, and discovery services to deliver a security-critical service back to the rest of the ecosystem.
+
+The service provides two application-facing capabilities:
 
 - Key derivation from a cluster-wide master secret
 - An encrypted, in-memory KV store partitioned by caller `app_id`
 
-## What The Current Node Does
+## Why Use Nova KMS
 
-- Derives per-app keys with HKDF-SHA256
-- Encrypts stored values with AES-256-GCM before they enter the KV store
-- Replicates KV records across KMS peers with delta push and snapshot sync
-- Uses Proof of Possession (PoP) signatures for app and peer authentication
-- Uses `teePubkey`-based end-to-end envelopes for request and response bodies
-- Uses `KMSRegistry.masterSecretHash` to converge on one cluster master secret
+- It is native to Nova. Your application uses a KMS that already understands Nova identities, Nova app registration, and Nova runtime trust assumptions.
+- It avoids concentrating trust in a single node. The service is distributed across multiple TEE-backed KMS nodes instead of depending on one machine to hold the only live secret state.
+- It gives each application its own namespace. Derived keys and KV data are scoped by caller `app_id`, so one app does not share logical keyspace with another.
+- It is built for applications, not just operators. App-facing capabilities stay simple: derive keys and read or write encrypted KV values.
 
-## Runtime Dependencies
+## What Your Application Gets
 
-- Odyn API
-  - `IN_ENCLAVE=true`: `http://127.0.0.1:18000`
-  - `IN_ENCLAVE=false`: `http://odyn.sparsity.cloud:18000`
-- Chain RPC for `NovaAppRegistry` and `KMSRegistry`
-- `NovaAppRegistry` as the source of truth for:
-  - app authorization
-  - KMS peer membership
-  - `teePubkey` and `instanceUrl` metadata
-- `KMSRegistry` for:
-  - operator callbacks
-  - `kmsAppId`
-  - `masterSecretHash`
+- Deterministic key derivation from a cluster-wide master secret.
+- An encrypted KV store partitioned by caller `app_id`.
+- A KMS service that can keep operating as cluster membership changes, as long as verified KMS peers remain available.
+- A service boundary that is designed for confidential Nova applications instead of generic public clients.
 
-## Availability Model
+## Security Design
 
-- `GET /health` is process liveness only.
-- `GET /status` is the readiness source.
-- `node.service_available=true` only after:
-  - this node appears in current KMS membership
-  - the local `teePubkey` matches `NovaAppRegistry`
-  - the local master secret matches `KMSRegistry.masterSecretHash`
-- `/kms/*` routes require `service_available=true`.
-- `/sync` requires the local master secret to be initialized.
+Nova KMS is meant for applications that care about more than simple key storage. Its security design is built around one idea: a node should only serve sensitive KMS traffic when its identity, cluster membership, and secret state are all verifiably correct.
 
-## API Surface
+### 1. Verified KMS nodes, not just reachable servers
 
-| Route | Method | Purpose | Auth |
-| --- | --- | --- | --- |
-| `/` | `GET` | JSON overview of the service | none |
-| `/health` | `GET` | liveness probe | none |
-| `/status` | `GET` | node, cluster, and store status | none |
-| `/nonce` | `GET` | issue single-use base64 nonce | none |
-| `/nodes` | `GET` | dump current `PeerCache` view | none |
-| `/kms/derive` | `POST` | derive an app-scoped key | app PoP or dev fallback |
-| `/kms/data` | `GET` | list keys, or fetch one key with `?key=` | app PoP or dev fallback |
-| `/kms/data/*key` | `GET` | fetch one key, path form | app PoP or dev fallback |
-| `/kms/data` | `PUT` | write one key | app PoP or dev fallback |
-| `/kms/data` | `DELETE` | delete one key | app PoP or dev fallback |
-| `/sync` | `POST` | peer delta, snapshot, or master-secret sync | peer PoP |
+Nova KMS does not trust peer nodes just because they respond on the network. Peer membership and identity come from `NovaAppRegistry`. In practice that means the service only accepts KMS peers that match the current registry view of:
 
-Notes:
+- active KMS membership
+- registered instance URL
+- registered `teePubkey`
+- verified TEE-backed identity
 
-- Sensitive request and response bodies are always carried in an encrypted envelope.
-- Plaintext request bodies are rejected in the current server implementation.
-- The router does not register OpenAPI, Swagger UI, or ReDoc endpoints.
+This reduces the risk of rogue peers joining replication, master-secret exchange, or recovery flows.
 
-## Authentication And Encryption
+### 2. Verified calling applications, not anonymous clients
 
-### App -> KMS
+Nova KMS also verifies the applications that call it. App requests are authenticated against registry-backed identity, and encrypted request bodies are tied back to the caller's registered TEE key material before the node accepts and decrypts them.
 
-- PoP message:
-  - `NovaKMS:AppAuth:<nonce_b64>:<kms_wallet>:<timestamp>`
-- Required headers when using PoP:
-  - `x-app-signature`
-  - `x-app-nonce`
-  - `x-app-timestamp`
-  - `x-app-wallet` (optional hint, must match recovered signer if present)
-- In local development only (`IN_ENCLAVE=false`), app routes can fall back to:
-  - `x-tee-wallet`
+For users of the service, that means Nova KMS is not only checking "who signed this request". It is checking that the request is coming from the right registered Nova application identity.
 
-### KMS -> KMS
+### 3. End-to-end encrypted KMS traffic
 
-- PoP message:
-  - `NovaKMS:Auth:<nonce_b64>:<recipient_wallet>:<timestamp>`
-- Required headers:
-  - `x-kms-signature`
-  - `x-kms-nonce`
-  - `x-kms-timestamp`
-  - `x-kms-wallet` (optional hint, must match recovered signer if present)
-- Once a sync key exists, `/sync` also expects:
-  - `x-sync-signature`
-  - exception: `type=master_secret_request`
+Sensitive request and response bodies are carried in encrypted envelopes, rather than being treated as ordinary plaintext HTTP payloads. This protects key-derivation requests, KV reads, KV writes, and inter-node sync payloads while they move between trusted participants.
 
-### Encrypted Envelope
+The service also validates that the encrypted sender identity matches the authenticated caller before it decrypts payloads. That closes an important gap: encryption alone is not enough unless the encrypted sender is also verified.
 
-All sensitive payloads use this JSON shape:
+### 4. Split-brain resistance by design
 
-```json
-{
-  "sender_tee_pubkey": "<hex DER/SPKI>",
-  "nonce": "<hex>",
-  "encrypted_data": "<hex>"
-}
-```
+Nova KMS does not let each node invent its own master-secret truth. The cluster uses `KMSRegistry.masterSecretHash` as the single on-chain source of truth for the active master-secret lineage. A node does not serve `/kms/*` traffic until it has confirmed that:
 
-The receiver checks that `sender_tee_pubkey` matches the authenticated caller's on-chain `teePubkey` before decrypting.
+- it is part of the current KMS membership
+- its local TEE identity matches the registry entry for that instance
+- its local master secret matches the on-chain cluster hash
 
-## Configuration
+If a node is new, restarted, or out of sync, it must recover the master secret from a verified peer and catch up before it is allowed to serve requests. In other words, when Nova KMS is uncertain, it prefers to stay unavailable rather than serve divergent or unsafe state.
 
-Configuration is loaded from:
+### 5. Strong isolation between applications
 
-1. built-in defaults
-2. `NovaKms.toml`
-3. environment variables
+Nova KMS is shared infrastructure, but it does not expose one shared logical keyspace to all callers.
 
-Canonical runtime variables that matter for normal operation:
+- derived keys are scoped to the calling application
+- KV entries are partitioned by caller `app_id`
+- one application's KMS state is not supposed to be readable or writable as another application's state
 
-- `IN_ENCLAVE`
-- `LOG_LEVEL`
-- `BIND_ADDR`
-- `NOVA_APP_REGISTRY_ADDRESS`
-- `KMS_REGISTRY_ADDRESS`
-- `KMS_APP_ID`
-- `NODE_URL`
-- `NODE_INSTANCE_URL`
-- `NODE_WALLET`
-- `NODE_PRIVATE_KEY`
-- `KMS_NODE_TICK_SECONDS`
-- `DATA_SYNC_INTERVAL_SECONDS`
-- `PEER_CACHE_TTL_SECONDS`
-- `REGISTRY_CACHE_TTL_SECONDS`
-- `MAX_APP_STORAGE_BYTES`
-- `MAX_KV_VALUE_SIZE_BYTES`
-- `TOMBSTONE_RETENTION_MS`
-- `MAX_TOMBSTONES_PER_APP`
-- `POP_TIMEOUT_SECONDS`
-- `MAX_NONCES`
-- `MAX_CLOCK_SKEW_MS`
-- `MASTER_SECRET_HEX`
-- `NONCE_RATE_LIMIT_PER_MINUTE`
+This matters because the service is designed for many Nova applications to rely on the same KMS cluster without collapsing their trust boundaries into one bucket.
 
-Some fields exist in `Config` but are not enforced on the current request path:
+### 6. Consistent distributed KV behavior
 
-- `RATE_LIMIT_PER_MINUTE`
-- `ALLOW_PLAINTEXT_DEV`
-- `MAX_REQUEST_BODY_BYTES`
-- `MAX_SYNC_PAYLOAD_BYTES`
-- `PEER_BLACKLIST_DURATION_SECONDS`
+Nova KMS is not only a key-derivation service. It also offers an encrypted KV store, and that store is replicated across KMS peers. To keep the data model sane in a distributed setting, the service:
 
-## Startup And Master Secret Convergence
+- rejects stale updates instead of letting them overwrite newer state
+- resolves true concurrent writes deterministically
+- propagates deletions as tombstones
+- uses delta sync for normal replication and snapshot sync for catch-up
 
-On startup the process:
+From the application's point of view, the important property is simple: the cluster is designed to converge on one consistent value per app-scoped key, even when different KMS nodes receive traffic at different times.
 
-1. creates shared state and background tasks
-2. runs `node_tick` immediately
-3. refreshes `PeerCache` from `NovaAppRegistry`
-4. confirms that this node is an active KMS instance and that its local `teePubkey` matches the registry
-5. reads `KMSRegistry.masterSecretHash`
-6. if the on-chain hash is zero:
-   - uses `MASTER_SECRET_HEX` if supplied, otherwise generates 32 random bytes
-   - computes `keccak256(master_secret)`
-   - submits `setMasterSecretHash`
-   - remains unavailable until the chain reflects the hash
-7. if the on-chain hash is non-zero and local state does not match:
-   - requests the master secret from a verified peer
-   - immediately requests a full snapshot from that peer
-8. derives the sync HMAC key and marks the service available
+## What Makes Nova KMS Special On Nova
 
-Important detail:
+Most applications consume platform services. Nova KMS both consumes them and extends them.
 
-- `sync_tick` does not run immediately at boot. It starts after the first `DATA_SYNC_INTERVAL_SECONDS` sleep.
+- It uses Nova Platform services such as Helios-backed chain access, app-registry discovery, and Odyn enclave cryptography to operate securely.
+- It then turns those platform primitives into a higher-level service that other Nova applications can depend on.
+- Because it runs inside the same trust model as the apps it serves, it can validate peers and callers using Nova-native identity and registry state rather than bolting on an unrelated trust system.
 
-## Repository Map
+That combination is the core product story of Nova KMS: a decentralized KMS built as a first-class Nova application for other Nova applications.
 
-- `src/main.rs`: process bootstrap and background tasks
-- `src/server.rs`: HTTP routes and response shapes
-- `src/auth.rs`: nonce handling, PoP verification, wallet recovery
-- `src/sync.rs`: peer discovery, master-secret convergence, delta push
-- `src/store.rs`: in-memory namespaced store and merge logic
-- `src/crypto.rs`: HKDF, AES-GCM, HMAC, sealed master-secret exchange
-- `src/registry.rs`: on-chain clients and caches
-- `docs/`: code-aligned documentation
-- `contracts/`: `KMSRegistry` contract and Foundry scripts
+## For Developers And Operators
 
-## Development Commands
+This repository contains the current Rust implementation of the Nova KMS node. The README stays high level on purpose. For protocol details, deployment flow, and code-level behavior, use the docs:
+
+- `docs/architecture.md`
+- `docs/app-to-kms-connection.md`
+- `docs/deployment.md`
+- `docs/development.md`
+- `docs/cache-and-registry-model.md`
+- `docs/kms-core-workflows.md`
+
+Common commands:
 
 ```bash
 cargo test
 make build-docker
 ```
-
-For local setup and deployment details, see:
-
-- `docs/development.md`
-- `docs/deployment.md`
-- `docs/app-to-kms-connection.md`
-- `docs/architecture.md`
