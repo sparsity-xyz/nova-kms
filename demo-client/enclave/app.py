@@ -345,7 +345,6 @@ class KMSClient:
 
         kms_app_id = int(getattr(config, "KMS_APP_ID", 0) or 0)
         
-        # New optimization: Get all active instance wallets directly
         try:
             active_wallets = await asyncio.to_thread(self.nova_registry.get_active_instances, kms_app_id)
         except Exception as e:
