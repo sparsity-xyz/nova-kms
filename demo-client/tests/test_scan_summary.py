@@ -140,6 +140,37 @@ class ScanSummaryTests(unittest.IsolatedAsyncioTestCase):
         rendered = app._format_scan_summary(entry)
         self.assertIn("derive_not_recorded", rendered)
 
+    async def test_run_test_cycle_serializes_concurrent_calls(self):
+        with patch.object(app, "NovaRegistry", return_value=MagicMock()):
+            client = app.KMSClient()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        in_flight = 0
+        max_in_flight = 0
+
+        async def fake_get_kms_nodes():
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            entered.set()
+            await release.wait()
+            in_flight -= 1
+            return []
+
+        with patch.object(client, "get_kms_nodes", side_effect=fake_get_kms_nodes):
+            first = asyncio.create_task(client.run_test_cycle())
+            await entered.wait()
+
+            second = asyncio.create_task(client.run_test_cycle())
+            await asyncio.sleep(0.05)
+            self.assertEqual(max_in_flight, 1)
+
+            release.set()
+            await asyncio.gather(first, second)
+
+        self.assertEqual(max_in_flight, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

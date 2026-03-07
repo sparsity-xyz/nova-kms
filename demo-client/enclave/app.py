@@ -304,6 +304,7 @@ class KMSClient:
         self.odyn = Odyn()
         self.nova_registry: Optional[NovaRegistry] = None
         self._kms_wallet_cache: Dict[str, str] = {}  # base_url -> kms_wallet
+        self._cycle_lock = asyncio.Lock()
         self._last_written_ts: Optional[str] = None # Added for sync verification
 
         def _is_zero_address(addr: Optional[str]) -> bool:
@@ -535,219 +536,220 @@ class KMSClient:
           3) Read back from all reachable instances (from previous cycle)
           4) Write new timestamp KV to one reachable node (for next cycle)
         """
-        from nova_registry import InstanceStatus
+        async with self._cycle_lock:
+            from nova_registry import InstanceStatus
 
-        fixed_path = "nova-kms-client/fixed-derive"
-        data_key = "nova-kms-client/timestamp"
-        ts_value = str(int(time.time()))
-        ts_b64 = base64.b64encode(ts_value.encode("utf-8")).decode("utf-8")
+            fixed_path = "nova-kms-client/fixed-derive"
+            data_key = "nova-kms-client/timestamp"
+            ts_value = str(int(time.time()))
+            ts_b64 = base64.b64encode(ts_value.encode("utf-8")).decode("utf-8")
 
-        try:
-            nodes = await self.get_kms_nodes()
-            if not nodes:
-                self._log("Scan", "Failed", error="No KMS nodes found in NovaAppRegistry")
-                return
+            try:
+                nodes = await self.get_kms_nodes()
+                if not nodes:
+                    self._log("Scan", "Failed", error="No KMS nodes found in NovaAppRegistry")
+                    return
 
-            results: List[dict] = []
-            reachable: List[dict] = []
-            expected_key: Optional[str] = None
+                results: List[dict] = []
+                reachable: List[dict] = []
+                expected_key: Optional[str] = None
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                # 1) Resolve instances
-                for node in nodes:
-                    inst = node.get("instance")
-                    op = getattr(inst, "tee_wallet_address", None) if inst else None
-                    row: dict = {
-                        "operator": op,
-                        "instance": None,
-                        "connection": {"connected": False},
-                        "derive": None,
-                        "data": None,
-                    }
-                    try:
-                        if inst is None:
-                            row["instance"] = {"error": "instance lookup unavailable"}
-                            results.append(row)
-                            continue
-
-                        inst_url = self._ensure_http(getattr(inst, "instance_url", ""))
-                        inst_status = getattr(inst, "status", None)
-                        row["instance"] = {
-                            "instance_id": getattr(inst, "instance_id", None),
-                            "app_id": getattr(inst, "app_id", None),
-                            "version_id": getattr(inst, "version_id", None),
-                            "operator": getattr(inst, "operator", None),
-                            "instance_url": inst_url,
-                            "tee_wallet": getattr(inst, "tee_wallet_address", None),
-                            "zk_verified": getattr(inst, "zk_verified", None),
-                            "status": {
-                                "value": getattr(inst_status, "value", inst_status),
-                                "name": getattr(inst_status, "name", str(inst_status)),
-                            },
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    # 1) Resolve instances
+                    for node in nodes:
+                        inst = node.get("instance")
+                        op = getattr(inst, "tee_wallet_address", None) if inst else None
+                        row: dict = {
+                            "operator": op,
+                            "instance": None,
+                            "connection": {"connected": False},
+                            "derive": None,
+                            "data": None,
                         }
+                        try:
+                            if inst is None:
+                                row["instance"] = {"error": "instance lookup unavailable"}
+                                results.append(row)
+                                continue
 
-                        # 2) Only probe/operate on ACTIVE instances
-                        if inst_status != InstanceStatus.ACTIVE or not inst_url:
+                            inst_url = self._ensure_http(getattr(inst, "instance_url", ""))
+                            inst_status = getattr(inst, "status", None)
+                            row["instance"] = {
+                                "instance_id": getattr(inst, "instance_id", None),
+                                "app_id": getattr(inst, "app_id", None),
+                                "version_id": getattr(inst, "version_id", None),
+                                "operator": getattr(inst, "operator", None),
+                                "instance_url": inst_url,
+                                "tee_wallet": getattr(inst, "tee_wallet_address", None),
+                                "zk_verified": getattr(inst, "zk_verified", None),
+                                "status": {
+                                    "value": getattr(inst_status, "value", inst_status),
+                                    "name": getattr(inst_status, "name", str(inst_status)),
+                                },
+                            }
+
+                            # 2) Only probe/operate on ACTIVE instances
+                            if inst_status != InstanceStatus.ACTIVE or not inst_url:
+                                results.append(row)
+                                continue
+
+                            probe = await self._probe_health(client, inst_url)
+                            row["connection"] = probe
+                            if not probe.get("connected"):
+                                results.append(row)
+                                continue
+
+                            # 3) Derive fixed key and compare across nodes
+                            derive_info: dict = {"path": fixed_path}
+                            row["derive"] = derive_info
+                            resp: Optional[httpx.Response] = None
+                            try:
+                                resp = await self._signed_request(
+                                    client,
+                                    "POST",
+                                    f"{inst_url.rstrip('/')}/kms/derive",
+                                    json={"path": fixed_path},
+                                )
+                                resp.raise_for_status()
+                                body = self._get_response_json(resp)
+                                if not isinstance(body, dict):
+                                    raise ValueError(
+                                        f"/kms/derive returned non-object JSON: {type(body).__name__}"
+                                    )
+                                key_b64 = body.get("key")
+                                if not isinstance(key_b64, str) or not key_b64.strip():
+                                    body_keys = ", ".join(sorted(str(k) for k in body.keys()))
+                                    raise ValueError(
+                                        f"/kms/derive returned missing key field (keys=[{body_keys}])"
+                                    )
+                                if expected_key is None and key_b64:
+                                    expected_key = key_b64
+                                derive_info.update({
+                                    "path": fixed_path,
+                                    "key": key_b64,
+                                    "matches_cluster": (expected_key == key_b64) if expected_key else None,
+                                    "http_status": resp.status_code,
+                                })
+                            except Exception as exc:
+                                derive_info["http_status"] = getattr(resp, "status_code", None)
+                                derive_info["error"] = str(exc) or exc.__class__.__name__
+
+                            reachable.append({"operator": op, "url": inst_url, "instance_id": getattr(inst, "instance_id", None)})
                             results.append(row)
-                            continue
-
-                        probe = await self._probe_health(client, inst_url)
-                        row["connection"] = probe
-                        if not probe.get("connected"):
+                        except Exception as exc:
+                            row["instance"] = {"error": str(exc)}
                             results.append(row)
-                            continue
 
-                        # 3) Derive fixed key and compare across nodes
-                        derive_info: dict = {"path": fixed_path}
-                        row["derive"] = derive_info
-                        resp: Optional[httpx.Response] = None
+                    # 4) Read from all reachable nodes (retry on 404 to allow sync)
+                    # This reads the timestamp written in the PREVIOUS cycle to allow sync time.
+                    for row in results:
+                        inst = row.get("instance") or {}
+                        url = inst.get("instance_url")
+                        if not url or not row.get("connection", {}).get("connected"):
+                            continue
+                        read_info: dict = {"key": data_key}
+                        try:
+                            last_exc: Optional[Exception] = None
+                            for _ in range(3):
+                                try:
+                                    r = await self._signed_request(
+                                        client,
+                                        "GET",
+                                        f"{url.rstrip('/')}/kms/data/{data_key}",
+                                    )
+                                    if r.status_code == 404:
+                                        await asyncio.sleep(1)
+                                        continue
+                                    r.raise_for_status()
+                                    payload = self._get_response_json(r)
+                                    val_b64 = payload.get("value")
+                                    val = base64.b64decode(val_b64).decode("utf-8") if val_b64 else None
+                                    read_info.update({
+                                        "http_status": r.status_code,
+                                        "value": val,
+                                        "matches_written": (val == self._last_written_ts) if self._last_written_ts else None,
+                                    })
+                                    last_exc = None
+                                    break
+                                except Exception as exc:
+                                    last_exc = exc
+                                    await asyncio.sleep(1)
+                            if last_exc is not None:
+                                raise last_exc
+                        except Exception as exc:
+                            read_info["error"] = str(exc)
+                        row["data"] = read_info
+
+                    # 5) Write new timestamp KV to one reachable node
+                    write_result: dict = {"performed": False}
+                    if reachable:
+                        target = random.choice(reachable)
+                        write_result = {
+                            "performed": True,
+                            "node_url": target["url"],
+                            "key": data_key,
+                            "timestamp": ts_value,
+                        }
                         try:
                             resp = await self._signed_request(
                                 client,
-                                "POST",
-                                f"{inst_url.rstrip('/')}/kms/derive",
-                                json={"path": fixed_path},
+                                "PUT",
+                                f"{target['url'].rstrip('/')}/kms/data",
+                                json={"key": data_key, "value": ts_b64, "ttl_ms": 0},
                             )
                             resp.raise_for_status()
-                            body = self._get_response_json(resp)
-                            if not isinstance(body, dict):
-                                raise ValueError(
-                                    f"/kms/derive returned non-object JSON: {type(body).__name__}"
-                                )
-                            key_b64 = body.get("key")
-                            if not isinstance(key_b64, str) or not key_b64.strip():
-                                body_keys = ", ".join(sorted(str(k) for k in body.keys()))
-                                raise ValueError(
-                                    f"/kms/derive returned missing key field (keys=[{body_keys}])"
-                                )
-                            if expected_key is None and key_b64:
-                                expected_key = key_b64
-                            derive_info.update({
-                                "path": fixed_path,
-                                "key": key_b64,
-                                "matches_cluster": (expected_key == key_b64) if expected_key else None,
-                                "http_status": resp.status_code,
-                            })
+                            write_result["http_status"] = resp.status_code
+                            # Store for next cycle's read verification
+                            self._last_written_ts = ts_value
                         except Exception as exc:
-                            derive_info["http_status"] = getattr(resp, "status_code", None)
-                            derive_info["error"] = str(exc) or exc.__class__.__name__
+                            write_result["error"] = str(exc)
 
-                        reachable.append({"operator": op, "url": inst_url, "instance_id": getattr(inst, "instance_id", None)})
-                        results.append(row)
-                    except Exception as exc:
-                        row["instance"] = {"error": str(exc)}
-                        results.append(row)
-
-                # 4) Read from all reachable nodes (retry on 404 to allow sync)
-                # This reads the timestamp written in the PREVIOUS cycle to allow sync time.
-                for row in results:
-                    inst = row.get("instance") or {}
-                    url = inst.get("instance_url")
-                    if not url or not row.get("connection", {}).get("connected"):
-                        continue
-                    read_info: dict = {"key": data_key}
-                    try:
-                        last_exc: Optional[Exception] = None
-                        for _ in range(3):
-                            try:
-                                r = await self._signed_request(
-                                    client,
-                                    "GET",
-                                    f"{url.rstrip('/')}/kms/data/{data_key}",
-                                )
-                                if r.status_code == 404:
-                                    await asyncio.sleep(1)
-                                    continue
-                                r.raise_for_status()
-                                payload = self._get_response_json(r)
-                                val_b64 = payload.get("value")
-                                val = base64.b64decode(val_b64).decode("utf-8") if val_b64 else None
-                                read_info.update({
-                                    "http_status": r.status_code,
-                                    "value": val,
-                                    "matches_written": (val == self._last_written_ts) if self._last_written_ts else None,
-                                })
-                                last_exc = None
-                                break
-                            except Exception as exc:
-                                last_exc = exc
-                                await asyncio.sleep(1)
-                        if last_exc is not None:
-                            raise last_exc
-                    except Exception as exc:
-                        read_info["error"] = str(exc)
-                    row["data"] = read_info
-
-                # 5) Write new timestamp KV to one reachable node
-                write_result: dict = {"performed": False}
-                if reachable:
-                    target = random.choice(reachable)
-                    write_result = {
-                        "performed": True,
-                        "node_url": target["url"],
-                        "key": data_key,
-                        "timestamp": ts_value,
-                    }
-                    try:
-                        resp = await self._signed_request(
-                            client,
-                            "PUT",
-                            f"{target['url'].rstrip('/')}/kms/data",
-                            json={"key": data_key, "value": ts_b64, "ttl_ms": 0},
-                        )
-                        resp.raise_for_status()
-                        write_result["http_status"] = resp.status_code
-                        # Store for next cycle's read verification
-                        self._last_written_ts = ts_value
-                    except Exception as exc:
-                        write_result["error"] = str(exc)
-
-            # 6) Summarize
-            mismatched_keys = [
-                r for r in results
-                if r.get("derive")
-                and isinstance(r["derive"], dict)
-                and r["derive"].get("matches_cluster") is False
-            ]
-            derive_failures = [
-                r for r in results
-                if r.get("connection", {}).get("connected")
-                and (
-                    not isinstance(r.get("derive"), dict)
-                    or bool(r["derive"].get("error"))
-                    or not r["derive"].get("key")
+                # 6) Summarize
+                mismatched_keys = [
+                    r for r in results
+                    if r.get("derive")
+                    and isinstance(r["derive"], dict)
+                    and r["derive"].get("matches_cluster") is False
+                ]
+                derive_failures = [
+                    r for r in results
+                    if r.get("connection", {}).get("connected")
+                    and (
+                        not isinstance(r.get("derive"), dict)
+                        or bool(r["derive"].get("error"))
+                        or not r["derive"].get("key")
+                    )
+                ]
+                reads_missing = [
+                    r for r in results
+                    if r.get("connection", {}).get("connected")
+                    and (not r.get("data") or r["data"].get("matches_written") is False)
+                ]
+                overall = (
+                    "Success"
+                    if (not mismatched_keys and not derive_failures and not reads_missing)
+                    else "Partial"
                 )
-            ]
-            reads_missing = [
-                r for r in results
-                if r.get("connection", {}).get("connected")
-                and (not r.get("data") or r["data"].get("matches_written") is False)
-            ]
-            overall = (
-                "Success"
-                if (not mismatched_keys and not derive_failures and not reads_missing)
-                else "Partial"
-            )
 
-            self._log(
-                "ScanSummary",
-                overall,
-                details={
-                    "node_count": len(nodes),
-                    "reachable_count": len(reachable),
-                    "fixed_derive_path": fixed_path,
-                    "expected_derived_key": expected_key,
-                    "results": results,
-                    "write": write_result,
-                },
-            )
-        except asyncio.CancelledError:
-            # Normal during Ctrl+C / application shutdown; don't surface as an error.
-            logger.info("Scan cycle cancelled (shutdown)")
-            return
-        except Exception as exc:
-            logger.error(f"Scan cycle failed: {exc}")
-            self._log("ScanSummary", "Failed", error=str(exc))
+                self._log(
+                    "ScanSummary",
+                    overall,
+                    details={
+                        "node_count": len(nodes),
+                        "reachable_count": len(reachable),
+                        "fixed_derive_path": fixed_path,
+                        "expected_derived_key": expected_key,
+                        "results": results,
+                        "write": write_result,
+                    },
+                )
+            except asyncio.CancelledError:
+                # Normal during Ctrl+C / application shutdown; don't surface as an error.
+                logger.info("Scan cycle cancelled (shutdown)")
+                return
+            except Exception as exc:
+                logger.error(f"Scan cycle failed: {exc}")
+                self._log("ScanSummary", "Failed", error=str(exc))
 
     def _log(self, action: str, status: str, kms_node_url: str = "N/A", details: Optional[Dict] = None, error: Optional[str] = None):
         entry_dict = {
@@ -799,7 +801,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to connect to Odyn: {e}")
     
-    scheduler.add_job(kms_client.run_test_cycle, 'interval', seconds=config.TEST_CYCLE_INTERVAL_SECONDS)
+    scheduler.add_job(
+        kms_client.run_test_cycle,
+        "interval",
+        seconds=config.TEST_CYCLE_INTERVAL_SECONDS,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     
     # Trigger one run immediately
