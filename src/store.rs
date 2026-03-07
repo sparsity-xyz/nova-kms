@@ -299,16 +299,24 @@ impl DataStore {
         }
     }
 
+    fn new_namespace(&self, app_id: u64) -> Arc<RwLock<Namespace>> {
+        Arc::new(RwLock::new(Namespace::new(
+            app_id,
+            self.max_app_storage_bytes,
+            self.tombstone_retention_ms,
+            self.max_tombstones_per_app,
+        )))
+    }
+
     pub async fn get_namespace(&self, app_id: u64) -> Arc<RwLock<Namespace>> {
+        if let Some(ns) = self.namespaces.read().await.get(&app_id).cloned() {
+            return ns;
+        }
+
         let mut map = self.namespaces.write().await;
-        let ns = map.entry(app_id).or_insert_with(|| {
-            Arc::new(RwLock::new(Namespace::new(
-                app_id,
-                self.max_app_storage_bytes,
-                self.tombstone_retention_ms,
-                self.max_tombstones_per_app,
-            )))
-        });
+        let ns = map
+            .entry(app_id)
+            .or_insert_with(|| self.new_namespace(app_id));
         ns.clone()
     }
 
@@ -389,6 +397,7 @@ impl DataStore {
 
     pub async fn stats(&self, current_time: u64) -> (usize, usize, usize) {
         let map = self.namespaces.read().await;
+        let namespace_count = map.len();
         let namespaces: Vec<Arc<RwLock<Namespace>>> = map.values().cloned().collect();
         drop(map);
 
@@ -399,13 +408,15 @@ impl DataStore {
             total_keys += w.keys(current_time).len();
             total_bytes += w.total_bytes();
         }
-        (self.namespaces.read().await.len(), total_keys, total_bytes)
+        (namespace_count, total_keys, total_bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     fn record(key: &str, value: &[u8], ts: u64, node: &str) -> DataRecord {
         let mut vc = VectorClock::new();
@@ -527,5 +538,36 @@ mod tests {
         let local = store.put_local(1, "k", b"c".to_vec(), "n1", 30, 0).await;
         assert_eq!(local.version.get("n1"), 2);
         assert_eq!(local.version.get("n2"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_data_store_get_namespace_reuses_existing_arc_under_concurrency() {
+        let store = Arc::new(DataStore::new(1024 * 1024, 10_000, 100));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.get_namespace(7).await
+            }));
+        }
+
+        let mut namespaces = Vec::new();
+        for handle in handles {
+            namespaces.push(handle.await.unwrap());
+        }
+
+        let first = namespaces[0].clone();
+        for ns in namespaces.iter().skip(1) {
+            assert!(Arc::ptr_eq(&first, ns));
+        }
+
+        let (namespace_count, total_keys, total_bytes) = store.stats(0).await;
+        assert_eq!(namespace_count, 1);
+        assert_eq!(total_keys, 0);
+        assert_eq!(total_bytes, 0);
     }
 }
