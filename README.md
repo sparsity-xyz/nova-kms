@@ -25,6 +25,18 @@ The service provides two application-facing capabilities:
 - A KMS service that can keep operating as cluster membership changes, as long as verified KMS peers remain available.
 - A service boundary that is designed for confidential Nova applications instead of generic public clients.
 
+## How To Use Nova KMS In Your Own Nova App
+
+There are two practical ways to adopt Nova KMS in your own Nova application.
+
+1. Directly call Nova KMS, like `demo-client`.
+
+This is the most explicit integration model. Your application discovers active KMS instances, authenticates itself as a Nova app, and sends KMS requests to the cluster directly. Choose this path if you want full control over request flow, node selection, retries, and how your app uses derived keys or KV state.
+
+2. Use the Nova KMS service integrated into Enclaver, like `demo-client-enclaver`.
+
+This is the simpler integration model for apps that want Nova KMS as a platform-style dependency instead of managing the interaction details themselves. Choose this path if you want your app to consume Nova KMS through Enclaver's built-in service surface rather than implementing direct KMS communication logic inside your app.
+
 ## Security Design
 
 Nova KMS is meant for applications that care about more than simple key storage. Its security design is built around one idea: a node should only serve sensitive KMS traffic when its identity, cluster membership, and secret state are all verifiably correct.
