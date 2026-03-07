@@ -15,7 +15,9 @@ use crate::auth::{
     authenticate_app, authenticate_kms_peer, current_node_signing_wallet, sign_message_for_node,
 };
 use crate::config::Config;
-use crate::crypto::{derive_app_key_extended, derive_data_key, seal_master_secret};
+use crate::crypto::{
+    MasterSecretManager, derive_app_key_extended, derive_data_key, seal_master_secret,
+};
 use crate::error::KmsError;
 use crate::models::DataRecord;
 use crate::odyn::OdynClient;
@@ -139,6 +141,30 @@ async fn encrypt_payload(
         "nonce": normalize_hex(&encrypted.nonce),
         "encrypted_data": normalize_hex(&encrypted.encrypted_data),
     }))
+}
+
+async fn verify_sync_request_hmac(
+    headers: &HeaderMap,
+    body: &Value,
+    payload: &Value,
+    sync_type: &str,
+    master_secret: &MasterSecretManager,
+) -> Result<(), KmsError> {
+    if sync_type == "master_secret_request" {
+        return Ok(());
+    }
+
+    let sync_key = master_secret.get_sync_key().await?;
+    let sig = headers
+        .get("x-sync-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| KmsError::Unauthorized("Missing HMAC signature".to_string()))?;
+    let signed_payload = if is_envelope(body) { body } else { payload };
+    let canonical = canonical_json(signed_payload)?;
+    if !verify_hmac_hex(&sync_key, canonical.as_bytes(), sig) {
+        return Err(KmsError::Unauthorized("Invalid HMAC signature".to_string()));
+    }
+    Ok(())
 }
 
 async fn maybe_add_app_response_signature(
@@ -794,7 +820,7 @@ async fn sync_handler(
     tracing::info!("Received /sync request from {}", caller_wallet);
 
     let mut response_headers = HeaderMap::new();
-    let (config, nonce_store, peer_cache, master_secret, store, odyn, sync_key) = {
+    let (config, nonce_store, peer_cache, master_secret, store, odyn) = {
         let s = state.read().await;
         (
             s.config.clone(),
@@ -803,7 +829,6 @@ async fn sync_handler(
             s.master_secret.clone(),
             s.store.clone(),
             s.odyn.clone(),
-            s.sync_key,
         )
     };
 
@@ -904,38 +929,15 @@ async fn sync_handler(
         sync_type
     );
 
-    match (sync_key, sync_type) {
-        (Some(sync_key), st) if st != "master_secret_request" => {
-            let sig = match headers
-                .get("x-sync-signature")
-                .and_then(|v| v.to_str().ok())
-            {
-                Some(sig) => sig,
-                None => {
-                    let err = KmsError::Unauthorized("Missing HMAC signature".to_string());
-                    tracing::warn!("Rejecting /sync from {}: {}", identity.tee_wallet, err);
-                    return Err(err);
-                }
-            };
-            let signed_payload = if is_envelope(&body) { &body } else { &payload };
-            let canonical = match canonical_json(signed_payload) {
-                Ok(canonical) => canonical,
-                Err(err) => {
-                    tracing::warn!(
-                        "Rejecting /sync from {} during canonicalization: {}",
-                        identity.tee_wallet,
-                        err
-                    );
-                    return Err(err);
-                }
-            };
-            if !verify_hmac_hex(&sync_key, canonical.as_bytes(), sig) {
-                let err = KmsError::Unauthorized("Invalid HMAC signature".to_string());
-                tracing::warn!("Rejecting /sync from {}: {}", identity.tee_wallet, err);
-                return Err(err);
-            }
-        }
-        _ => {}
+    if let Err(err) =
+        verify_sync_request_hmac(&headers, &body, &payload, sync_type, master_secret.as_ref()).await
+    {
+        tracing::warn!(
+            "Rejecting /sync from {} during HMAC verification: {}",
+            identity.tee_wallet,
+            err
+        );
+        return Err(err);
     }
     tracing::debug!("KMS PoP verified for {}", identity.tee_wallet);
 
@@ -1236,6 +1238,43 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let json = response_json(response).await;
         assert_eq!(json["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_delta_sync_requires_hmac_even_without_cached_state_sync_key() {
+        let master_secret = MasterSecretManager::new();
+        master_secret.initialize_generated([9u8; 32]).await;
+
+        let err = verify_sync_request_hmac(
+            &HeaderMap::new(),
+            &json!({"type":"delta","sender_wallet":"0x0","data":{}}),
+            &json!({"type":"delta","sender_wallet":"0x0","data":{}}),
+            "delta",
+            &master_secret,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            KmsError::Unauthorized(message) => assert_eq!(message, "Missing HMAC signature"),
+            other => panic!("expected unauthorized error, got {}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_master_secret_request_allows_missing_hmac() {
+        let master_secret = MasterSecretManager::new();
+        master_secret.initialize_generated([9u8; 32]).await;
+
+        verify_sync_request_hmac(
+            &HeaderMap::new(),
+            &json!({"type":"master_secret_request"}),
+            &json!({"type":"master_secret_request"}),
+            "master_secret_request",
+            &master_secret,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
