@@ -14,13 +14,13 @@ use std::net::SocketAddr;
 use crate::auth::{
     authenticate_app, authenticate_kms_peer, current_node_signing_wallet, sign_message_for_node,
 };
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::crypto::{
     MasterSecretManager, derive_app_key_extended, derive_data_key, seal_master_secret,
 };
 use crate::error::KmsError;
 use crate::models::DataRecord;
-use crate::capsule::CapsuleClient;
 use crate::state::SharedState;
 use crate::sync::{canonical_json, now_ms, validate_incoming_record_with_context, verify_hmac_hex};
 
@@ -559,7 +559,8 @@ async fn data_entry_get(
         "keys": keys,
         "count": keys.len(),
     });
-    let encrypted = encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)).into_response())
 }
 
@@ -624,7 +625,8 @@ async fn get_data_common(
         "value": value_b64,
         "updated_at_ms": updated_at_ms,
     });
-    let encrypted = encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)).into_response())
 }
 
@@ -723,7 +725,8 @@ async fn put_data(
         "key": key,
         "updated_at_ms": updated_at_ms,
     });
-    let encrypted = encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -790,7 +793,8 @@ async fn delete_data(
         "key": key,
         "deleted": true,
     });
-    let encrypted = encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -1093,8 +1097,13 @@ async fn sync_handler(
         }
     };
 
-    maybe_add_peer_response_signature(&config, &capsule, &identity.signature, &mut response_headers)
-        .await;
+    maybe_add_peer_response_signature(
+        &config,
+        &capsule,
+        &identity.signature,
+        &mut response_headers,
+    )
+    .await;
 
     let receiver_pubkey = sender_pubkey_from_envelope.unwrap_or(peer.tee_pubkey);
     let response_body = match encrypt_payload(&capsule, &result, Some(&receiver_pubkey)).await {

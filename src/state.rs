@@ -3,10 +3,10 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
 use crate::auth::{NonceStore, canonical_wallet};
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::crypto::{MasterSecretManager, derive_sync_key};
 use crate::error::KmsError;
-use crate::capsule::CapsuleClient;
 use crate::rate_limiter::TokenBucket;
 use crate::registry::{CachedNovaRegistry, RegistryClient};
 use crate::store::DataStore;
@@ -88,7 +88,11 @@ impl AppState {
                         config.node_wallet = canonical;
                     }
                     Err(err) => {
-                        tracing::warn!("Failed to canonicalize Capsule wallet '{}': {}", wallet, err);
+                        tracing::warn!(
+                            "Failed to canonicalize Capsule wallet '{}': {}",
+                            wallet,
+                            err
+                        );
                     }
                 },
                 Err(err) => {

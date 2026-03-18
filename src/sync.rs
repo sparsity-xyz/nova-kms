@@ -503,7 +503,11 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         )
     };
     if in_enclave {
-        match retry_init_op("Capsule eth_address", || async { capsule.eth_address().await }).await {
+        match retry_init_op("Capsule eth_address", || async {
+            capsule.eth_address().await
+        })
+        .await
+        {
             Ok(wallet) => match canonical_wallet(&wallet) {
                 Ok(canonical) => {
                     let mut s = state.write().await;
@@ -517,7 +521,11 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("Failed to canonicalize Capsule wallet '{}': {}", wallet, err);
+                    tracing::warn!(
+                        "Failed to canonicalize Capsule wallet '{}': {}",
+                        wallet,
+                        err
+                    );
                 }
             },
             Err(err) => {
@@ -791,7 +799,9 @@ async fn decrypt_json_envelope(state: &SharedState, envelope: &Value) -> Result<
         let s = state.read().await;
         s.capsule.clone()
     };
-    let plaintext = capsule.decrypt(nonce, sender_pubkey, encrypted_data).await?;
+    let plaintext = capsule
+        .decrypt(nonce, sender_pubkey, encrypted_data)
+        .await?;
     serde_json::from_str(&plaintext).map_err(|e| {
         KmsError::ValidationError(format!("Decrypted payload is not valid JSON: {}", e))
     })
@@ -947,18 +957,18 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
             let s = state.read().await;
             (s.config.clone(), s.capsule.clone())
         };
-        let (signature, signer_wallet) = match sign_message_for_node(&config, &capsule, &message).await
-        {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!(
-                    "Delta push to {} failed to sign PoP message: {}",
-                    peer_wallet,
-                    err
-                );
-                continue;
-            }
-        };
+        let (signature, signer_wallet) =
+            match sign_message_for_node(&config, &capsule, &message).await {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(
+                        "Delta push to {} failed to sign PoP message: {}",
+                        peer_wallet,
+                        err
+                    );
+                    continue;
+                }
+            };
 
         let envelope = match encrypt_json_envelope(state, &body, &peer.tee_pubkey).await {
             Ok(v) => v,

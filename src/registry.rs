@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
-use crate::error::KmsError;
 use crate::capsule::CapsuleClient;
+use crate::error::KmsError;
 
 sol! {
     #[sol(rpc)]

@@ -9,9 +9,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::error::KmsError;
-use crate::capsule::CapsuleClient;
 use crate::registry::CachedNovaRegistry;
 
 #[derive(Debug, Clone)]

@@ -1,9 +1,9 @@
 pub mod auth;
+pub mod capsule;
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod models;
-pub mod capsule;
 pub mod rate_limiter;
 pub mod registry;
 pub mod server;

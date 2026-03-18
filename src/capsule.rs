@@ -88,12 +88,10 @@ impl CapsuleClient {
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, KmsError> {
         let url = format!("{}{}", self.endpoint, path);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| KmsError::InternalError(format!("Capsule GET {:?} err: {}", path, e)))?;
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                KmsError::InternalError(format!("Capsule GET {:?} err: {}", path, e))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
