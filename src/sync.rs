@@ -494,22 +494,22 @@ async fn set_service_availability(state: &SharedState, available: bool, reason: 
 }
 
 pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
-    let (peer_cache, odyn, in_enclave) = {
+    let (peer_cache, capsule, in_enclave) = {
         let s = state.read().await;
         (
             Arc::clone(&s.peer_cache),
-            s.odyn.clone(),
+            s.capsule.clone(),
             s.config.in_enclave,
         )
     };
     if in_enclave {
-        match retry_init_op("Odyn eth_address", || async { odyn.eth_address().await }).await {
+        match retry_init_op("Capsule eth_address", || async { capsule.eth_address().await }).await {
             Ok(wallet) => match canonical_wallet(&wallet) {
                 Ok(canonical) => {
                     let mut s = state.write().await;
                     if s.config.node_wallet != canonical {
                         tracing::info!(
-                            "Updating node wallet from Odyn at runtime: {} -> {}",
+                            "Updating node wallet from Capsule at runtime: {} -> {}",
                             s.config.node_wallet,
                             canonical
                         );
@@ -517,12 +517,12 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("Failed to canonicalize Odyn wallet '{}': {}", wallet, err);
+                    tracing::warn!("Failed to canonicalize Capsule wallet '{}': {}", wallet, err);
                 }
             },
             Err(err) => {
                 tracing::warn!(
-                    "Failed to read Odyn wallet in node_tick after retries: {}",
+                    "Failed to read Capsule wallet in node_tick after retries: {}",
                     err
                 );
             }
@@ -585,8 +585,8 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
     }
 
     if let Some(own_peer) = own_peer {
-        let local_pubkey_hex = match retry_init_op("Odyn encryption public key", || async {
-            odyn.get_encryption_public_key_der().await
+        let local_pubkey_hex = match retry_init_op("Capsule encryption public key", || async {
+            capsule.get_encryption_public_key_der().await
         })
         .await
         {
@@ -634,15 +634,15 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
         let has_local_secret = master_secret.is_initialized().await;
 
         if !has_local_secret {
-            let generated_secret = match retry_init_op("Odyn random bytes", || async {
-                odyn.get_random_bytes().await
+            let generated_secret = match retry_init_op("Capsule random bytes", || async {
+                capsule.get_random_bytes().await
             })
             .await
             {
                 Ok(random) => {
                     if random.len() < 32 {
                         return Err(KmsError::InternalError(
-                            "Odyn returned insufficient random bytes".to_string(),
+                            "Capsule returned insufficient random bytes".to_string(),
                         ));
                     }
                     let mut out = [0u8; 32];
@@ -650,12 +650,12 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
                     out
                 }
                 Err(err) if !in_enclave => {
-                    tracing::warn!("Odyn RNG unavailable in dev mode, falling back: {}", err);
+                    tracing::warn!("Capsule RNG unavailable in dev mode, falling back: {}", err);
                     random_secret_32()?
                 }
                 Err(err) => {
-                    tracing::warn!("Failed to get Odyn random bytes after retries: {}", err);
-                    set_service_availability(state, false, "cannot get random bytes from odyn")
+                    tracing::warn!("Failed to get Capsule random bytes after retries: {}", err);
+                    set_service_availability(state, false, "cannot get random bytes from capsule")
                         .await;
                     return Ok(());
                 }
@@ -670,7 +670,7 @@ pub async fn node_tick(state: &SharedState) -> Result<(), KmsError> {
 
         let set_result = retry_init_op("Registry setMasterSecretHash", || async {
             registry
-                .set_master_secret_hash(&odyn, &node_wallet, local_hash)
+                .set_master_secret_hash(&capsule, &node_wallet, local_hash)
                 .await
         })
         .await;
@@ -751,15 +751,15 @@ async fn encrypt_json_envelope(
     payload: &Value,
     receiver_tee_pubkey_hex: &str,
 ) -> Result<Value, KmsError> {
-    let (odyn, plaintext) = {
+    let (capsule, plaintext) = {
         let s = state.read().await;
         let plaintext = canonical_json(payload)?;
-        (s.odyn.clone(), plaintext)
+        (s.capsule.clone(), plaintext)
     };
 
-    let encrypted = odyn.encrypt(&plaintext, receiver_tee_pubkey_hex).await?;
+    let encrypted = capsule.encrypt(&plaintext, receiver_tee_pubkey_hex).await?;
     let sender_pubkey_hex = if encrypted.enclave_public_key.is_empty() {
-        hex::encode(odyn.get_encryption_public_key_der().await?)
+        hex::encode(capsule.get_encryption_public_key_der().await?)
     } else {
         normalize_hex_no_prefix(&encrypted.enclave_public_key)
     };
@@ -787,11 +787,11 @@ async fn decrypt_json_envelope(state: &SharedState, envelope: &Value) -> Result<
         .get("encrypted_data")
         .and_then(|v| v.as_str())
         .ok_or_else(|| KmsError::ValidationError("Missing encrypted_data".to_string()))?;
-    let odyn = {
+    let capsule = {
         let s = state.read().await;
-        s.odyn.clone()
+        s.capsule.clone()
     };
-    let plaintext = odyn.decrypt(nonce, sender_pubkey, encrypted_data).await?;
+    let plaintext = capsule.decrypt(nonce, sender_pubkey, encrypted_data).await?;
     serde_json::from_str(&plaintext).map_err(|e| {
         KmsError::ValidationError(format!("Decrypted payload is not valid JSON: {}", e))
     })
@@ -943,11 +943,11 @@ pub async fn push_deltas(state: &SharedState) -> Result<usize, KmsError> {
 
         let ts = now_secs();
         let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
-        let (config, odyn) = {
+        let (config, capsule) = {
             let s = state.read().await;
-            (s.config.clone(), s.odyn.clone())
+            (s.config.clone(), s.capsule.clone())
         };
-        let (signature, signer_wallet) = match sign_message_for_node(&config, &odyn, &message).await
+        let (signature, signer_wallet) = match sign_message_for_node(&config, &capsule, &message).await
         {
             Ok(v) => v,
             Err(err) => {
@@ -1179,11 +1179,11 @@ async fn post_sync_request_to_peer(
 
     let ts = now_secs();
     let message = format!("NovaKMS:Auth:{}:{}:{}", nonce_data.nonce, peer_wallet, ts);
-    let (config, odyn) = {
+    let (config, capsule) = {
         let s = state.read().await;
-        (s.config.clone(), s.odyn.clone())
+        (s.config.clone(), s.capsule.clone())
     };
-    let (signature, signer_wallet) = sign_message_for_node(&config, &odyn, &message).await?;
+    let (signature, signer_wallet) = sign_message_for_node(&config, &capsule, &message).await?;
 
     let envelope = encrypt_json_envelope(state, inner_payload, &peer.tee_pubkey).await?;
     let canonical = canonical_json(&envelope)?;

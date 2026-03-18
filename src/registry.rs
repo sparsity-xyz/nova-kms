@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
 
 use crate::error::KmsError;
-use crate::odyn::OdynClient;
+use crate::capsule::CapsuleClient;
 
 sol! {
     #[sol(rpc)]
@@ -233,7 +233,7 @@ impl RegistryClient {
 
     pub async fn set_master_secret_hash(
         &self,
-        odyn: &OdynClient,
+        capsule: &CapsuleClient,
         setter_wallet: &str,
         secret_hash: [u8; 32],
     ) -> Result<String, KmsError> {
@@ -276,22 +276,21 @@ impl RegistryClient {
         let max_fee = base_fee.saturating_mul(U256::from(2u64)) + priority_fee;
 
         let tx = json!({
-            "chainId": to_rpc_hex(chain_id),
-            "type": "0x2",
-            "from": setter_wallet,
+            "kind": "structured",
+            "chain_id": to_rpc_hex(chain_id),
             "to": self.kms_registry_address,
             "nonce": to_rpc_hex(nonce),
             "data": set_master_secret_hash_calldata(secret_hash),
             "value": "0x0",
-            "maxPriorityFeePerGas": to_rpc_hex(priority_fee),
-            "maxFeePerGas": to_rpc_hex(max_fee),
-            "gas": "0x493e0",
+            "max_priority_fee_per_gas": to_rpc_hex(priority_fee),
+            "max_fee_per_gas": to_rpc_hex(max_fee),
+            "gas_limit": "0x493e0",
         });
 
-        let sign_res = odyn.sign_tx(tx).await?;
+        let sign_res = capsule.sign_tx(tx).await?;
         let raw_tx = extract_raw_tx(&sign_res).ok_or_else(|| {
             KmsError::InternalError(format!(
-                "Odyn sign_tx returned unexpected payload: {}",
+                "Capsule sign_tx returned unexpected payload: {}",
                 sign_res
             ))
         })?;

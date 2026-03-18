@@ -12,10 +12,10 @@ Key Architecture
 Every Nova Platform enclave has **two independent keypairs**:
 
 1. **ETH wallet** (secp256k1): ``tee_wallet_address`` + private key.
-   Used for PoP message signing (EIP-191 via Odyn ``/v1/eth/sign``).
+   Used for PoP message signing (EIP-191 via Capsule ``/v1/eth/sign``).
 
 2. **teePubkey** (NIST P-384 / secp384r1): DER-encoded SPKI public key.
-   Used for ECDH-based encryption (via Odyn ``/v1/encryption/*``).
+   Used for ECDH-based encryption (via Capsule ``/v1/encryption/*``).
 
 These keypairs live on *different curves* and are *completely independent*.
 The wallet address is **NOT** derived from teePubkey and vice-versa.
@@ -89,7 +89,7 @@ def parse_tee_pubkey(pubkey_bytes: bytes) -> ec.EllipticCurvePublicKey:
     if not pubkey_bytes:
         raise ValueError("Empty teePubkey")
 
-    # Try DER/SPKI first (typical format from Odyn /v1/encryption/public_key)
+    # Try DER/SPKI first (typical format from Capsule /v1/encryption/public_key)
     if pubkey_bytes[0] == 0x30:
         try:
             key = serialization.load_der_public_key(pubkey_bytes)

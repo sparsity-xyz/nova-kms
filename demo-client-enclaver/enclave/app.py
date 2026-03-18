@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
 
 import config
-from odyn import Odyn, OdynRequestError, OdynTransportError
+from capsule import Capsule, CapsuleRequestError, CapsuleTransportError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -101,7 +101,7 @@ def _render_log(entry: Dict[str, Any]) -> str:
 
 def _is_registration_pending_error(exc: Exception) -> bool:
     message = str(exc).lower()
-    if isinstance(exc, OdynRequestError):
+    if isinstance(exc, CapsuleRequestError):
         status = exc.status_code
         if status not in (400, 401, 403, 404, 409, 503):
             return False
@@ -110,9 +110,9 @@ def _is_registration_pending_error(exc: Exception) -> bool:
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    if isinstance(exc, OdynTransportError):
+    if isinstance(exc, CapsuleTransportError):
         return True
-    if isinstance(exc, OdynRequestError):
+    if isinstance(exc, CapsuleRequestError):
         if exc.status_code in (408, 429, 500, 502, 503, 504):
             return True
         body = exc.response_body.lower()
@@ -137,7 +137,7 @@ def _is_transient_error(exc: Exception) -> bool:
 
 class KMSDemoClient:
     def __init__(self):
-        self.odyn = Odyn()
+        self.capsule = Capsule()
         self.interval_seconds = int(config.TEST_CYCLE_INTERVAL_SECONDS)
         self.derive_path = config.FIXED_DERIVE_PATH
         self.data_key = config.KV_DATA_KEY
@@ -209,11 +209,11 @@ class KMSDemoClient:
 
     async def _try_log_tee_address(self) -> None:
         try:
-            addr = await asyncio.to_thread(self.odyn.eth_address)
+            addr = await asyncio.to_thread(self.capsule.eth_address)
             self._tee_address_logged = True
-            logger.info("Connected to Odyn. TEE address=%s", addr)
+            logger.info("Connected to Capsule. TEE address=%s", addr)
         except Exception as exc:
-            logger.info("Odyn identity is not available yet: %s", exc)
+            logger.info("Capsule identity is not available yet: %s", exc)
 
     def _run_once_sync(self) -> Dict[str, Any]:
         started = time.time()
@@ -221,7 +221,7 @@ class KMSDemoClient:
         previous_written = self._last_written_value
         previous_derive = self._expected_derive_key
 
-        derive_res = self.odyn.kms_derive(path=self.derive_path)
+        derive_res = self.capsule.kms_derive(path=self.derive_path)
         derived_key = derive_res.get("key")
         if not isinstance(derived_key, str) or not derived_key.strip():
             raise RuntimeError("kms/derive returned an empty key")
@@ -232,12 +232,12 @@ class KMSDemoClient:
         else:
             derive_matches_previous = derived_key == previous_derive
 
-        read_res = self.odyn.kms_kv_get(self.data_key)
+        read_res = self.capsule.kms_kv_get(self.data_key)
         read_found = _parse_bool(read_res.get("found"))
         read_value_raw = read_res.get("value")
         read_value = None if read_value_raw is None else base64.b64decode(read_value_raw).decode()
 
-        write_res = self.odyn.kms_kv_put(self.data_key, base64.b64encode(now_value.encode()).decode(), ttl_ms=0)
+        write_res = self.capsule.kms_kv_put(self.data_key, base64.b64encode(now_value.encode()).decode(), ttl_ms=0)
         write_success = _parse_bool(write_res.get("success"))
         if not write_success:
             raise RuntimeError("kms/kv/put returned success=false")
@@ -288,7 +288,7 @@ async def lifespan(_: FastAPI):
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
-    kms_demo.odyn.close()
+    kms_demo.capsule.close()
 
 
 app = FastAPI(title="Nova KMS Demo Client (Enclaver KMS API)", lifespan=lifespan)

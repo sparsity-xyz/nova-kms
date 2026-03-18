@@ -1,6 +1,6 @@
 """
 =============================================================================
-Odyn SDK (odyn.py)
+Capsule SDK (capsule.py)
 =============================================================================
 
 Platform-provided interface to TEE (Trusted Execution Environment) services.
@@ -19,22 +19,22 @@ from typing import Dict, Any, Optional, Union
 import requests
 
 
-class Odyn:
+class Capsule:
     """
-    Wrapper for enclaver's Odyn API.
+    Wrapper for enclaver's Capsule API.
 
     IN_ENCLAVE=true  → Production (localhost:18000)
     IN_ENCLAVE=false → Development (mock API)
     """
 
-    DEFAULT_MOCK_ODYN_API = "http://odyn.sparsity.cloud:18000"
+    DEFAULT_MOCK_CAPSULE_API = "http://capsule.sparsity.cloud:18000"
 
     def __init__(self, endpoint: Optional[str] = None):
         if endpoint:
             self.endpoint = endpoint
         else:
             is_enclave = os.getenv("IN_ENCLAVE", "False").lower() == "true"
-            self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_ODYN_API
+            self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_CAPSULE_API
 
     def _call(self, method: str, path: str, payload: Any = None) -> Any:
         url = f"{self.endpoint}{path}"
@@ -53,6 +53,9 @@ class Odyn:
         return self._call("GET", "/v1/eth/address")["address"]
 
     def sign_tx(self, tx: dict) -> dict:
+        # Match Capsule's expected schema: { "payload": { "kind": "structured", ... } }
+        if "kind" not in tx:
+            tx["kind"] = "structured"
         return self._call("POST", "/v1/eth/sign-tx", {"payload": tx})
 
     def sign_message(self, message: str, include_attestation: bool = False) -> dict:
@@ -125,7 +128,7 @@ class Odyn:
         return self._call("POST", "/v1/encryption/decrypt", payload)["plaintext"]
 
     # =========================================================================
-    # S3 Storage (via Enclaver internal API)
+    # S3 Storage (via Capsule internal API)
     # =========================================================================
 
     def s3_put(self, key: str, value: bytes, content_type: Optional[str] = None) -> bool:
@@ -167,9 +170,9 @@ class Odyn:
 
 
 if __name__ == "__main__":
-    o = Odyn()
+    c = Capsule()
     try:
-        print(f"Testing Odyn at {o.endpoint}")
-        print(f"TEE Address: {o.eth_address()}")
+        print(f"Testing Capsule at {c.endpoint}")
+        print(f"TEE Address: {c.eth_address()}")
     except Exception as e:
-        print(f"Could not connect to Odyn: {e}")
+        print(f"Could not connect to Capsule: {e}")

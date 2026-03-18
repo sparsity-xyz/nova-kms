@@ -3,10 +3,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const LOCAL_ODYN_TIMEOUT_SECS: u64 = 3;
+const LOCAL_CAPSULE_TIMEOUT_SECS: u64 = 3;
 
 #[derive(Clone)]
-pub struct OdynClient {
+pub struct CapsuleClient {
     endpoint: String,
     client: Client,
 }
@@ -42,17 +42,17 @@ pub struct DecryptRes {
     pub plaintext: String,
 }
 
-impl OdynClient {
+impl CapsuleClient {
     pub fn new(in_enclave: bool) -> Self {
         let endpoint = if in_enclave {
             "http://127.0.0.1:18000".to_string()
         } else {
-            "http://odyn.sparsity.cloud:18000".to_string()
+            "http://capsule.sparsity.cloud:18000".to_string()
         };
         Self {
             endpoint,
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(LOCAL_ODYN_TIMEOUT_SECS))
+                .timeout(std::time::Duration::from_secs(LOCAL_CAPSULE_TIMEOUT_SECS))
                 .build()
                 .unwrap_or_default(),
         }
@@ -70,19 +70,19 @@ impl OdynClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| KmsError::InternalError(format!("Odyn POST {:?} err: {}", path, e)))?;
+            .map_err(|e| KmsError::InternalError(format!("Capsule POST {:?} err: {}", path, e)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(KmsError::InternalError(format!(
-                "Odyn POST {:?} Http {}: {}",
+                "Capsule POST {:?} Http {}: {}",
                 path, status, text
             )));
         }
 
         resp.json::<T>().await.map_err(|e| {
-            KmsError::InternalError(format!("Odyn POST {:?} JSON decode err: {}", path, e))
+            KmsError::InternalError(format!("Capsule POST {:?} JSON decode err: {}", path, e))
         })
     }
 
@@ -93,19 +93,19 @@ impl OdynClient {
             .get(&url)
             .send()
             .await
-            .map_err(|e| KmsError::InternalError(format!("Odyn GET {:?} err: {}", path, e)))?;
+            .map_err(|e| KmsError::InternalError(format!("Capsule GET {:?} err: {}", path, e)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(KmsError::InternalError(format!(
-                "Odyn GET {:?} Http {}: {}",
+                "Capsule GET {:?} Http {}: {}",
                 path, status, text
             )));
         }
 
         resp.json::<T>().await.map_err(|e| {
-            KmsError::InternalError(format!("Odyn GET {:?} JSON decode err: {}", path, e))
+            KmsError::InternalError(format!("Capsule GET {:?} JSON decode err: {}", path, e))
         })
     }
 
@@ -148,7 +148,7 @@ impl OdynClient {
         let res = self.get_encryption_public_key().await?;
         let hex_str = res.public_key_der.trim_start_matches("0x");
         hex::decode(hex_str).map_err(|e| {
-            KmsError::InternalError(format!("Failed to parse Odyn public key der hex: {}", e))
+            KmsError::InternalError(format!("Failed to parse Capsule public key der hex: {}", e))
         })
     }
 
