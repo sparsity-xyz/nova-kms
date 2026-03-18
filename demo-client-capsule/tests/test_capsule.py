@@ -10,7 +10,7 @@ THIS_DIR = Path(__file__).resolve().parent
 ENCLAVE_DIR = THIS_DIR.parent / "enclave"
 
 
-_IMPORT_SCOPE_MODULES = ("config", "odyn")
+_IMPORT_SCOPE_MODULES = ("config", "capsule")
 
 
 @contextmanager
@@ -40,9 +40,9 @@ def _demo_enclave_import_scope():
                 sys.modules[name] = module
 
 
-def _load_odyn_module():
+def _load_capsule_module():
     with _demo_enclave_import_scope():
-        return importlib.import_module("odyn")
+        return importlib.import_module("capsule")
 
 
 class DummyResponse:
@@ -86,9 +86,9 @@ class DummySession:
         return None
 
 
-def test_odyn_rejects_non_dict_json():
-    odyn_mod = _load_odyn_module()
-    od = odyn_mod.Odyn(endpoint="http://example.com")
+def test_capsule_rejects_non_dict_json():
+    capsule_mod = _load_capsule_module()
+    od = capsule_mod.Capsule(endpoint="http://example.com")
     od._session = DummySession(response=DummyResponse(payload=["not", "dict"]))
 
     try:
@@ -98,9 +98,9 @@ def test_odyn_rejects_non_dict_json():
         pass
 
 
-def test_odyn_includes_http_error_body():
-    odyn_mod = _load_odyn_module()
-    od = odyn_mod.Odyn(endpoint="http://example.com")
+def test_capsule_includes_http_error_body():
+    capsule_mod = _load_capsule_module()
+    od = capsule_mod.Capsule(endpoint="http://example.com")
     od._session = DummySession(
         response=DummyResponse(
             status_code=400,
@@ -120,9 +120,9 @@ def test_odyn_includes_http_error_body():
         assert "not ACTIVE on registry" in message
 
 
-def test_odyn_prefers_json_error_field():
-    odyn_mod = _load_odyn_module()
-    od = odyn_mod.Odyn(endpoint="http://example.com")
+def test_capsule_prefers_json_error_field():
+    capsule_mod = _load_capsule_module()
+    od = capsule_mod.Capsule(endpoint="http://example.com")
     od._session = DummySession(
         response=DummyResponse(
             status_code=503,
@@ -140,18 +140,18 @@ def test_odyn_prefers_json_error_field():
         assert "no ACTIVE KMS nodes" in message
 
 
-def test_odyn_wraps_timeout_as_transport_error():
-    odyn_mod = _load_odyn_module()
-    od = odyn_mod.Odyn(endpoint="http://example.com", timeout_seconds=10.0)
+def test_capsule_wraps_timeout_as_transport_error():
+    capsule_mod = _load_capsule_module()
+    od = capsule_mod.Capsule(endpoint="http://example.com", timeout_seconds=10.0)
     od._session = DummySession(
         post_exc=requests.exceptions.Timeout("read timed out"),
     )
 
     try:
         od.kms_derive("nova-kms-client/fixed-derive")
-        assert False, "Expected OdynTransportError"
-    except odyn_mod.OdynTransportError as exc:
+        assert False, "Expected CapsuleTransportError"
+    except capsule_mod.CapsuleTransportError as exc:
         message = str(exc)
-        assert "Odyn transport error" in message
+        assert "Capsule transport error" in message
         assert "POST /v1/kms/derive" in message
         assert "read timed out" in message

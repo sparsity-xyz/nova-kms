@@ -1,6 +1,6 @@
 # Nova KMS
 
-Nova Platform gives applications a trusted runtime and shared services such as Helios-backed chain access, app-registry discovery and metadata like dapp contract addresses and active instances, and Odyn for enclave signing, encryption, and decryption.
+Nova Platform gives applications a trusted runtime and shared services such as Helios-backed chain access, app-registry discovery and metadata like dapp contract addresses and active instances, and Capsule for enclave signing, encryption, and decryption.
 
 Nova KMS is unusual because it is both a Nova Platform application and a service provider for other Nova Platform applications. It is a decentralized KMS that runs as a distributed set of TEE-backed nodes, uses the platform's own capabilities to operate securely, and in turn exposes KMS services to other Nova apps. The current node is implemented as a Rust HTTP service built with Axum, authorizes callers via `NovaAppRegistry`, and coordinates cluster master-secret state through `KMSRegistry`.
 
@@ -33,9 +33,9 @@ There are two practical ways to adopt Nova KMS in your own Nova application.
 
 This is the most explicit integration model. Your application discovers active KMS instances, authenticates itself as a Nova app, and sends KMS requests to the cluster directly. Choose this path if you want full control over request flow, node selection, retries, and how your app uses derived keys or KV state.
 
-2. Use the Nova KMS service integrated into Enclaver, like `demo-client-enclaver`.
+2. Use the Nova KMS service integrated into Capsule, like `demo-client-capsule`.
 
-This is the simpler integration model for apps that want Nova KMS as a platform-style dependency instead of managing the interaction details themselves. Choose this path if you want your app to consume Nova KMS through Enclaver's built-in service surface rather than implementing direct KMS communication logic inside your app.
+This is the simpler integration model for apps that want Nova KMS as a platform-style dependency instead of managing the interaction details themselves. Choose this path if you want your app to consume Nova KMS through Capsule's built-in service surface rather than implementing direct KMS communication logic inside your app.
 
 ## Security Design
 
@@ -99,7 +99,7 @@ From the application's point of view, the important property is simple: the clus
 
 Most applications consume platform services. Nova KMS both consumes them and extends them.
 
-- It uses Nova Platform services such as Helios-backed chain access, app-registry discovery, and Odyn enclave cryptography to operate securely.
+- It uses Nova Platform services such as Helios-backed chain access, app-registry discovery, and Capsule enclave cryptography to operate securely.
 - It then turns those platform primitives into a higher-level service that other Nova applications can depend on.
 - Because it runs inside the same trust model as the apps it serves, it can validate peers and callers using Nova-native identity and registry state rather than bolting on an unrelated trust system.
 

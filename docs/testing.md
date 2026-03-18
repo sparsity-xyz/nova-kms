@@ -60,7 +60,7 @@ Current tests cover:
 Current tests cover:
 
 - `setMasterSecretHash` calldata encoding
-- raw transaction extraction from Odyn responses
+- raw transaction extraction from Capsule responses
 - `CachedNovaRegistry` wallet-cache hit behavior
 
 ### 2.6 `sync.rs`

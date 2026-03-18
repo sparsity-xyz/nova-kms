@@ -10,11 +10,11 @@ The process starts two background loops from `src/main.rs`.
 
 ### Responsibilities
 
-1. If running in enclave mode, refresh the local wallet from Odyn and canonicalize it.
+1. If running in enclave mode, refresh the local wallet from Capsule and canonicalize it.
 2. Refresh `PeerCache` from `NovaAppRegistry`.
 3. Fail closed if peer refresh failed and no cached peers remain.
 4. Confirm that this node wallet is still part of current KMS membership.
-5. If available, compare the local Odyn `teePubkey` with the registry entry for this node.
+5. If available, compare the local Capsule `teePubkey` with the registry entry for this node.
 6. Read `KMSRegistry.masterSecretHash`.
 7. If the hash is zero:
    - initialize a local master secret if needed

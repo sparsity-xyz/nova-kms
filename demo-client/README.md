@@ -5,12 +5,12 @@ It implements the full client-side flow in application code:
 
 - discover KMS nodes from `NovaAppRegistry`
 - fetch a nonce from a target node
-- build the PoP signature with Odyn
+- build the PoP signature with Capsule
 - encrypt request payloads end-to-end
 - verify the KMS response signature
 - decrypt the KMS response
 
-Compared with `demo-client-enclaver`, this example is closer to what a custom app would need if it integrates with KMS without relying on enclaver's higher-level `/v1/kms/*` APIs.
+Compared with `demo-client-capsule`, this example is closer to what a custom app would need if it integrates with KMS without relying on capsule's higher-level `/v1/kms/*` APIs.
 
 ## How It Works
 
@@ -18,8 +18,8 @@ Each test cycle does the following:
 
 1. Query `NovaAppRegistry` for ACTIVE KMS instances for `KMS_APP_ID`.
 2. Pick a node and call `/nonce`.
-3. Use Odyn to sign `NovaKMS:AppAuth:<nonce>:<kms_wallet>:<timestamp>`.
-4. Use Odyn encryption APIs to build an E2E envelope for `/kms/derive` and `/kms/data`.
+3. Use Capsule to sign `NovaKMS:AppAuth:<nonce>:<kms_wallet>:<timestamp>`.
+4. Use Capsule encryption APIs to build an E2E envelope for `/kms/derive` and `/kms/data`.
 5. Call:
    - `POST /kms/derive`
    - `PUT /kms/data`
@@ -27,7 +27,7 @@ Each test cycle does the following:
 6. Verify the response signature and decrypt the response body.
 7. Expose the latest run summaries on `GET /logs`.
 
-In other words, this demo exercises the same trust model as a real app: the application owns the KMS protocol details instead of delegating them to enclaver.
+In other words, this demo exercises the same trust model as a real app: the application owns the KMS protocol details instead of delegating them to capsule.
 
 ## What "Local Testing" Means Here
 
@@ -35,8 +35,8 @@ Local testing for this demo does **not** mean a fully local KMS cluster.
 
 When `IN_ENCLAVE=false`, the app can still run on your laptop because two enclave-local dependencies are replaced by remote mock services:
 
-- Odyn mock API: `http://odyn.sparsity.cloud:18000`
-- mock RPC / Helios replacement: `http://odyn.sparsity.cloud:18545`
+- Capsule mock API: `http://capsule.sparsity.cloud:18000`
+- mock RPC / Helios replacement: `http://capsule.sparsity.cloud:18545`
 
 The important identity detail is:
 
@@ -58,19 +58,19 @@ But this mode still expects:
 - a real `KMS_APP_ID`
 - reachable KMS nodes behind that registry
 
-So this is best described as "local client process + remote mock Odyn/RPC + real registry/KMS".
+So this is best described as "local client process + remote mock Capsule/RPC + real registry/KMS".
 
-## Enclaver Mockup Service
+## Capsule Mockup Service
 
 The remote mock service is documented here:
 
-- <https://github.com/sparsity-xyz/enclaver/blob/sparsity/docs/internal_api_mockup.md>
+- <https://github.com/sparsity-xyz/capsule/blob/sparsity/docs/internal_api_mockup.md>
 
-That document describes enclaver's public mockup endpoint, intended for development and testing when you are not running inside an enclave.
+That document describes capsule's public mockup endpoint, intended for development and testing when you are not running inside an enclave.
 
 For this demo, the important takeaway is:
 
-- you can use the mockup service to replace enclave-local Odyn identity, signing, encryption, and mock RPC access
+- you can use the mockup service to replace enclave-local Capsule identity, signing, encryption, and mock RPC access
 - in local mode, the app identity presented to KMS is the mockup service's identity, not a custom local identity
 - that identity is tied to the registry entry at <https://sparsity.cloud/explore/70>
 - you are **not** spinning up a local enclave
@@ -100,12 +100,12 @@ These are static constants in this demo; they are not read from environment vari
 
 ```bash
 export IN_ENCLAVE=false
-export HELIOS_RPC_URL=http://odyn.sparsity.cloud:18545
+export HELIOS_RPC_URL=http://capsule.sparsity.cloud:18545
 ```
 
 Notes:
 
-- `IN_ENCLAVE=false` makes `enclave/odyn.py` use the Odyn mock endpoint.
+- `IN_ENCLAVE=false` makes `enclave/capsule.py` use the Capsule mock endpoint.
 - `HELIOS_RPC_URL` is optional because `demo-client/enclave/chain.py` already defaults to the mock RPC outside enclave mode.
 
 ### 4. Start the demo server

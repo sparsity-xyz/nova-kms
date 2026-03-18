@@ -13,8 +13,8 @@ Required:
 Runtime dependencies for a real local node:
 
 - an RPC endpoint that can serve `NovaAppRegistry` and `KMSRegistry`
-- an Odyn API endpoint
-  - local dev code path uses `http://odyn.sparsity.cloud:18000`
+- an Capsule API endpoint
+  - local dev code path uses `http://capsule.sparsity.cloud:18000`
   - enclave code path uses `http://127.0.0.1:18000`
 
 ## 2. Repository Layout
@@ -89,7 +89,7 @@ These fields have active effect in the current code path:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `IN_ENCLAVE` | `true` | choose Odyn endpoint, peer URL policy, startup wallet behavior |
+| `IN_ENCLAVE` | `true` | choose Capsule endpoint, peer URL policy, startup wallet behavior |
 | `LOG_LEVEL` | `INFO` | tracing filter |
 | `BIND_ADDR` | `0.0.0.0:8000` | Axum listen address |
 | `NOVA_APP_REGISTRY_ADDRESS` | configured default | NovaAppRegistry client |
@@ -97,7 +97,7 @@ These fields have active effect in the current code path:
 | `KMS_APP_ID` | `49` | KMS peer membership scope |
 | `NODE_URL` | `http://127.0.0.1:18545` | chain RPC |
 | `NODE_INSTANCE_URL` | empty | reported node URL; backfilled from registry if empty |
-| `NODE_WALLET` | fixed placeholder | dev wallet or enclave fallback before Odyn refresh |
+| `NODE_WALLET` | fixed placeholder | dev wallet or enclave fallback before Capsule refresh |
 | `NODE_PRIVATE_KEY` | unset | required for local message signing when the node must sign in dev mode |
 | `KMS_NODE_TICK_SECONDS` | `60` | heartbeat and readiness loop |
 | `DATA_SYNC_INTERVAL_SECONDS` | `10` | outbound delta loop |

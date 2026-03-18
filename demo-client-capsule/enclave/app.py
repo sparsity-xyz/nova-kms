@@ -1,4 +1,4 @@
-"""Simplified Nova KMS demo client using enclaver's /v1/kms integration."""
+"""Simplified Nova KMS demo client using capsule's /v1/kms integration."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from capsule import Capsule, CapsuleRequestError, CapsuleTransportError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-logger = logging.getLogger("nova-kms-demo-enclaver")
+logger = logging.getLogger("nova-kms-demo-capsule")
 
 MAX_LOGS = 50
 request_logs: Deque[Dict[str, Any]] = deque(maxlen=MAX_LOGS)
@@ -186,10 +186,10 @@ class KMSDemoClient:
                     "duration_ms": int(time.time() * 1000) - started_ms,
                     "retryable": (registration_pending or transient_error),
                 }
-                if isinstance(exc, OdynRequestError):
+                if isinstance(exc, CapsuleRequestError):
                     details["http_status"] = exc.status_code
                     details["path"] = exc.path
-                elif isinstance(exc, OdynTransportError):
+                elif isinstance(exc, CapsuleTransportError):
                     details["path"] = exc.path
                     details["transport_error"] = type(exc.cause).__name__
                 self._log(
@@ -291,13 +291,13 @@ async def lifespan(_: FastAPI):
     kms_demo.capsule.close()
 
 
-app = FastAPI(title="Nova KMS Demo Client (Enclaver KMS API)", lifespan=lifespan)
+app = FastAPI(title="Nova KMS Demo Client (Capsule KMS API)", lifespan=lifespan)
 
 
 @app.get("/", include_in_schema=False)
 def root() -> Dict[str, Any]:
     return {
-        "service": "Nova KMS Demo Client (Enclaver KMS API)",
+        "service": "Nova KMS Demo Client (Capsule KMS API)",
         "endpoints": ["/health", "/logs"],
         "interval_seconds": kms_demo.interval_seconds,
     }

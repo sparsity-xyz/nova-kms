@@ -1,4 +1,4 @@
-"""Minimal Capsule helper for KMS endpoints exposed by enclaver."""
+"""Minimal Capsule helper for KMS endpoints exposed by capsule."""
 
 from __future__ import annotations
 

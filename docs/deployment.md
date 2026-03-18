@@ -118,7 +118,7 @@ Optional:
 
 Notes:
 
-- in enclave mode, the node refreshes `NODE_WALLET` from Odyn at startup and during `node_tick`
+- in enclave mode, the node refreshes `NODE_WALLET` from Capsule at startup and during `node_tick`
 - if `NODE_INSTANCE_URL` is left empty, the node backfills it from the registry entry for its own wallet once peer refresh succeeds
 - peer URLs must be `https` in enclave mode
 
@@ -127,7 +127,7 @@ Notes:
 The current code assumes:
 
 - chain RPC is reachable at `NODE_URL`
-- Odyn is reachable at `http://127.0.0.1:18000`
+- Capsule is reachable at `http://127.0.0.1:18000`
 - the instance has a registered `teePubkey` and wallet in `NovaAppRegistry`
 
 If peer refresh succeeds, the node also probes each peer `/status` with a 3-second timeout and exposes that metadata through `/nodes`.

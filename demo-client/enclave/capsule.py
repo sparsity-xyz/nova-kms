@@ -21,7 +21,7 @@ import requests
 
 class Capsule:
     """
-    Wrapper for enclaver's Capsule API.
+    Wrapper for capsule's Capsule API.
 
     IN_ENCLAVE=true  → Production (localhost:18000)
     IN_ENCLAVE=false → Development (mock API)

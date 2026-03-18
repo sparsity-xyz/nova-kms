@@ -422,7 +422,7 @@ class KMSClient:
         """
         Perform a request with full PoP authentication flow and E2E encryption:
         1. GET /nonce from KMS node
-        2. Sign (nonce + wallet + timestamp) using Odyn
+        2. Sign (nonce + wallet + timestamp) using Capsule
         3. Encrypt request body with KMS node's teePubkey (E2E)
         4. Send request with X-App-* headers
         5. Verify X-KMS-Response-Signature (H1 fix)
@@ -436,7 +436,7 @@ class KMSClient:
         
         # 2. Prepare PoP
         ts = str(int(time.time()))
-        wallet = _canonical_eth_wallet(self.odyn.eth_address())
+        wallet = _canonical_eth_wallet(self.capsule.eth_address())
         
         # Fetch KMS status (cached per node) - includes wallet and teePubkey
         status_data = self._kms_wallet_cache.get(base_url)
@@ -456,8 +456,8 @@ class KMSClient:
         # Message format: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
         message = f"NovaKMS:AppAuth:{nonce_b64}:{kms_wallet}:{ts}"
         
-        # Sign with Odyn (auto-selects local vs enclave signing)
-        sig_res = self.odyn.sign_message(message)
+        # Sign with Capsule (auto-selects local vs enclave signing)
+        sig_res = self.capsule.sign_message(message)
         signature = sig_res["signature"]
 
         headers = {

@@ -1,6 +1,6 @@
-# Nova KMS Demo Client (Enclaver APIs)
+# Nova KMS Demo Client (Capsule APIs)
 
-This demo provides the same user-facing verification loop as `demo-client`, but it uses enclaver's higher-level KMS APIs directly instead of implementing the KMS protocol in application code.
+This demo provides the same user-facing verification loop as `demo-client`, but it uses capsule's higher-level KMS APIs directly instead of implementing the KMS protocol in application code.
 
 It periodically runs:
 
@@ -12,7 +12,7 @@ and exposes the most recent results on `GET /logs`.
 
 ## How It Differs From `demo-client`
 
-This demo calls enclaver-provided endpoints:
+This demo calls capsule-provided endpoints:
 
 - `POST /v1/kms/derive`
 - `POST /v1/kms/kv/get`
@@ -27,14 +27,14 @@ That means the application itself does **not** need to implement:
 - E2E envelope encryption/decryption
 - KMS response signature verification
 
-Those responsibilities move into enclaver's KMS integration layer.
+Those responsibilities move into capsule's KMS integration layer.
 
 ## Principle
 
 Think of this demo as the "thin client" version:
 
 - `demo-client` proves how to talk to KMS directly
-- `demo-client-enclaver` proves how to consume enclaver's already-integrated KMS interface
+- `demo-client-capsule` proves how to consume capsule's already-integrated KMS interface
 
 So the value of this demo is different:
 
@@ -43,13 +43,13 @@ So the value of this demo is different:
 
 ## What "Local Testing" Means Here
 
-This demo is the better fit when you want to run locally with the enclaver mockup service.
+This demo is the better fit when you want to run locally with the capsule mockup service.
 
-When `IN_ENCLAVE=false`, `demo-client-enclaver/enclave/odyn.py` defaults to:
+When `IN_ENCLAVE=false`, `demo-client-capsule/enclave/capsule.py` defaults to:
 
-- `ODYN_ENDPOINT=http://odyn.sparsity.cloud:18000`
+- `CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000`
 
-In that mode, your local Python process calls the public mockup service instead of a real enclave-local Odyn running on `localhost:18000`.
+In that mode, your local Python process calls the public mockup service instead of a real enclave-local Capsule running on `localhost:18000`.
 
 The identity detail is the same as `demo-client`:
 
@@ -66,15 +66,15 @@ This lets you validate:
 - KV read/write flow
 - retryable handling for transport failures and registration-related failures
 
-## Enclaver Mockup Service
+## Capsule Mockup Service
 
 The mock service is documented here:
 
-- <https://github.com/sparsity-xyz/enclaver/blob/sparsity/docs/internal_api_mockup.md>
+- <https://github.com/sparsity-xyz/capsule/blob/sparsity/docs/internal_api_mockup.md>
 
-That document describes enclaver's public development endpoint and the internal APIs it exposes for testing outside a real enclave.
+That document describes capsule's public development endpoint and the internal APIs it exposes for testing outside a real enclave.
 
-For this demo, the important point is that the mockup service includes the app-integration category used by `/v1/kms/*`, so you can exercise the enclaver KMS abstraction from a normal local process.
+For this demo, the important point is that the mockup service includes the app-integration category used by `/v1/kms/*`, so you can exercise the capsule KMS abstraction from a normal local process.
 
 Practical boundary:
 
@@ -89,7 +89,7 @@ Practical boundary:
 ### 1. Install dependencies
 
 ```bash
-cd demo-client-enclaver/enclave
+cd demo-client-capsule/enclave
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 ```bash
 export IN_ENCLAVE=false
-export ODYN_ENDPOINT=http://odyn.sparsity.cloud:18000
+export CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000
 export TEST_CYCLE_INTERVAL_SECONDS=30
 export FIXED_DERIVE_PATH=nova-kms-client/fixed-derive
 export KV_DATA_KEY=nova-kms-client/timestamp
@@ -107,13 +107,13 @@ export KV_DATA_KEY=nova-kms-client/timestamp
 
 Notes:
 
-- `ODYN_ENDPOINT` is optional because outside enclave mode the demo already defaults to the same mock endpoint.
+- `CAPSULE_ENDPOINT` is optional because outside enclave mode the demo already defaults to the same mock endpoint.
 - keeping it explicit in local testing makes the dependency obvious.
 
 ### 3. Start the demo server
 
 ```bash
-cd demo-client-enclaver/enclave
+cd demo-client-capsule/enclave
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
@@ -140,26 +140,26 @@ The following environment variables are supported:
 - `TEST_CYCLE_INTERVAL_SECONDS`
 - `FIXED_DERIVE_PATH`
 - `KV_DATA_KEY`
-- `ODYN_ENDPOINT`
-- `ODYN_TIMEOUT_SECONDS`
+- `CAPSULE_ENDPOINT`
+- `CAPSULE_TIMEOUT_SECONDS`
 
-These are already surfaced in `demo-client-enclaver/enclaver.yaml`.
+These are already surfaced in `demo-client-capsule/capsule.yaml`.
 
 ## Running in Enclave
 
 For production, deploy this demo as a Nova app through Nova Platform.
 
-In enclave mode, the same code will talk to the local enclaver/Odyn endpoint at `http://localhost:18000` instead of the public mockup service.
+In enclave mode, the same code will talk to the local capsule/Capsule endpoint at `http://localhost:18000` instead of the public mockup service.
 
 ## Directory Structure
 
 ```text
-nova-kms/demo-client-enclaver/
+nova-kms/demo-client-capsule/
 ├── Dockerfile
-├── enclaver.yaml
+├── capsule.yaml
 └── enclave/
     ├── app.py
     ├── config.py
-    ├── odyn.py
+    ├── capsule.py
     └── requirements.txt
 ```
