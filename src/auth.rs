@@ -6,13 +6,19 @@ use lru::LruCache;
 use ring::rand::{SecureRandom, SystemRandom};
 use std::num::NonZeroUsize;
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::error::KmsError;
 use crate::registry::CachedNovaRegistry;
+
+const SLOW_AUTH_STAGE_MS: u64 = 250;
+
+fn duration_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
 
 #[derive(Debug, Clone)]
 pub struct AppIdentity {
@@ -151,11 +157,48 @@ async fn lookup_and_authorize_instance(
     registry: &CachedNovaRegistry,
     wallet: &str,
 ) -> Result<(u64, u64, u64, Vec<u8>, String), KmsError> {
-    let instance = registry.get_instance_by_wallet(wallet).await?;
+    let lookup_started = Instant::now();
+    let instance_lookup_started = Instant::now();
+    let instance = match registry.get_instance_by_wallet(wallet).await {
+        Ok(instance) => instance,
+        Err(err) => {
+            let elapsed_ms = duration_ms(instance_lookup_started);
+            tracing::warn!(
+                stage = "registry.get_instance_by_wallet",
+                wallet = wallet,
+                elapsed_ms,
+                error = %err,
+                "App auth registry lookup failed"
+            );
+            return Err(err);
+        }
+    };
 
     let instance_id = instance.instance_id;
     let app_id = instance.app_id;
     let version_id = instance.version_id;
+    let instance_lookup_ms = duration_ms(instance_lookup_started);
+    if instance_lookup_ms >= SLOW_AUTH_STAGE_MS {
+        tracing::warn!(
+            stage = "registry.get_instance_by_wallet",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = instance_lookup_ms,
+            "Slow app auth registry lookup"
+        );
+    } else {
+        tracing::info!(
+            stage = "registry.get_instance_by_wallet",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = instance_lookup_ms,
+            "App auth registry lookup completed"
+        );
+    }
     if instance_id == 0 {
         return Err(KmsError::Unauthorized("Instance not found".to_string()));
     }
@@ -168,10 +211,49 @@ async fn lookup_and_authorize_instance(
         ));
     }
 
-    let (app, version) = tokio::try_join!(
+    let metadata_lookup_started = Instant::now();
+    let (app, version) = match tokio::try_join!(
         registry.get_app(app_id),
         registry.get_version(app_id, version_id)
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let elapsed_ms = duration_ms(metadata_lookup_started);
+            tracing::warn!(
+                stage = "registry.get_app+get_version",
+                wallet = wallet,
+                app_id,
+                version_id,
+                instance_id,
+                elapsed_ms,
+                error = %err,
+                "App auth registry metadata lookup failed"
+            );
+            return Err(err);
+        }
+    };
+    let metadata_lookup_ms = duration_ms(metadata_lookup_started);
+    if metadata_lookup_ms >= SLOW_AUTH_STAGE_MS {
+        tracing::warn!(
+            stage = "registry.get_app+get_version",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = metadata_lookup_ms,
+            "Slow app auth registry metadata lookup"
+        );
+    } else {
+        tracing::info!(
+            stage = "registry.get_app+get_version",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = metadata_lookup_ms,
+            "App auth registry metadata lookup completed"
+        );
+    }
     if app.status != 0 {
         return Err(KmsError::Unauthorized("App not active".to_string()));
     }
@@ -183,6 +265,29 @@ async fn lookup_and_authorize_instance(
         return Err(KmsError::Unauthorized(
             "Version not enrolled or deprecated".to_string(),
         ));
+    }
+
+    let total_ms = duration_ms(lookup_started);
+    if total_ms >= SLOW_AUTH_STAGE_MS {
+        tracing::warn!(
+            stage = "lookup_and_authorize_instance",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = total_ms,
+            "Slow app instance authorization"
+        );
+    } else {
+        tracing::info!(
+            stage = "lookup_and_authorize_instance",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = total_ms,
+            "App instance authorization completed"
+        );
     }
 
     Ok((
@@ -200,6 +305,7 @@ pub async fn authenticate_app(
     registry: &CachedNovaRegistry,
     nonce_store: &NonceStore,
 ) -> Result<AppIdentity, KmsError> {
+    let auth_started = Instant::now();
     let app_sig = headers
         .get("x-app-signature")
         .and_then(|v| v.to_str().ok())
@@ -240,7 +346,42 @@ pub async fn authenticate_app(
         }
 
         let (app_id, version_id, instance_id, tee_pubkey, tee_wallet) =
-            lookup_and_authorize_instance(registry, &recovered_wallet).await?;
+            match lookup_and_authorize_instance(registry, &recovered_wallet).await {
+                Ok(identity) => identity,
+                Err(err) => {
+                    tracing::warn!(
+                        mode = "pop",
+                        wallet = recovered_wallet,
+                        elapsed_ms = duration_ms(auth_started),
+                        error = %err,
+                        "App authentication failed during instance authorization"
+                    );
+                    return Err(err);
+                }
+            };
+
+        let total_ms = duration_ms(auth_started);
+        if total_ms >= SLOW_AUTH_STAGE_MS {
+            tracing::warn!(
+                mode = "pop",
+                wallet = recovered_wallet,
+                app_id,
+                version_id,
+                instance_id,
+                elapsed_ms = total_ms,
+                "Slow app authentication"
+            );
+        } else {
+            tracing::info!(
+                mode = "pop",
+                wallet = recovered_wallet,
+                app_id,
+                version_id,
+                instance_id,
+                elapsed_ms = total_ms,
+                "App authentication completed"
+            );
+        }
 
         return Ok(AppIdentity {
             app_id,
@@ -265,7 +406,41 @@ pub async fn authenticate_app(
         .ok_or_else(|| KmsError::Unauthorized("Missing x-tee-wallet header".to_string()))?;
     let wallet = canonical_wallet(wallet)?;
     let (app_id, version_id, instance_id, tee_pubkey, tee_wallet) =
-        lookup_and_authorize_instance(registry, &wallet).await?;
+        match lookup_and_authorize_instance(registry, &wallet).await {
+            Ok(identity) => identity,
+            Err(err) => {
+                tracing::warn!(
+                    mode = "dev-header",
+                    wallet = wallet,
+                    elapsed_ms = duration_ms(auth_started),
+                    error = %err,
+                    "App authentication failed during instance authorization"
+                );
+                return Err(err);
+            }
+        };
+    let total_ms = duration_ms(auth_started);
+    if total_ms >= SLOW_AUTH_STAGE_MS {
+        tracing::warn!(
+            mode = "dev-header",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = total_ms,
+            "Slow app authentication"
+        );
+    } else {
+        tracing::info!(
+            mode = "dev-header",
+            wallet = wallet,
+            app_id,
+            version_id,
+            instance_id,
+            elapsed_ms = total_ms,
+            "App authentication completed"
+        );
+    }
     Ok(AppIdentity {
         app_id,
         version_id,

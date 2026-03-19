@@ -2,8 +2,14 @@ use crate::error::KmsError;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::Instant;
 
 const LOCAL_CAPSULE_TIMEOUT_SECS: u64 = 3;
+const SLOW_CAPSULE_CALL_MS: u64 = 250;
+
+fn duration_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
 
 #[derive(Clone)]
 pub struct CapsuleClient {
@@ -68,45 +74,134 @@ impl CapsuleClient {
         body: Value,
     ) -> Result<T, KmsError> {
         let url = format!("{}{}", self.endpoint, path);
+        let started = Instant::now();
         let resp = self
             .client
             .post(&url)
             .json(&body)
             .send()
             .await
-            .map_err(|e| KmsError::InternalError(format!("Capsule POST {:?} err: {}", path, e)))?;
+            .map_err(|e| {
+                let elapsed_ms = duration_ms(started);
+                tracing::warn!(
+                    method = "POST",
+                    path = path,
+                    url = %url,
+                    elapsed_ms,
+                    error = %e,
+                    "Capsule API request failed"
+                );
+                KmsError::InternalError(format!("Capsule POST {:?} err: {}", path, e))
+            })?;
+
+        let elapsed_ms = duration_ms(started);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                method = "POST",
+                path = path,
+                url = %url,
+                elapsed_ms,
+                status = status.as_u16(),
+                response_body_len = text.len(),
+                "Capsule API returned non-success status"
+            );
             return Err(KmsError::InternalError(format!(
                 "Capsule POST {:?} Http {}: {}",
                 path, status, text
             )));
         }
 
+        if elapsed_ms >= SLOW_CAPSULE_CALL_MS {
+            tracing::warn!(
+                method = "POST",
+                path = path,
+                elapsed_ms,
+                "Slow Capsule API call"
+            );
+        } else {
+            tracing::info!(
+                method = "POST",
+                path = path,
+                elapsed_ms,
+                "Capsule API call completed"
+            );
+        }
+
         resp.json::<T>().await.map_err(|e| {
+            tracing::warn!(
+                method = "POST",
+                path = path,
+                elapsed_ms,
+                error = %e,
+                "Capsule API JSON decode failed"
+            );
             KmsError::InternalError(format!("Capsule POST {:?} JSON decode err: {}", path, e))
         })
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, KmsError> {
         let url = format!("{}{}", self.endpoint, path);
-        let resp =
-            self.client.get(&url).send().await.map_err(|e| {
-                KmsError::InternalError(format!("Capsule GET {:?} err: {}", path, e))
-            })?;
+        let started = Instant::now();
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            let elapsed_ms = duration_ms(started);
+            tracing::warn!(
+                method = "GET",
+                path = path,
+                url = %url,
+                elapsed_ms,
+                error = %e,
+                "Capsule API request failed"
+            );
+            KmsError::InternalError(format!("Capsule GET {:?} err: {}", path, e))
+        })?;
+
+        let elapsed_ms = duration_ms(started);
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                method = "GET",
+                path = path,
+                url = %url,
+                elapsed_ms,
+                status = status.as_u16(),
+                response_body_len = text.len(),
+                "Capsule API returned non-success status"
+            );
             return Err(KmsError::InternalError(format!(
                 "Capsule GET {:?} Http {}: {}",
                 path, status, text
             )));
         }
 
+        if elapsed_ms >= SLOW_CAPSULE_CALL_MS {
+            tracing::warn!(
+                method = "GET",
+                path = path,
+                elapsed_ms,
+                "Slow Capsule API call"
+            );
+        } else {
+            tracing::info!(
+                method = "GET",
+                path = path,
+                elapsed_ms,
+                "Capsule API call completed"
+            );
+        }
+
         resp.json::<T>().await.map_err(|e| {
+            tracing::warn!(
+                method = "GET",
+                path = path,
+                elapsed_ms,
+                error = %e,
+                "Capsule API JSON decode failed"
+            );
             KmsError::InternalError(format!("Capsule GET {:?} JSON decode err: {}", path, e))
         })
     }

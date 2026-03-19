@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use crate::auth::{
     authenticate_app, authenticate_kms_peer, current_node_signing_wallet, sign_message_for_node,
@@ -23,6 +24,40 @@ use crate::error::KmsError;
 use crate::models::DataRecord;
 use crate::state::SharedState;
 use crate::sync::{canonical_json, now_ms, validate_incoming_record_with_context, verify_hmac_hex};
+
+const SLOW_ROUTE_STAGE_MS: u64 = 250;
+
+fn duration_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn log_route_stage(route: &str, stage: &str, elapsed_ms: u64) {
+    if elapsed_ms >= SLOW_ROUTE_STAGE_MS {
+        tracing::warn!(
+            route = route,
+            stage = stage,
+            elapsed_ms,
+            "Slow KMS route stage"
+        );
+    } else {
+        tracing::info!(
+            route = route,
+            stage = stage,
+            elapsed_ms,
+            "KMS route stage completed"
+        );
+    }
+}
+
+fn log_route_failure(route: &str, stage: &str, elapsed_ms: u64, err: &KmsError) {
+    tracing::warn!(
+        route = route,
+        stage = stage,
+        elapsed_ms,
+        error = %err,
+        "KMS route stage failed"
+    );
+}
 
 pub fn app_router(state: SharedState) -> Router {
     Router::new()
@@ -404,6 +439,13 @@ async fn derive_key(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<impl IntoResponse, KmsError> {
+    let route = "/kms/derive";
+    let request_started = Instant::now();
+    tracing::info!(
+        route = route,
+        encrypted_request = is_envelope(&body),
+        "Handling protected KMS request"
+    );
     let mut response_headers = HeaderMap::new();
     let (
         service_available,
@@ -426,15 +468,36 @@ async fn derive_key(
         )
     };
     ensure_service_available(service_available, &service_unavailable_reason)?;
-    let auth = authenticate_app(
+    let auth_started = Instant::now();
+    let auth = match authenticate_app(
         &headers,
         &config,
         app_registry_cache.as_ref(),
         nonce_store.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(auth) => {
+            log_route_stage(route, "authenticate_app", duration_ms(auth_started));
+            auth
+        }
+        Err(err) => {
+            log_route_failure(route, "authenticate_app", duration_ms(auth_started), &err);
+            return Err(err);
+        }
+    };
     let expected_app_pubkey = hex::encode(&auth.tee_pubkey);
-    let payload = decode_payload(&capsule, &body, Some(&expected_app_pubkey)).await?;
+    let decode_started = Instant::now();
+    let payload = match decode_payload(&capsule, &body, Some(&expected_app_pubkey)).await {
+        Ok(payload) => {
+            log_route_stage(route, "decode_payload", duration_ms(decode_started));
+            payload
+        }
+        Err(err) => {
+            log_route_failure(route, "decode_payload", duration_ms(decode_started), &err);
+            return Err(err);
+        }
+    };
 
     let path = payload
         .get("path")
@@ -479,9 +542,36 @@ async fn derive_key(
         ));
     }
 
-    let master_secret = master_secret.get_secret().await?;
-    let derived = derive_app_key_extended(&master_secret, auth.app_id, path, context, length)?;
+    let secret_started = Instant::now();
+    let master_secret = match master_secret.get_secret().await {
+        Ok(secret) => {
+            log_route_stage(route, "get_master_secret", duration_ms(secret_started));
+            secret
+        }
+        Err(err) => {
+            log_route_failure(
+                route,
+                "get_master_secret",
+                duration_ms(secret_started),
+                &err,
+            );
+            return Err(err);
+        }
+    };
+    let derive_started = Instant::now();
+    let derived = match derive_app_key_extended(&master_secret, auth.app_id, path, context, length)
+    {
+        Ok(derived) => {
+            log_route_stage(route, "derive_app_key", duration_ms(derive_started));
+            derived
+        }
+        Err(err) => {
+            log_route_failure(route, "derive_app_key", duration_ms(derive_started), &err);
+            return Err(err);
+        }
+    };
     let derived_b64 = b64.encode(derived);
+    let sign_started = Instant::now();
     maybe_add_app_response_signature(
         &config,
         &capsule,
@@ -489,14 +579,50 @@ async fn derive_key(
         &mut response_headers,
     )
     .await;
+    log_route_stage(route, "sign_response", duration_ms(sign_started));
     let plain_resp = json!({
         "app_id": auth.app_id,
         "path": payload.get("path").and_then(|v| v.as_str()).unwrap_or_default(),
         "key": derived_b64,
         "length": length,
     });
+    let encrypt_started = Instant::now();
     let encrypted =
-        encrypt_payload(&capsule, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await?;
+        match encrypt_payload(&capsule, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await {
+            Ok(encrypted) => {
+                log_route_stage(route, "encrypt_response", duration_ms(encrypt_started));
+                encrypted
+            }
+            Err(err) => {
+                log_route_failure(
+                    route,
+                    "encrypt_response",
+                    duration_ms(encrypt_started),
+                    &err,
+                );
+                return Err(err);
+            }
+        };
+    let total_ms = duration_ms(request_started);
+    if total_ms >= SLOW_ROUTE_STAGE_MS {
+        tracing::warn!(
+            route = route,
+            app_id = auth.app_id,
+            path = path,
+            length,
+            elapsed_ms = total_ms,
+            "Slow KMS request completed"
+        );
+    } else {
+        tracing::info!(
+            route = route,
+            app_id = auth.app_id,
+            path = path,
+            length,
+            elapsed_ms = total_ms,
+            "KMS request completed"
+        );
+    }
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -569,6 +695,9 @@ async fn get_data_common(
     headers: HeaderMap,
     key: String,
 ) -> Result<Response, KmsError> {
+    let route = "/kms/data/*key";
+    let request_started = Instant::now();
+    tracing::info!(route = route, key = key, "Handling protected KMS request");
     let mut response_headers = HeaderMap::new();
     let (
         service_available,
@@ -593,23 +722,73 @@ async fn get_data_common(
         )
     };
     ensure_service_available(service_available, &service_unavailable_reason)?;
-    let auth = authenticate_app(
+    let auth_started = Instant::now();
+    let auth = match authenticate_app(
         &headers,
         &config,
         app_registry_cache.as_ref(),
         nonce_store.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(auth) => {
+            log_route_stage(route, "authenticate_app", duration_ms(auth_started));
+            auth
+        }
+        Err(err) => {
+            log_route_failure(route, "authenticate_app", duration_ms(auth_started), &err);
+            return Err(err);
+        }
+    };
+    let record_lookup_started = Instant::now();
     let ns = store.get_namespace(auth.app_id).await;
     let record = {
         let mut ns = ns.write().await;
-        ns.get(&key, now_ms())
-            .ok_or_else(|| KmsError::NotFound(format!("Key not found: {}", key)))?
+        match ns.get(&key, now_ms()) {
+            Some(record) => record,
+            None => {
+                let err = KmsError::NotFound(format!("Key not found: {}", key));
+                log_route_failure(
+                    route,
+                    "load_record",
+                    duration_ms(record_lookup_started),
+                    &err,
+                );
+                return Err(err);
+            }
+        }
     };
+    log_route_stage(route, "load_record", duration_ms(record_lookup_started));
 
-    let master_secret = master_secret.get_secret().await?;
+    let secret_started = Instant::now();
+    let master_secret = match master_secret.get_secret().await {
+        Ok(secret) => {
+            log_route_stage(route, "get_master_secret", duration_ms(secret_started));
+            secret
+        }
+        Err(err) => {
+            log_route_failure(
+                route,
+                "get_master_secret",
+                duration_ms(secret_started),
+                &err,
+            );
+            return Err(err);
+        }
+    };
     let data_key = derive_data_key(&master_secret, auth.app_id);
-    let plaintext = crate::crypto::decrypt_data(&record.encrypted_value, &data_key)?;
+    let decrypt_started = Instant::now();
+    let plaintext = match crate::crypto::decrypt_data(&record.encrypted_value, &data_key) {
+        Ok(plaintext) => {
+            log_route_stage(route, "decrypt_data", duration_ms(decrypt_started));
+            plaintext
+        }
+        Err(err) => {
+            log_route_failure(route, "decrypt_data", duration_ms(decrypt_started), &err);
+            return Err(err);
+        }
+    };
+    let sign_started = Instant::now();
     maybe_add_app_response_signature(
         &config,
         &capsule,
@@ -617,6 +796,7 @@ async fn get_data_common(
         &mut response_headers,
     )
     .await;
+    log_route_stage(route, "sign_response", duration_ms(sign_started));
     let value_b64 = b64.encode(plaintext);
     let updated_at_ms = record.updated_at_ms;
     let payload = json!({
@@ -625,8 +805,41 @@ async fn get_data_common(
         "value": value_b64,
         "updated_at_ms": updated_at_ms,
     });
+    let encrypt_started = Instant::now();
     let encrypted =
-        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+        match encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await {
+            Ok(encrypted) => {
+                log_route_stage(route, "encrypt_response", duration_ms(encrypt_started));
+                encrypted
+            }
+            Err(err) => {
+                log_route_failure(
+                    route,
+                    "encrypt_response",
+                    duration_ms(encrypt_started),
+                    &err,
+                );
+                return Err(err);
+            }
+        };
+    let total_ms = duration_ms(request_started);
+    if total_ms >= SLOW_ROUTE_STAGE_MS {
+        tracing::warn!(
+            route = route,
+            app_id = auth.app_id,
+            key = key,
+            elapsed_ms = total_ms,
+            "Slow KMS request completed"
+        );
+    } else {
+        tracing::info!(
+            route = route,
+            app_id = auth.app_id,
+            key = key,
+            elapsed_ms = total_ms,
+            "KMS request completed"
+        );
+    }
     Ok((StatusCode::OK, response_headers, Json(encrypted)).into_response())
 }
 
