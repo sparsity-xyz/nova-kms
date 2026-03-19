@@ -1139,7 +1139,11 @@ mod tests {
             nonce_rate_limit_per_minute,
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(cfg).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(cfg)
+                .await
+                .expect("test app state should initialize"),
+        ));
         app_router(state)
     }
 

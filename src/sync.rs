@@ -1565,7 +1565,11 @@ mod tests {
             ..Config::default()
         };
 
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
         node_tick(&state).await.unwrap();
 
         let s = state.read().await;
@@ -1581,7 +1585,11 @@ mod tests {
             node_url: "http://127.0.0.1:1".to_string(),
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
 
         {
             let mut s = state.write().await;
@@ -1600,7 +1608,11 @@ mod tests {
             node_url: "http://127.0.0.1:1".to_string(),
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
         let master_secret = {
             let s = state.read().await;
             Arc::clone(&s.master_secret)
@@ -1644,7 +1656,11 @@ mod tests {
             max_kv_value_size_bytes: 16,
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
 
         let mut vc = VectorClock::new();
         vc.increment("node-a");
@@ -1671,7 +1687,11 @@ mod tests {
             max_clock_skew_ms: 100,
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
 
         let mut vc = VectorClock::new();
         vc.increment("node-a");
@@ -1697,7 +1717,11 @@ mod tests {
             node_url: "http://127.0.0.1:1".to_string(),
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
         {
             let mut s = state.write().await;
             s.config.in_enclave = true;
@@ -1727,7 +1751,11 @@ mod tests {
             node_url: "http://127.0.0.1:1".to_string(),
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(config).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(config)
+                .await
+                .expect("test app state should initialize"),
+        ));
         {
             let mut s = state.write().await;
             s.config.in_enclave = true;

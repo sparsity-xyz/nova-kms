@@ -13,7 +13,7 @@ Required:
 Runtime dependencies for a real local node:
 
 - an RPC endpoint that can serve `NovaAppRegistry` and `KMSRegistry`
-- an Capsule API endpoint
+- a Capsule API endpoint
   - local dev code path uses `http://capsule.sparsity.cloud:18000`
   - enclave code path uses `http://127.0.0.1:18000`
 

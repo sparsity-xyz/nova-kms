@@ -59,7 +59,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(mut config: Config) -> Self {
+    pub async fn new(mut config: Config) -> Result<Self, KmsError> {
         if let Ok(wallet) = canonical_wallet(&config.node_wallet) {
             config.node_wallet = wallet;
         }
@@ -77,7 +77,7 @@ impl AppState {
             config.pop_timeout_seconds,
         ));
         let nonce_rate_limiter = Arc::new(TokenBucket::new(config.nonce_rate_limit_per_minute));
-        let capsule = CapsuleClient::new(config.in_enclave);
+        let capsule = CapsuleClient::new(config.in_enclave)?;
 
         // Keep node wallet bound to the signing identity currently exposed by Capsule
         // so PoP recipient binding matches the active enclave signer.
@@ -131,7 +131,7 @@ impl AppState {
             sync_key = Some(derive_sync_key(&crate::crypto::MasterSecret { bytes: arr }));
         }
 
-        Self {
+        Ok(Self {
             config,
             store: Arc::new(DataStore::new(
                 max_app_storage,
@@ -151,7 +151,7 @@ impl AppState {
             service_unavailable_reason: unavailable_reason,
             last_push_ms: 0,
             startup_time: now,
-        }
+        })
     }
 }
 

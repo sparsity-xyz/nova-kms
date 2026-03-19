@@ -43,19 +43,23 @@ pub struct DecryptRes {
 }
 
 impl CapsuleClient {
-    pub fn new(in_enclave: bool) -> Self {
+    pub fn new(in_enclave: bool) -> Result<Self, KmsError> {
         let endpoint = if in_enclave {
             "http://127.0.0.1:18000".to_string()
         } else {
             "http://capsule.sparsity.cloud:18000".to_string()
         };
-        Self {
-            endpoint,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(LOCAL_CAPSULE_TIMEOUT_SECS))
-                .build()
-                .unwrap_or_default(),
-        }
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(LOCAL_CAPSULE_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| {
+                KmsError::InternalError(format!(
+                    "Failed to build Capsule HTTP client with {}s timeout: {}",
+                    LOCAL_CAPSULE_TIMEOUT_SECS, e
+                ))
+            })?;
+
+        Ok(Self { endpoint, client })
     }
 
     async fn post<T: for<'de> Deserialize<'de>>(

@@ -11,9 +11,11 @@ ingress:
 
 egress:
   allow:
-    - "0.0.0.0/0"
-    - "::/0"
-    - "**"
+    # In enclave mode this demo talks to the local Capsule endpoint.
+    # If you override that URL to an external host, add it here explicitly.
+    - "localhost"
+    - "127.0.0.1/32"
+    - "::1/128"
 
 env:
   - IN_ENCLAVE
