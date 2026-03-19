@@ -95,7 +95,7 @@ How it is used:
 1. the app encrypts the inner JSON to the KMS node `teePubkey`
 2. the app includes its own `teePubkey` in `sender_tee_pubkey`
 3. the KMS node verifies that `sender_tee_pubkey` matches the authenticated app instance's on-chain `teePubkey`
-4. the KMS node decrypts with Odyn
+4. the KMS node decrypts with Capsule
 5. the KMS node encrypts the response back to the app `teePubkey`
 
 Plaintext JSON bodies are rejected.

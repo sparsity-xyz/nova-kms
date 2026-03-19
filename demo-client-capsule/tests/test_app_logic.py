@@ -9,7 +9,7 @@ import asyncio
 
 THIS_DIR = Path(__file__).resolve().parent
 ENCLAVE_DIR = THIS_DIR.parent / "enclave"
-_IMPORT_SCOPE_MODULES = ("config", "odyn", "app")
+_IMPORT_SCOPE_MODULES = ("config", "capsule", "app")
 
 
 @contextmanager
@@ -39,7 +39,7 @@ def _demo_enclave_import_scope():
                 sys.modules[name] = module
 
 
-class FakeOdyn:
+class FakeCapsule:
     def __init__(
         self,
         derive_key="k1",
@@ -80,7 +80,7 @@ def _load_app_module():
 def test_first_run_has_no_previous_derive_match():
     app_mod = _load_app_module()
     client = app_mod.KMSDemoClient()
-    client.odyn = FakeOdyn(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
+    client.capsule = FakeCapsule(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
 
     result = client._run_once_sync()
 
@@ -93,10 +93,10 @@ def test_second_run_detects_derive_mismatch():
     app_mod = _load_app_module()
     client = app_mod.KMSDemoClient()
 
-    client.odyn = FakeOdyn(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
+    client.capsule = FakeCapsule(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
     _ = client._run_once_sync()
 
-    client.odyn = FakeOdyn(derive_key="derived-B", read_value="123", read_found=True, put_success=True)
+    client.capsule = FakeCapsule(derive_key="derived-B", read_value="123", read_found=True, put_success=True)
     result = client._run_once_sync()
 
     assert result["derive_matches_previous"] is False
@@ -106,11 +106,11 @@ def test_failed_write_does_not_advance_last_written_value():
     app_mod = _load_app_module()
     client = app_mod.KMSDemoClient()
 
-    client.odyn = FakeOdyn(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
+    client.capsule = FakeCapsule(derive_key="derived-A", read_value=None, read_found=False, put_success=True)
     _ = client._run_once_sync()
     first_written = client._last_written_value
 
-    client.odyn = FakeOdyn(derive_key="derived-A", read_value=first_written, read_found=True, put_success=False)
+    client.capsule = FakeCapsule(derive_key="derived-A", read_value=first_written, read_found=True, put_success=False)
     try:
         client._run_once_sync()
         assert False, "Expected RuntimeError"
@@ -125,8 +125,8 @@ def test_run_once_marks_registration_pending_for_kms_authz_error():
     app_mod.request_logs.clear()
 
     client = app_mod.KMSDemoClient()
-    client.odyn = FakeOdyn(
-        derive_exc=app_mod.OdynRequestError(
+    client.capsule = FakeCapsule(
+        derive_exc=app_mod.CapsuleRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -150,8 +150,8 @@ def test_run_once_marks_transport_timeout_as_transient_failure():
     app_mod.request_logs.clear()
 
     client = app_mod.KMSDemoClient()
-    client.odyn = FakeOdyn(
-        derive_exc=app_mod.OdynTransportError(
+    client.capsule = FakeCapsule(
+        derive_exc=app_mod.CapsuleTransportError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -174,8 +174,8 @@ def test_run_once_marks_registry_discovery_rpc_failure_as_transient_failure():
     app_mod.request_logs.clear()
 
     client = app_mod.KMSDemoClient()
-    client.odyn = FakeOdyn(
-        derive_exc=app_mod.OdynRequestError(
+    client.capsule = FakeCapsule(
+        derive_exc=app_mod.CapsuleRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",
@@ -202,8 +202,8 @@ def test_run_once_marks_kms_instance_not_found_as_pending_registration():
     app_mod.request_logs.clear()
 
     client = app_mod.KMSDemoClient()
-    client.odyn = FakeOdyn(
-        derive_exc=app_mod.OdynRequestError(
+    client.capsule = FakeCapsule(
+        derive_exc=app_mod.CapsuleRequestError(
             method="POST",
             path="/v1/kms/derive",
             url="http://localhost:18000/v1/kms/derive",

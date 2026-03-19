@@ -5,14 +5,21 @@ in KMSRegistry.setMasterSecretHash().
 
 Usage:
     python scripts/diagnose_set_hash.py [TEE_WALLET_ADDRESS]
+
+Environment overrides:
+    CAPSULE_RPC_URL / HELIOS_RPC_URL
 """
 
+import os
 import sys
 from web3 import Web3
 from eth_abi import decode
 
 # ── Config ──────────────────────────────────────────────────────────────────
-RPC_URL = "http://odyn.sparsity.cloud:8545"
+RPC_URL = os.getenv(
+    "CAPSULE_RPC_URL",
+    os.getenv("HELIOS_RPC_URL", "http://capsule-runtime.sparsity.cloud:18545"),
+)
 KMS_REGISTRY = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
 NOVA_APP_REGISTRY = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"
 TEE_WALLET = sys.argv[1] if len(sys.argv) > 1 else "0xDa0573900931885acC310Eb10ec7B25B22b999F1"
@@ -211,7 +218,7 @@ print("=" * 70)
 #  1. staticcall getInstanceByWallet(sender) → check appId, teeWallet, status
 #  2. staticcall getVersion(appId, versionId) → check version status == ENROLLED
 # But the key question: in the actual on-chain call, msg.sender is the TEE wallet.
-# The TEE wallet signs via Odyn, so msg.sender = TEE wallet address.
+# The TEE wallet signs via Capsule, so msg.sender = TEE wallet address.
 
 print(f"\n  When setMasterSecretHash is called, msg.sender = {TEE_WALLET}")
 print(f"  The contract calls getInstanceByWallet({TEE_WALLET}) on NovaAppRegistry")

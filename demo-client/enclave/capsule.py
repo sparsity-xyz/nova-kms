@@ -1,6 +1,6 @@
 """
 =============================================================================
-Odyn SDK (odyn.py)
+Capsule SDK (capsule.py)
 =============================================================================
 
 Platform-provided interface to TEE (Trusted Execution Environment) services.
@@ -19,29 +19,47 @@ from typing import Dict, Any, Optional, Union
 import requests
 
 
-class Odyn:
+def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else minimum
+
+
+class Capsule:
     """
-    Wrapper for enclaver's Odyn API.
+    Wrapper for capsule's Capsule API.
 
     IN_ENCLAVE=true  → Production (localhost:18000)
     IN_ENCLAVE=false → Development (mock API)
     """
 
-    DEFAULT_MOCK_ODYN_API = "http://odyn.sparsity.cloud:18000"
+    DEFAULT_MOCK_CAPSULE_API = "http://capsule-runtime.sparsity.cloud:18000"
+    DEFAULT_TIMEOUT_SECONDS = 10.0
 
-    def __init__(self, endpoint: Optional[str] = None):
+    def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):
+        env_endpoint = os.getenv("CAPSULE_ENDPOINT", "").strip()
         if endpoint:
             self.endpoint = endpoint
+        elif env_endpoint:
+            self.endpoint = env_endpoint
         else:
             is_enclave = os.getenv("IN_ENCLAVE", "False").lower() == "true"
-            self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_ODYN_API
+            self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_CAPSULE_API
+        if timeout_seconds is None:
+            timeout_seconds = _float_env("CAPSULE_TIMEOUT_SECONDS", self.DEFAULT_TIMEOUT_SECONDS)
+        self.timeout_seconds = timeout_seconds
 
     def _call(self, method: str, path: str, payload: Any = None) -> Any:
         url = f"{self.endpoint}{path}"
         if method.upper() == "POST":
-            res = requests.post(url, json=payload, timeout=10)
+            res = requests.post(url, json=payload, timeout=self.timeout_seconds)
         else:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, timeout=self.timeout_seconds)
         res.raise_for_status()
         return res.json()
 
@@ -53,6 +71,9 @@ class Odyn:
         return self._call("GET", "/v1/eth/address")["address"]
 
     def sign_tx(self, tx: dict) -> dict:
+        # Match Capsule's expected schema: { "payload": { "kind": "structured", ... } }
+        if "kind" not in tx:
+            tx["kind"] = "structured"
         return self._call("POST", "/v1/eth/sign-tx", {"payload": tx})
 
     def sign_message(self, message: str, include_attestation: bool = False) -> dict:
@@ -86,7 +107,7 @@ class Odyn:
                 payload["user_data"] = base64.b64encode(user_data).decode("utf-8")
             else:
                 payload["user_data"] = user_data
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=self.timeout_seconds)
         res.raise_for_status()
         return res.content
 
@@ -125,7 +146,7 @@ class Odyn:
         return self._call("POST", "/v1/encryption/decrypt", payload)["plaintext"]
 
     # =========================================================================
-    # S3 Storage (via Enclaver internal API)
+    # S3 Storage (via Capsule internal API)
     # =========================================================================
 
     def s3_put(self, key: str, value: bytes, content_type: Optional[str] = None) -> bool:
@@ -167,9 +188,9 @@ class Odyn:
 
 
 if __name__ == "__main__":
-    o = Odyn()
+    c = Capsule()
     try:
-        print(f"Testing Odyn at {o.endpoint}")
-        print(f"TEE Address: {o.eth_address()}")
+        print(f"Testing Capsule at {c.endpoint}")
+        print(f"TEE Address: {c.eth_address()}")
     except Exception as e:
-        print(f"Could not connect to Odyn: {e}")
+        print(f"Could not connect to Capsule: {e}")

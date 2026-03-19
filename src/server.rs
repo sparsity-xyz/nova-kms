@@ -14,13 +14,13 @@ use std::net::SocketAddr;
 use crate::auth::{
     authenticate_app, authenticate_kms_peer, current_node_signing_wallet, sign_message_for_node,
 };
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::crypto::{
     MasterSecretManager, derive_app_key_extended, derive_data_key, seal_master_secret,
 };
 use crate::error::KmsError;
 use crate::models::DataRecord;
-use crate::odyn::OdynClient;
 use crate::state::SharedState;
 use crate::sync::{canonical_json, now_ms, validate_incoming_record_with_context, verify_hmac_hex};
 
@@ -70,7 +70,7 @@ fn ensure_service_available(
 }
 
 async fn decrypt_envelope_payload(
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     body: &Value,
     expected_sender_pubkey_hex: Option<&str>,
 ) -> Result<Value, KmsError> {
@@ -99,18 +99,18 @@ async fn decrypt_envelope_payload(
         .and_then(|v| v.as_str())
         .ok_or_else(|| KmsError::ValidationError("Missing encrypted_data".to_string()))?;
 
-    let plaintext = odyn.decrypt(nonce, sender_pub, encrypted_data).await?;
+    let plaintext = capsule.decrypt(nonce, sender_pub, encrypted_data).await?;
     serde_json::from_str(&plaintext)
         .map_err(|e| KmsError::ValidationError(format!("Invalid decrypted JSON: {}", e)))
 }
 
 async fn decode_payload(
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     body: &Value,
     expected_sender_pubkey_hex: Option<&str>,
 ) -> Result<Value, KmsError> {
     if is_envelope(body) {
-        return decrypt_envelope_payload(odyn, body, expected_sender_pubkey_hex).await;
+        return decrypt_envelope_payload(capsule, body, expected_sender_pubkey_hex).await;
     }
     Err(KmsError::ValidationError(
         "Request must be E2E encrypted. Plaintext fallback is disabled.".to_string(),
@@ -118,7 +118,7 @@ async fn decode_payload(
 }
 
 async fn encrypt_payload(
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     payload: &Value,
     receiver_pubkey_hex: Option<&str>,
 ) -> Result<Value, KmsError> {
@@ -134,9 +134,9 @@ async fn encrypt_payload(
     }
 
     let plaintext = canonical_json(payload)?;
-    let encrypted = odyn.encrypt(&plaintext, receiver_pubkey_hex).await?;
+    let encrypted = capsule.encrypt(&plaintext, receiver_pubkey_hex).await?;
     let sender_pubkey = if encrypted.enclave_public_key.is_empty() {
-        hex::encode(odyn.get_encryption_public_key_der().await?)
+        hex::encode(capsule.get_encryption_public_key_der().await?)
     } else {
         normalize_hex(&encrypted.enclave_public_key)
     };
@@ -173,12 +173,12 @@ async fn verify_sync_request_hmac(
 
 async fn maybe_add_app_response_signature(
     config: &Config,
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     client_sig: Option<&str>,
     response_headers: &mut HeaderMap,
 ) {
     if let Some(client_sig) = client_sig {
-        let current_wallet = match current_node_signing_wallet(config, odyn).await {
+        let current_wallet = match current_node_signing_wallet(config, capsule).await {
             Ok(wallet) => wallet,
             Err(err) => {
                 tracing::warn!(
@@ -189,7 +189,7 @@ async fn maybe_add_app_response_signature(
             }
         };
         let msg = format!("NovaKMS:Response:{}:{}", client_sig, current_wallet);
-        match sign_message_for_node(config, odyn, &msg).await {
+        match sign_message_for_node(config, capsule, &msg).await {
             Ok((sig, _)) => {
                 if let Ok(value) = sig.parse() {
                     response_headers.insert("X-KMS-Response-Signature", value);
@@ -206,11 +206,11 @@ async fn maybe_add_app_response_signature(
 
 async fn maybe_add_peer_response_signature(
     config: &Config,
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     caller_sig: &str,
     response_headers: &mut HeaderMap,
 ) {
-    let current_wallet = match current_node_signing_wallet(config, odyn).await {
+    let current_wallet = match current_node_signing_wallet(config, capsule).await {
         Ok(wallet) => wallet,
         Err(err) => {
             tracing::warn!(
@@ -221,7 +221,7 @@ async fn maybe_add_peer_response_signature(
         }
     };
     let msg = format!("NovaKMS:Response:{}:{}", caller_sig, current_wallet);
-    match sign_message_for_node(config, odyn, &msg).await {
+    match sign_message_for_node(config, capsule, &msg).await {
         Ok((sig, _)) => {
             if let Ok(value) = sig.parse() {
                 response_headers.insert("X-KMS-Peer-Signature", value);
@@ -281,7 +281,7 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
         service_available,
         master_secret,
         store,
-        odyn,
+        capsule,
     ) = {
         let s = state.read().await;
         (
@@ -294,7 +294,7 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
             s.service_available,
             s.master_secret.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
         )
     };
     let peer_count = peer_cache.get_peers(None).await.len();
@@ -302,7 +302,7 @@ async fn status_handler(State(state): State<SharedState>) -> Result<impl IntoRes
     let init_state = master_secret.init_state().await;
     let synced_from = master_secret.synced_from().await;
     let (total_namespaces, total_keys, total_bytes) = store.stats(now_ms()).await;
-    let tee_pubkey_hex = match odyn.get_encryption_public_key_der().await {
+    let tee_pubkey_hex = match capsule.get_encryption_public_key_der().await {
         Ok(v) => hex::encode(v),
         Err(_) => String::new(),
     };
@@ -411,7 +411,7 @@ async fn derive_key(
         config,
         app_registry_cache,
         nonce_store,
-        odyn,
+        capsule,
         master_secret,
     ) = {
         let s = state.read().await;
@@ -421,7 +421,7 @@ async fn derive_key(
             s.config.clone(),
             s.app_registry_cache.clone(),
             s.nonce_store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
             s.master_secret.clone(),
         )
     };
@@ -434,7 +434,7 @@ async fn derive_key(
     )
     .await?;
     let expected_app_pubkey = hex::encode(&auth.tee_pubkey);
-    let payload = decode_payload(&odyn, &body, Some(&expected_app_pubkey)).await?;
+    let payload = decode_payload(&capsule, &body, Some(&expected_app_pubkey)).await?;
 
     let path = payload
         .get("path")
@@ -484,7 +484,7 @@ async fn derive_key(
     let derived_b64 = b64.encode(derived);
     maybe_add_app_response_signature(
         &config,
-        &odyn,
+        &capsule,
         auth.signature.as_deref(),
         &mut response_headers,
     )
@@ -496,7 +496,7 @@ async fn derive_key(
         "length": length,
     });
     let encrypted =
-        encrypt_payload(&odyn, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await?;
+        encrypt_payload(&capsule, &plain_resp, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -525,7 +525,7 @@ async fn data_entry_get(
         app_registry_cache,
         nonce_store,
         store,
-        odyn,
+        capsule,
     ) = {
         let s = state.read().await;
         (
@@ -535,7 +535,7 @@ async fn data_entry_get(
             s.app_registry_cache.clone(),
             s.nonce_store.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
         )
     };
     ensure_service_available(service_available, &service_unavailable_reason)?;
@@ -549,7 +549,7 @@ async fn data_entry_get(
     let keys = store.keys(auth.app_id, now_ms()).await;
     maybe_add_app_response_signature(
         &config,
-        &odyn,
+        &capsule,
         auth.signature.as_deref(),
         &mut response_headers,
     )
@@ -559,7 +559,8 @@ async fn data_entry_get(
         "keys": keys,
         "count": keys.len(),
     });
-    let encrypted = encrypt_payload(&odyn, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)).into_response())
 }
 
@@ -576,7 +577,7 @@ async fn get_data_common(
         app_registry_cache,
         nonce_store,
         store,
-        odyn,
+        capsule,
         master_secret,
     ) = {
         let s = state.read().await;
@@ -587,7 +588,7 @@ async fn get_data_common(
             s.app_registry_cache.clone(),
             s.nonce_store.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
             s.master_secret.clone(),
         )
     };
@@ -611,7 +612,7 @@ async fn get_data_common(
     let plaintext = crate::crypto::decrypt_data(&record.encrypted_value, &data_key)?;
     maybe_add_app_response_signature(
         &config,
-        &odyn,
+        &capsule,
         auth.signature.as_deref(),
         &mut response_headers,
     )
@@ -624,7 +625,8 @@ async fn get_data_common(
         "value": value_b64,
         "updated_at_ms": updated_at_ms,
     });
-    let encrypted = encrypt_payload(&odyn, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)).into_response())
 }
 
@@ -641,7 +643,7 @@ async fn put_data(
         app_registry_cache,
         nonce_store,
         store,
-        odyn,
+        capsule,
         master_secret,
     ) = {
         let s = state.read().await;
@@ -652,7 +654,7 @@ async fn put_data(
             s.app_registry_cache.clone(),
             s.nonce_store.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
             s.master_secret.clone(),
         )
     };
@@ -665,7 +667,7 @@ async fn put_data(
     )
     .await?;
     let expected_app_pubkey = hex::encode(&auth.tee_pubkey);
-    let payload = decode_payload(&odyn, &body, Some(&expected_app_pubkey)).await?;
+    let payload = decode_payload(&capsule, &body, Some(&expected_app_pubkey)).await?;
 
     let key = payload
         .get("key")
@@ -712,7 +714,7 @@ async fn put_data(
 
     maybe_add_app_response_signature(
         &config,
-        &odyn,
+        &capsule,
         auth.signature.as_deref(),
         &mut response_headers,
     )
@@ -723,7 +725,8 @@ async fn put_data(
         "key": key,
         "updated_at_ms": updated_at_ms,
     });
-    let encrypted = encrypt_payload(&odyn, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -740,7 +743,7 @@ async fn delete_data(
         app_registry_cache,
         nonce_store,
         store,
-        odyn,
+        capsule,
     ) = {
         let s = state.read().await;
         (
@@ -750,7 +753,7 @@ async fn delete_data(
             s.app_registry_cache.clone(),
             s.nonce_store.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
         )
     };
     ensure_service_available(service_available, &service_unavailable_reason)?;
@@ -762,7 +765,7 @@ async fn delete_data(
     )
     .await?;
     let expected_app_pubkey = hex::encode(&auth.tee_pubkey);
-    let payload = decode_payload(&odyn, &body, Some(&expected_app_pubkey)).await?;
+    let payload = decode_payload(&capsule, &body, Some(&expected_app_pubkey)).await?;
     let key = payload
         .get("key")
         .and_then(|v| v.as_str())
@@ -780,7 +783,7 @@ async fn delete_data(
     }
     maybe_add_app_response_signature(
         &config,
-        &odyn,
+        &capsule,
         auth.signature.as_deref(),
         &mut response_headers,
     )
@@ -790,7 +793,8 @@ async fn delete_data(
         "key": key,
         "deleted": true,
     });
-    let encrypted = encrypt_payload(&odyn, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
+    let encrypted =
+        encrypt_payload(&capsule, &payload, Some(&hex::encode(&auth.tee_pubkey))).await?;
     Ok((StatusCode::OK, response_headers, Json(encrypted)))
 }
 
@@ -824,7 +828,7 @@ async fn sync_handler(
     tracing::info!("Received /sync request from {}", caller_wallet);
 
     let mut response_headers = HeaderMap::new();
-    let (config, nonce_store, peer_cache, master_secret, store, odyn) = {
+    let (config, nonce_store, peer_cache, master_secret, store, capsule) = {
         let s = state.read().await;
         (
             s.config.clone(),
@@ -832,7 +836,7 @@ async fn sync_handler(
             s.peer_cache.clone(),
             s.master_secret.clone(),
             s.store.clone(),
-            s.odyn.clone(),
+            s.capsule.clone(),
         )
     };
 
@@ -878,7 +882,7 @@ async fn sync_handler(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let payload = match decode_payload(&odyn, &body, Some(&peer.tee_pubkey)).await {
+    let payload = match decode_payload(&capsule, &body, Some(&peer.tee_pubkey)).await {
         Ok(payload) => payload,
         Err(err) => {
             tracing::warn!(
@@ -1093,11 +1097,16 @@ async fn sync_handler(
         }
     };
 
-    maybe_add_peer_response_signature(&config, &odyn, &identity.signature, &mut response_headers)
-        .await;
+    maybe_add_peer_response_signature(
+        &config,
+        &capsule,
+        &identity.signature,
+        &mut response_headers,
+    )
+    .await;
 
     let receiver_pubkey = sender_pubkey_from_envelope.unwrap_or(peer.tee_pubkey);
-    let response_body = match encrypt_payload(&odyn, &result, Some(&receiver_pubkey)).await {
+    let response_body = match encrypt_payload(&capsule, &result, Some(&receiver_pubkey)).await {
         Ok(body) => body,
         Err(err) => {
             tracing::warn!(
@@ -1130,7 +1139,11 @@ mod tests {
             nonce_rate_limit_per_minute,
             ..Config::default()
         };
-        let state = Arc::new(RwLock::new(AppState::new(cfg).await));
+        let state = Arc::new(RwLock::new(
+            AppState::new(cfg)
+                .await
+                .expect("test app state should initialize"),
+        ));
         app_router(state)
     }
 

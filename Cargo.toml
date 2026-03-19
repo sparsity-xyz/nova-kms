@@ -29,7 +29,7 @@ figment = { version = "0.10", features = ["env", "toml"] }
 chrono = { version = "0.4", features = ["serde"] }
 lru = "0.12"
 
-# HTTP Client (for Odyn, Helios etc)
+# HTTP Client (for Capsule, Helios etc)
 reqwest = { version = "0.12", features = ["json"] }
 
 # Cryptography & Security

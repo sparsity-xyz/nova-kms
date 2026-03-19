@@ -35,7 +35,12 @@ async fn main() {
     tracing::debug!("Loaded Config: {:?}", config);
 
     let bind_addr = config.bind_addr.clone();
-    let state = Arc::new(RwLock::new(AppState::new(config).await));
+    let state = Arc::new(RwLock::new(AppState::new(config).await.unwrap_or_else(
+        |err| {
+            eprintln!("Failed to initialize application state: {}", err);
+            std::process::exit(1);
+        },
+    )));
     start_background_tasks(state.clone());
     let app = app_router(state);
 

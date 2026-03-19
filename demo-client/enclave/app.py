@@ -19,7 +19,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 import config
-from odyn import Odyn
+from capsule import Capsule
 from nova_registry import NovaRegistry
 from kms_identity import verify_instance_identity, verify_response_signature
 
@@ -235,7 +235,7 @@ def _format_scan_summary(entry: dict) -> str:
 # E2E Encryption Helpers
 # =============================================================================
 
-def encrypt_json_envelope(odyn: "Odyn", plaintext_dict: dict, receiver_tee_pubkey_hex: str) -> dict:
+def encrypt_json_envelope(capsule: "Capsule", plaintext_dict: dict, receiver_tee_pubkey_hex: str) -> dict:
     """
     Encrypt a JSON payload for end-to-end encryption.
     
@@ -249,12 +249,12 @@ def encrypt_json_envelope(odyn: "Odyn", plaintext_dict: dict, receiver_tee_pubke
     plaintext_json = json.dumps(plaintext_dict)
     
     # Get our own teePubkey
-    sender_pubkey_hex = odyn.get_encryption_public_key().get("public_key_der", "")
+    sender_pubkey_hex = capsule.get_encryption_public_key().get("public_key_der", "")
     if sender_pubkey_hex.startswith("0x"):
         sender_pubkey_hex = sender_pubkey_hex[2:]
     
-    # Encrypt using Odyn (ECDH + AES-256-GCM)
-    enc_result = odyn.encrypt(plaintext_json, receiver_tee_pubkey_hex)
+    # Encrypt using Capsule (ECDH + AES-256-GCM)
+    enc_result = capsule.encrypt(plaintext_json, receiver_tee_pubkey_hex)
     
     nonce_hex = enc_result.get("nonce", "")
     if nonce_hex.startswith("0x"):
@@ -271,7 +271,7 @@ def encrypt_json_envelope(odyn: "Odyn", plaintext_dict: dict, receiver_tee_pubke
     }
 
 
-def decrypt_json_envelope(odyn: "Odyn", envelope: dict) -> dict:
+def decrypt_json_envelope(capsule: "Capsule", envelope: dict) -> dict:
     """
     Decrypt an E2E encrypted JSON envelope.
     
@@ -286,7 +286,7 @@ def decrypt_json_envelope(odyn: "Odyn", envelope: dict) -> dict:
     nonce_hex = envelope["nonce"]
     encrypted_data_hex = envelope["encrypted_data"]
     
-    plaintext = odyn.decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
+    plaintext = capsule.decrypt(nonce_hex, sender_pubkey_hex, encrypted_data_hex)
     return json.loads(plaintext)
 
 
@@ -301,7 +301,7 @@ class LogEntry(BaseModel):
 
 class KMSClient:
     def __init__(self):
-        self.odyn = Odyn()
+        self.capsule = Capsule()
         self.nova_registry: Optional[NovaRegistry] = None
         self._kms_wallet_cache: Dict[str, str] = {}  # base_url -> kms_wallet
         self._cycle_lock = asyncio.Lock()
@@ -422,7 +422,7 @@ class KMSClient:
         """
         Perform a request with full PoP authentication flow and E2E encryption:
         1. GET /nonce from KMS node
-        2. Sign (nonce + wallet + timestamp) using Odyn
+        2. Sign (nonce + wallet + timestamp) using Capsule
         3. Encrypt request body with KMS node's teePubkey (E2E)
         4. Send request with X-App-* headers
         5. Verify X-KMS-Response-Signature (H1 fix)
@@ -436,7 +436,7 @@ class KMSClient:
         
         # 2. Prepare PoP
         ts = str(int(time.time()))
-        wallet = _canonical_eth_wallet(self.odyn.eth_address())
+        wallet = _canonical_eth_wallet(self.capsule.eth_address())
         
         # Fetch KMS status (cached per node) - includes wallet and teePubkey
         status_data = self._kms_wallet_cache.get(base_url)
@@ -456,8 +456,8 @@ class KMSClient:
         # Message format: NovaKMS:AppAuth:<Nonce>:<KMS_Wallet>:<Timestamp>
         message = f"NovaKMS:AppAuth:{nonce_b64}:{kms_wallet}:{ts}"
         
-        # Sign with Odyn (auto-selects local vs enclave signing)
-        sig_res = self.odyn.sign_message(message)
+        # Sign with Capsule (auto-selects local vs enclave signing)
+        sig_res = self.capsule.sign_message(message)
         signature = sig_res["signature"]
 
         headers = {
@@ -472,7 +472,7 @@ class KMSClient:
         request_body = json
         if json is not None and kms_tee_pubkey:
             try:
-                request_body = encrypt_json_envelope(self.odyn, json, kms_tee_pubkey)
+                request_body = encrypt_json_envelope(self.capsule, json, kms_tee_pubkey)
             except Exception as exc:
                 logger.warning(f"Failed to encrypt request body: {exc}, sending plaintext")
         
@@ -509,7 +509,7 @@ class KMSClient:
             resp_data = resp.json()
             # Check if response is an encrypted envelope
             if all(k in resp_data for k in ("sender_tee_pubkey", "nonce", "encrypted_data")):
-                decrypted_data = decrypt_json_envelope(self.odyn, resp_data)
+                decrypted_data = decrypt_json_envelope(self.capsule, resp_data)
                 # Attach decrypted data to response for callers
                 resp._decrypted_json = decrypted_data
             else:
@@ -794,12 +794,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
          logger.warning(f"Helios sync warning: {e}")
 
-    # Verify Odyn connection
+    # Verify Capsule connection
     try:
-        addr = kms_client.odyn.eth_address()
+        addr = kms_client.capsule.eth_address()
         logger.info(f"Client TEE Identity: {addr}")
     except Exception as e:
-        logger.error(f"Failed to connect to Odyn: {e}")
+        logger.error(f"Failed to connect to Capsule: {e}")
     
     scheduler.add_job(
         kms_client.run_test_cycle,

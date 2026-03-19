@@ -17,13 +17,13 @@ graph TD
     Node[Nova KMS Node]
     Registry[NovaAppRegistry]
     KMSRegistry[KMSRegistry]
-    Odyn[Odyn API]
+    Capsule[Capsule API]
 
     App -->|PoP + encrypted envelope| Node
     Peer -->|PoP + encrypted envelope + HMAC| Node
     Node -->|instance/app/version reads| Registry
     Node -->|masterSecretHash read/write| KMSRegistry
-    Node -->|sign, encrypt, decrypt, RNG| Odyn
+    Node -->|sign, encrypt, decrypt, RNG| Capsule
 ```
 
 ## 2. Core Components
@@ -54,7 +54,7 @@ No OpenAPI, Swagger UI, or ReDoc routes are registered by the current router.
 
 - `Config`
 - `DataStore`
-- `OdynClient`
+- `CapsuleClient`
 - `RegistryClient`
 - `CachedNovaRegistry`
 - `NonceStore`
@@ -109,8 +109,8 @@ Every node instance has two independent identities:
 
 | Identity | Curve / format | Source | Used for |
 | --- | --- | --- | --- |
-| wallet | secp256k1 address | Odyn signing identity / `teeWalletAddress` | PoP and response signatures |
-| `teePubkey` | P-384 DER/SPKI | Odyn encryption key / `teePubkey` | request and response encryption |
+| wallet | secp256k1 address | Capsule signing identity / `teeWalletAddress` | PoP and response signatures |
+| `teePubkey` | P-384 DER/SPKI | Capsule encryption key / `teePubkey` | request and response encryption |
 
 The node treats both as independent facts and validates both:
 
@@ -173,7 +173,7 @@ Processing rules:
 1. authenticate the caller
 2. resolve the caller's expected `teePubkey`
 3. require `sender_tee_pubkey` to match that on-chain value
-4. decrypt with Odyn
+4. decrypt with Capsule
 5. process the inner JSON
 6. encrypt the response to the caller's `teePubkey`
 

@@ -1,0 +1,24 @@
+version: v1
+name: "nova-kms-client"
+target: "nitro-enclave"
+
+sources:
+  app: "."
+
+ingress:
+  - listen_port: 8000
+  - listen_port: 18001
+
+egress:
+  allow:
+    # In enclave mode this demo talks to local Helios/Capsule endpoints.
+    # If you override those URLs to external hosts, add them here explicitly.
+    - "localhost"
+    - "127.0.0.1/32"
+    - "::1/128"
+
+env:
+  - IN_ENCLAVE
+  - HELIOS_RPC_URL
+  - CAPSULE_ENDPOINT
+  - CAPSULE_TIMEOUT_SECONDS

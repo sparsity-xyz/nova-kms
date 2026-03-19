@@ -9,9 +9,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::error::KmsError;
-use crate::odyn::OdynClient;
 use crate::registry::CachedNovaRegistry;
 
 #[derive(Debug, Clone)]
@@ -325,11 +325,11 @@ pub async fn authenticate_kms_peer(
 
 pub async fn sign_message_for_node(
     config: &Config,
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
     message: &str,
 ) -> Result<(String, String), KmsError> {
     if config.in_enclave {
-        let signed = odyn.sign_message(message, false).await?;
+        let signed = capsule.sign_message(message, false).await?;
         return Ok((signed.signature, canonical_wallet(&signed.address)?));
     }
 
@@ -344,10 +344,10 @@ pub async fn sign_message_for_node(
 
 pub async fn current_node_signing_wallet(
     config: &Config,
-    odyn: &OdynClient,
+    capsule: &CapsuleClient,
 ) -> Result<String, KmsError> {
     if config.in_enclave {
-        return canonical_wallet(&odyn.eth_address().await?);
+        return canonical_wallet(&capsule.eth_address().await?);
     }
     let signer = dev_private_key_signer(config)?;
     Ok(format!("0x{}", hex::encode(signer.address().as_slice())))

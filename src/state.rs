@@ -3,36 +3,36 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
 use crate::auth::{NonceStore, canonical_wallet};
+use crate::capsule::CapsuleClient;
 use crate::config::Config;
 use crate::crypto::{MasterSecretManager, derive_sync_key};
 use crate::error::KmsError;
-use crate::odyn::OdynClient;
 use crate::rate_limiter::TokenBucket;
 use crate::registry::{CachedNovaRegistry, RegistryClient};
 use crate::store::DataStore;
 use crate::sync::PeerCache;
 
-const STARTUP_ODYN_WALLET_RETRY_ATTEMPTS: usize = 3;
-const STARTUP_ODYN_WALLET_RETRY_DELAY_MS: u64 = 1_000;
+const STARTUP_CAPSULE_WALLET_RETRY_ATTEMPTS: usize = 3;
+const STARTUP_CAPSULE_WALLET_RETRY_DELAY_MS: u64 = 1_000;
 
-async fn fetch_odyn_wallet_with_retry(odyn: &OdynClient) -> Result<String, KmsError> {
-    let attempts = STARTUP_ODYN_WALLET_RETRY_ATTEMPTS.max(1);
+async fn fetch_capsule_wallet_with_retry(capsule: &CapsuleClient) -> Result<String, KmsError> {
+    let attempts = STARTUP_CAPSULE_WALLET_RETRY_ATTEMPTS.max(1);
     let mut attempt = 1usize;
     loop {
-        match odyn.eth_address().await {
+        match capsule.eth_address().await {
             Ok(wallet) => return Ok(wallet),
             Err(err) => {
                 if attempt >= attempts {
                     return Err(err);
                 }
                 tracing::warn!(
-                    "Odyn wallet query failed at startup (attempt {}/{}): {}. Retrying in {}ms",
+                    "Capsule wallet query failed at startup (attempt {}/{}): {}. Retrying in {}ms",
                     attempt,
                     attempts,
                     err,
-                    STARTUP_ODYN_WALLET_RETRY_DELAY_MS
+                    STARTUP_CAPSULE_WALLET_RETRY_DELAY_MS
                 );
-                sleep(Duration::from_millis(STARTUP_ODYN_WALLET_RETRY_DELAY_MS)).await;
+                sleep(Duration::from_millis(STARTUP_CAPSULE_WALLET_RETRY_DELAY_MS)).await;
                 attempt += 1;
             }
         }
@@ -43,7 +43,7 @@ async fn fetch_odyn_wallet_with_retry(odyn: &OdynClient) -> Result<String, KmsEr
 pub struct AppState {
     pub config: Config,
     pub store: Arc<DataStore>,
-    pub odyn: OdynClient,
+    pub capsule: CapsuleClient,
     pub registry: RegistryClient,
     pub app_registry_cache: Arc<CachedNovaRegistry>,
     pub nonce_store: Arc<NonceStore>,
@@ -59,7 +59,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(mut config: Config) -> Self {
+    pub async fn new(mut config: Config) -> Result<Self, KmsError> {
         if let Ok(wallet) = canonical_wallet(&config.node_wallet) {
             config.node_wallet = wallet;
         }
@@ -77,23 +77,27 @@ impl AppState {
             config.pop_timeout_seconds,
         ));
         let nonce_rate_limiter = Arc::new(TokenBucket::new(config.nonce_rate_limit_per_minute));
-        let odyn = OdynClient::new(config.in_enclave);
+        let capsule = CapsuleClient::new(config.in_enclave)?;
 
-        // Keep node wallet bound to the signing identity currently exposed by Odyn
+        // Keep node wallet bound to the signing identity currently exposed by Capsule
         // so PoP recipient binding matches the active enclave signer.
         if config.in_enclave {
-            match fetch_odyn_wallet_with_retry(&odyn).await {
+            match fetch_capsule_wallet_with_retry(&capsule).await {
                 Ok(wallet) => match canonical_wallet(&wallet) {
                     Ok(canonical) => {
                         config.node_wallet = canonical;
                     }
                     Err(err) => {
-                        tracing::warn!("Failed to canonicalize Odyn wallet '{}': {}", wallet, err);
+                        tracing::warn!(
+                            "Failed to canonicalize Capsule wallet '{}': {}",
+                            wallet,
+                            err
+                        );
                     }
                 },
                 Err(err) => {
                     tracing::warn!(
-                        "Failed to read Odyn wallet at startup; falling back to configured NODE_WALLET: {}",
+                        "Failed to read Capsule wallet at startup; falling back to configured NODE_WALLET: {}",
                         err
                     );
                 }
@@ -127,14 +131,14 @@ impl AppState {
             sync_key = Some(derive_sync_key(&crate::crypto::MasterSecret { bytes: arr }));
         }
 
-        Self {
+        Ok(Self {
             config,
             store: Arc::new(DataStore::new(
                 max_app_storage,
                 tombstone_retention_ms,
                 max_tombstones_per_app,
             )),
-            odyn,
+            capsule,
             registry,
             app_registry_cache,
             nonce_store,
@@ -147,7 +151,7 @@ impl AppState {
             service_unavailable_reason: unavailable_reason,
             last_push_ms: 0,
             startup_time: now,
-        }
+        })
     }
 }
 
