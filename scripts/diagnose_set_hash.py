@@ -18,7 +18,7 @@ from eth_abi import decode
 # ── Config ──────────────────────────────────────────────────────────────────
 RPC_URL = os.getenv(
     "CAPSULE_RPC_URL",
-    os.getenv("HELIOS_RPC_URL", "http://capsule.sparsity.cloud:18545"),
+    os.getenv("HELIOS_RPC_URL", "http://capsule-runtime.sparsity.cloud:18545"),
 )
 KMS_REGISTRY = "0x934744f9D931eF72d7fa10b07CD46BCFA54e8d88"
 NOVA_APP_REGISTRY = "0x0f68E6e699f2E972998a1EcC000c7ce103E64cc8"

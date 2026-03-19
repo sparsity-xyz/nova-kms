@@ -96,7 +96,7 @@ def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
 
 
 class Capsule:
-    DEFAULT_MOCK_CAPSULE_API = "http://capsule.sparsity.cloud:18000"
+    DEFAULT_MOCK_CAPSULE_API = "http://capsule-runtime.sparsity.cloud:18000"
     DEFAULT_TIMEOUT_SECONDS = 30.0
 
     def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):

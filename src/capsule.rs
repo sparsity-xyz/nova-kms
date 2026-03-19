@@ -47,7 +47,7 @@ impl CapsuleClient {
         let endpoint = if in_enclave {
             "http://127.0.0.1:18000".to_string()
         } else {
-            "http://capsule.sparsity.cloud:18000".to_string()
+            "http://capsule-runtime.sparsity.cloud:18000".to_string()
         };
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(LOCAL_CAPSULE_TIMEOUT_SECS))

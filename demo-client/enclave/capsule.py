@@ -38,7 +38,7 @@ class Capsule:
     IN_ENCLAVE=false → Development (mock API)
     """
 
-    DEFAULT_MOCK_CAPSULE_API = "http://capsule.sparsity.cloud:18000"
+    DEFAULT_MOCK_CAPSULE_API = "http://capsule-runtime.sparsity.cloud:18000"
     DEFAULT_TIMEOUT_SECONDS = 10.0
 
     def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):

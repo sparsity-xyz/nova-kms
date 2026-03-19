@@ -47,7 +47,7 @@ This demo is the better fit when you want to run locally with the capsule mockup
 
 When `IN_ENCLAVE=false`, `demo-client-capsule/enclave/capsule.py` defaults to:
 
-- `CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000`
+- `CAPSULE_ENDPOINT=http://capsule-runtime.sparsity.cloud:18000`
 
 In that mode, your local Python process calls the public mockup service instead of a real enclave-local Capsule running on `localhost:18000`.
 
@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 ```bash
 export IN_ENCLAVE=false
-export CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000
+export CAPSULE_ENDPOINT=http://capsule-runtime.sparsity.cloud:18000
 export TEST_CYCLE_INTERVAL_SECONDS=30
 export FIXED_DERIVE_PATH=nova-kms-client/fixed-derive
 export KV_DATA_KEY=nova-kms-client/timestamp

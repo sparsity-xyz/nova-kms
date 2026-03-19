@@ -35,8 +35,8 @@ Local testing for this demo does **not** mean a fully local KMS cluster.
 
 When `IN_ENCLAVE=false`, the app can still run on your laptop because two enclave-local dependencies are replaced by remote mock services:
 
-- Capsule mock API: `http://capsule.sparsity.cloud:18000`
-- mock RPC / Helios replacement: `http://capsule.sparsity.cloud:18545`
+- Capsule mock API: `http://capsule-runtime.sparsity.cloud:18000`
+- mock RPC / Helios replacement: `http://capsule-runtime.sparsity.cloud:18545`
 
 The important identity detail is:
 
@@ -100,8 +100,8 @@ These are static constants in this demo; they are not read from environment vari
 
 ```bash
 export IN_ENCLAVE=false
-export HELIOS_RPC_URL=http://capsule.sparsity.cloud:18545
-export CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000
+export HELIOS_RPC_URL=http://capsule-runtime.sparsity.cloud:18545
+export CAPSULE_ENDPOINT=http://capsule-runtime.sparsity.cloud:18000
 ```
 
 Notes:
