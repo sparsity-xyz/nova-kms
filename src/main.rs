@@ -9,6 +9,18 @@ use nova_kms_rust::server::app_router;
 use nova_kms_rust::state::AppState;
 use nova_kms_rust::sync::{node_tick, sync_tick};
 
+fn default_log_filter(config: &Config) -> String {
+    format!(
+        concat!(
+            "nova_kms_rust={},",
+            "alloy_transport_http=warn,",
+            "jsonrpsee_server=warn,",
+            "helios=warn"
+        ),
+        config.log_level.to_lowercase()
+    )
+}
+
 #[tokio::main]
 async fn main() {
     let config = Config::load().unwrap_or_else(|err| {
@@ -17,7 +29,7 @@ async fn main() {
     });
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| format!("nova_kms_rust={}", config.log_level.to_lowercase()).into());
+        .unwrap_or_else(|_| default_log_filter(&config).into());
 
     if config.in_enclave {
         tracing_subscriber::registry()

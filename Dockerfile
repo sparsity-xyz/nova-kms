@@ -33,5 +33,5 @@ COPY --from=builder /usr/src/nova-kms-rust/target/release/nova-kms-rust /app/nov
 EXPOSE 8000
 
 ENV IN_ENCLAVE=true
-ENV RUST_LOG=info
+ENV RUST_LOG=nova_kms_rust=info,alloy_transport_http=warn,jsonrpsee_server=warn,helios=warn
 CMD ["/app/nova-kms-rust"]
