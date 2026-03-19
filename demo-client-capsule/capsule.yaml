@@ -14,3 +14,11 @@ egress:
     - "0.0.0.0/0"
     - "::/0"
     - "**"
+
+env:
+  - IN_ENCLAVE
+  - TEST_CYCLE_INTERVAL_SECONDS
+  - FIXED_DERIVE_PATH
+  - KV_DATA_KEY
+  - CAPSULE_ENDPOINT
+  - CAPSULE_TIMEOUT_SECONDS

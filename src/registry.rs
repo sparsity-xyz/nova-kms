@@ -275,17 +275,14 @@ impl RegistryClient {
         let base_fee = parse_u256_hex(base_fee_hex)?;
         let max_fee = base_fee.saturating_mul(U256::from(2u64)) + priority_fee;
 
-        let tx = json!({
-            "kind": "structured",
-            "chain_id": to_rpc_hex(chain_id),
-            "to": self.kms_registry_address,
-            "nonce": to_rpc_hex(nonce),
-            "data": set_master_secret_hash_calldata(secret_hash),
-            "value": "0x0",
-            "max_priority_fee_per_gas": to_rpc_hex(priority_fee),
-            "max_fee_per_gas": to_rpc_hex(max_fee),
-            "gas_limit": "0x493e0",
-        });
+        let tx = build_set_master_secret_hash_tx(
+            &self.kms_registry_address,
+            chain_id,
+            nonce,
+            priority_fee,
+            max_fee,
+            secret_hash,
+        );
 
         let sign_res = capsule.sign_tx(tx).await?;
         let raw_tx = extract_raw_tx(&sign_res).ok_or_else(|| {
@@ -489,6 +486,27 @@ fn set_master_secret_hash_calldata(secret_hash: [u8; 32]) -> String {
     format!("0x{}", hex::encode(data))
 }
 
+fn build_set_master_secret_hash_tx(
+    kms_registry_address: &str,
+    chain_id: U256,
+    nonce: U256,
+    priority_fee: U256,
+    max_fee: U256,
+    secret_hash: [u8; 32],
+) -> Value {
+    json!({
+        "kind": "structured",
+        "chain_id": to_rpc_hex(chain_id),
+        "to": kms_registry_address,
+        "nonce": to_rpc_hex(nonce),
+        "data": set_master_secret_hash_calldata(secret_hash),
+        "value": "0x0",
+        "max_priority_fee_per_gas": to_rpc_hex(priority_fee),
+        "max_fee_per_gas": to_rpc_hex(max_fee),
+        "gas_limit": to_rpc_hex(U256::from(300_000u64)),
+    })
+}
+
 fn parse_u256_hex(input: &str) -> Result<U256, KmsError> {
     let raw = input.trim().trim_start_matches("0x");
     U256::from_str_radix(raw, 16)
@@ -534,6 +552,33 @@ mod tests {
         assert!(data.starts_with("0x"));
         // 4-byte selector + 32-byte arg
         assert_eq!(data.len(), 2 + 36 * 2);
+    }
+
+    #[test]
+    fn test_build_set_master_secret_hash_tx_capsule_schema() {
+        let tx = build_set_master_secret_hash_tx(
+            "0x00000000000000000000000000000000000000aa",
+            U256::from(84532u64),
+            U256::from(7u64),
+            U256::from(3u64),
+            U256::from(9u64),
+            [0x11; 32],
+        );
+
+        assert_eq!(tx["kind"], "structured");
+        assert_eq!(tx["chain_id"], "0x14a34");
+        assert_eq!(tx["to"], "0x00000000000000000000000000000000000000aa");
+        assert_eq!(tx["nonce"], "0x7");
+        assert_eq!(tx["value"], "0x0");
+        assert_eq!(tx["max_priority_fee_per_gas"], "0x3");
+        assert_eq!(tx["max_fee_per_gas"], "0x9");
+        assert_eq!(tx["gas_limit"], "0x493e0");
+        assert!(tx.get("chainId").is_none());
+        assert!(tx.get("maxPriorityFeePerGas").is_none());
+        assert!(tx.get("maxFeePerGas").is_none());
+        assert!(tx.get("gas").is_none());
+        assert!(tx.get("type").is_none());
+        assert!(tx.get("from").is_none());
     }
 
     #[test]

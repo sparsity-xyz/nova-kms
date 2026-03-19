@@ -14,3 +14,9 @@ egress:
     - "0.0.0.0/0"
     - "::/0"
     - "**"
+
+env:
+  - IN_ENCLAVE
+  - HELIOS_RPC_URL
+  - CAPSULE_ENDPOINT
+  - CAPSULE_TIMEOUT_SECONDS

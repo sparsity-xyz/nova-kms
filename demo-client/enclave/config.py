@@ -5,9 +5,11 @@ Static configuration for the Nova KMS Client example.
 This client is intended to run on Nova Platform and discover KMS nodes via:
 KMSRegistry -> NovaAppRegistry.
 
-Per request: this example does not support simulation mode and does not read
-runtime parameters from environment variables. Update the constants below
-before building/deploying.
+Registry discovery parameters remain static in this file. Transport/runtime
+selection still uses environment variables such as ``IN_ENCLAVE``,
+``HELIOS_RPC_URL`` and ``CAPSULE_ENDPOINT`` in the surrounding helper modules,
+so update the constants below before building/deploying and use env vars for
+endpoint selection when needed.
 """
 
 # =============================================================================

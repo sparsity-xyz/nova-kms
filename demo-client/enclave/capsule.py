@@ -19,6 +19,17 @@ from typing import Dict, Any, Optional, Union
 import requests
 
 
+def _float_env(name: str, default: float, minimum: float = 0.1) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else minimum
+
+
 class Capsule:
     """
     Wrapper for capsule's Capsule API.
@@ -28,20 +39,27 @@ class Capsule:
     """
 
     DEFAULT_MOCK_CAPSULE_API = "http://capsule.sparsity.cloud:18000"
+    DEFAULT_TIMEOUT_SECONDS = 10.0
 
-    def __init__(self, endpoint: Optional[str] = None):
+    def __init__(self, endpoint: Optional[str] = None, timeout_seconds: Optional[float] = None):
+        env_endpoint = os.getenv("CAPSULE_ENDPOINT", "").strip()
         if endpoint:
             self.endpoint = endpoint
+        elif env_endpoint:
+            self.endpoint = env_endpoint
         else:
             is_enclave = os.getenv("IN_ENCLAVE", "False").lower() == "true"
             self.endpoint = "http://localhost:18000" if is_enclave else self.DEFAULT_MOCK_CAPSULE_API
+        if timeout_seconds is None:
+            timeout_seconds = _float_env("CAPSULE_TIMEOUT_SECONDS", self.DEFAULT_TIMEOUT_SECONDS)
+        self.timeout_seconds = timeout_seconds
 
     def _call(self, method: str, path: str, payload: Any = None) -> Any:
         url = f"{self.endpoint}{path}"
         if method.upper() == "POST":
-            res = requests.post(url, json=payload, timeout=10)
+            res = requests.post(url, json=payload, timeout=self.timeout_seconds)
         else:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, timeout=self.timeout_seconds)
         res.raise_for_status()
         return res.json()
 
@@ -89,7 +107,7 @@ class Capsule:
                 payload["user_data"] = base64.b64encode(user_data).decode("utf-8")
             else:
                 payload["user_data"] = user_data
-        res = requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=self.timeout_seconds)
         res.raise_for_status()
         return res.content
 

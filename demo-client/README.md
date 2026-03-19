@@ -101,12 +101,14 @@ These are static constants in this demo; they are not read from environment vari
 ```bash
 export IN_ENCLAVE=false
 export HELIOS_RPC_URL=http://capsule.sparsity.cloud:18545
+export CAPSULE_ENDPOINT=http://capsule.sparsity.cloud:18000
 ```
 
 Notes:
 
 - `IN_ENCLAVE=false` makes `enclave/capsule.py` use the Capsule mock endpoint.
 - `HELIOS_RPC_URL` is optional because `demo-client/enclave/chain.py` already defaults to the mock RPC outside enclave mode.
+- `CAPSULE_ENDPOINT` is optional because `demo-client/enclave/capsule.py` now also defaults to the same mock endpoint outside enclave mode.
 
 ### 4. Start the demo server
 

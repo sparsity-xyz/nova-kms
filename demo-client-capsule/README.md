@@ -137,6 +137,7 @@ If you need to test authorization or policy decisions for your own app identity,
 
 The following environment variables are supported:
 
+- `IN_ENCLAVE`
 - `TEST_CYCLE_INTERVAL_SECONDS`
 - `FIXED_DERIVE_PATH`
 - `KV_DATA_KEY`
