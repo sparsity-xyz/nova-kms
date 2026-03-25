@@ -2,6 +2,52 @@
 
 This document describes how a Nova app instance talks to the current Rust KMS node.
 
+## Connection Flow Overview
+
+```mermaid
+sequenceDiagram
+    participant App as Nova App Instance
+    participant Registry as NovaAppRegistry (On-Chain)
+    participant KMS as KMS Node
+
+    Note over App,Registry: 1. Discover Target KMS Node
+    App->>Registry: Query KMS instances by KMS_APP_ID
+    Registry-->>App: instanceUrl, teeWalletAddress, teePubkey,<br/>status, zkVerified, versionId
+    App->>App: Select node (ACTIVE, zkVerified=true)
+
+    Note over App,KMS: 2. Check Liveness & Readiness
+    App->>KMS: GET /health
+    KMS-->>App: 200 OK (process alive)
+    App->>KMS: GET /status
+    KMS-->>App: node.service_available = true
+
+    Note over App,KMS: 3. Fetch a Nonce
+    App->>KMS: GET /nonce
+    KMS-->>App: { nonce: "<base64>" }
+
+    Note over App,KMS: 4. Build App PoP Signature
+    App->>App: Sign message with app wallet:<br/>"NovaKMS:AppAuth:<nonce>:<kms_wallet>:<timestamp>"
+
+    Note over App,KMS: 5. Encrypt Inner Payload
+    App->>App: Encrypt request JSON to KMS teePubkey<br/>Build envelope: { sender_tee_pubkey, nonce, encrypted_data }
+
+    Note over App,KMS: 6. Send Authenticated & Encrypted Request
+    App->>KMS: POST /kms/derive (or /kms/data)<br/>Headers: x-app-signature, x-app-nonce,<br/>x-app-timestamp, x-app-wallet
+    KMS->>KMS: Verify PoP (timestamp, nonce, signature)
+    KMS->>KMS: Verify sender_tee_pubkey matches on-chain record
+    KMS->>KMS: Decrypt request with Capsule
+
+    Note over App,KMS: 7. Encrypted Response
+    KMS->>KMS: Process request (derive / KV op)
+    KMS->>KMS: Encrypt response to App teePubkey
+    KMS->>KMS: Sign response:<br/>"NovaKMS:Response:<client_sig>:<kms_wallet>"
+    KMS-->>App: Encrypted envelope + X-KMS-Response-Signature
+
+    Note over App: 8. Verify & Decrypt Response
+    App->>App: Recover signer from X-KMS-Response-Signature<br/>Verify signer == target KMS wallet
+    App->>App: Decrypt response envelope with own key
+```
+
 ## 1. Discover The Target KMS Node
 
 Use `NovaAppRegistry` as the source of truth.
